@@ -53,6 +53,31 @@ describe('realSys', () => {
     assert.equal(sys.exists(join(dir, 'g')), true);
   });
 
+  it('claims a file only once, says when it changed, and replaces one whole', () => {
+    const lock = join(dir, 'lock');
+    assert.equal(sys.claim(lock), true);
+    assert.equal(sys.claim(lock), false);
+    assert.throws(() => sys.claim(join(dir, 'no', 'such', 'lock')), /ENOENT/);
+    assert.ok((sys.modified(lock)?.getTime() ?? 0) > Date.now() - 60_000);
+    assert.equal(sys.modified(join(dir, 'none')), undefined);
+    const record = join(dir, 'record');
+    sys.replace(record, 'one\n');
+    sys.replace(record, 'two\n');
+    assert.equal(sys.read(record), 'two\n');
+    assert.throws(() => sys.replace(join(dir, 'no', 'record'), 'x'), /ENOENT/);
+    sys.mkdir(join(dir, 'taken'));
+    assert.throws(() => sys.replace(join(dir, 'taken'), 'x'));
+  });
+
+  it('starts a command that outlives it, its output in the log', async () => {
+    const log = join(dir, 'detached.log');
+    sys.write(log, 'before\n');
+    sys.detach('sh', ['-c', 'echo "out $(pwd -P)"; echo err >&2'], { cwd: dir, log });
+    for (let tries = 0; tries < 100 && !/err/.test(sys.read(log)); tries++) await new Promise((done) => setTimeout(done, 20));
+    assert.equal(sys.read(log).split('\n').filter(Boolean).sort().join('|'), ['before', 'err', `out ${realpathSync(dir)}`].sort().join('|'));
+    assert.throws(() => sys.detach('sh', [], { cwd: dir, log: join(dir, 'no', 'log') }), /ENOENT/);
+  });
+
   it('makes a private temporary folder and removes it with what is in it', () => {
     const temp = sys.tempDir();
     assert.equal(statSync(temp).mode & 0o777, 0o700);

@@ -325,6 +325,29 @@ export class FakeSys implements Sys {
     this.dirs = this.dirs.filter((dir) => dir !== path && !dir.startsWith(`${path}/`));
   }
 
+  /** When each file last changed, where a test set one; others read as now. */
+  mtimes = new Map<string, Date>();
+  claim(path: string): boolean {
+    if (this.files.has(path)) return false;
+    this.files.set(path, '');
+    return true;
+  }
+
+  modified(path: string): Date | undefined {
+    return this.files.has(path) ? (this.mtimes.get(path) ?? this.now()) : undefined;
+  }
+
+  replaced: string[] = [];
+  replace(path: string, data: string): void {
+    this.replaced.push(path);
+    this.files.set(path, data);
+  }
+
+  detached: { command: string; args: readonly string[]; cwd: string; log: string }[] = [];
+  detach(command: string, args: readonly string[], options: { cwd: string; log: string }): void {
+    this.detached.push({ command, args, cwd: options.cwd, log: options.log });
+  }
+
   http(url: string, options: { method?: string; token?: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {}): Promise<HttpResult> {
     const method = options.method ?? 'GET';
     this.requests.push({

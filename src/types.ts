@@ -55,6 +55,17 @@ export interface Sys {
   tempDir(prefix?: string): string;
   /** Deletes a file or folder and all in it; nothing there is fine. */
   remove(path: string): void;
+  /** Creates an empty file only when nothing is at `path`: true when this call made it, false when it was there. */
+  claim(path: string): boolean;
+  /** When the file at `path` last changed; undefined when there is none. */
+  modified(path: string): Date | undefined;
+  /** Writes `path` whole or not at all: a crash leaves the old contents or the new ones. */
+  replace(path: string, data: string): void;
+  /**
+   * Starts a command that outlives this process, in its own session, with no
+   * standard input and its output appended to the file `log`.
+   */
+  detach(command: string, args: readonly string[], options: { cwd: string; log: string; env?: Record<string, string | undefined> }): void;
   /**
    * With timeoutMs, rejects with an error named TimeoutError once that long has passed. A request that gets no
    * answer rejects with an error naming its method, host and path and why; GET, PUT and DELETE are tried once

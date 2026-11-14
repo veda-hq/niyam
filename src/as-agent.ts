@@ -49,23 +49,11 @@ export function asAgentArgs(args: readonly string[]): { sessionId: string; comma
  * a fallback.
  */
 export function asAgent(sys: Sys, io: Output, parsed: ReturnType<typeof asAgentArgs>): number {
-  const locked = (reason: string): number => {
-    io.err(refusal(reason));
+  const env = agentEnv(sys, parsed.sessionId);
+  if ('problem' in env) {
+    io.err(refusal(env.problem));
     return LOCKED;
-  };
-  if (!sessionRecord(sys.home, parsed.sessionId)) return locked(`"${parsed.sessionId}" is not a Claude Code session id`);
-  const recorded = recordedAgent(sys, parsed.sessionId);
-  if ('problem' in recorded) return locked(recorded.problem);
-  let agents: readonly string[];
-  try {
-    agents = loadSettings(sys, repoRoot(sys)).agents;
-  } catch (error) {
-    return locked(message(error));
   }
-  if (!anyLogin(agents, recorded.agent)) return locked(`session-start recorded ${recorded.agent}, and the repo's settings name the agents ${either(agents)}`);
-
-  const env = sys.env.CLAUDE_CODE_REMOTE === 'true' ? cloudEnv(sys, recorded.agent) : macEnv(sys, recorded.agent);
-  if ('problem' in env) return locked(env.problem);
   const result = sys.exec(parsed.command, parsed.args, { env: env.env, interactive: true });
   // With standard error passed through, what is left is why the command could not start.
   if (result.stderr) io.err(`niyam as-agent: ${parsed.command}: ${result.stderr.trim()}`);
@@ -73,6 +61,27 @@ export function asAgent(sys: Sys, io: Output, parsed: ReturnType<typeof asAgentA
 }
 
 type Env = { env: Record<string, string> } | { problem: string };
+
+/**
+ * The environment `as-agent` gives its command for the session, with every
+ * check it makes: session-start recorded one of the repo settings' agents
+ * for this session, and the agent's token is in the store (or, in a cloud
+ * session, the proxy's). A hook that reaches GitHub itself, such as
+ * pr-autocreate's, takes its token from here.
+ */
+export function agentEnv(sys: Sys, sessionId: string, root?: string): Env {
+  if (!sessionRecord(sys.home, sessionId)) return { problem: `"${sessionId}" is not a Claude Code session id` };
+  const recorded = recordedAgent(sys, sessionId);
+  if ('problem' in recorded) return recorded;
+  let agents: readonly string[];
+  try {
+    agents = loadSettings(sys, root ?? repoRoot(sys)).agents;
+  } catch (error) {
+    return { problem: message(error) };
+  }
+  if (!anyLogin(agents, recorded.agent)) return { problem: `session-start recorded ${recorded.agent}, and the repo's settings name the agents ${either(agents)}` };
+  return sys.env.CLAUDE_CODE_REMOTE === 'true' ? cloudEnv(sys, recorded.agent) : macEnv(sys, recorded.agent);
+}
 
 /**
  * The agent's variable before P-55, which an older release's shell may still
