@@ -412,8 +412,8 @@ export async function applyTypes(sys: Sys, io: Output, token: string, plan: Type
   io.out(`✓ issue types in ${org}: ${names(ISSUE_TYPES)}`);
   const archived = [...new Set(plan.held.map((issue) => issue.repo))];
   return [
-    ...(archived.length > 0 ? [`issue types: unarchive ${archived.join(', ')}, then niyam onboard again, to retype ${plan.held.map((issue) => `${issue.repo}#${issue.number}`).join(', ')}`] : []),
-    ...(plan.late.length > 0 ? [`issue types: niyam onboard again, to retype ${plan.late.map((issue) => `${issue.repo}#${issue.number}`).join(', ')}, found after the plan`] : []),
+    ...(archived.length > 0 ? [`Once: unarchive ${archived.join(', ')}, then run niyam onboard again, so it retypes ${plan.held.map((issue) => `${issue.repo}#${issue.number}`).join(', ')}.`] : []),
+    ...(plan.late.length > 0 ? [`Once: run niyam onboard again, so it retypes ${plan.late.map((issue) => `${issue.repo}#${issue.number}`).join(', ')}, which it found after showing its plan.`] : []),
   ];
 }
 

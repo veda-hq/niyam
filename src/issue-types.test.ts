@@ -108,7 +108,7 @@ describe('typesPlan', () => {
     assert.ok(!sys.requests.some((request) => request.method === 'PATCH' && request.url.includes(OTHER)));
     assert.ok(out.includes(`- ${OTHER}#2 keeps Bug: ${OTHER} is archived, which GitHub keeps read-only`));
     assert.ok(out.includes('- left Bug enabled in example-org, since an issue onboard did not retype holds it'));
-    assert.deepEqual(byHand, [`issue types: unarchive ${OTHER}, then niyam onboard again, to retype ${OTHER}#2`]);
+    assert.deepEqual(byHand, [`Once: unarchive ${OTHER}, then run niyam onboard again, so it retypes ${OTHER}#2.`]);
   });
 
   it('adds the work model types missing and enables those disabled, and lists no type when no other exists', async () => {
@@ -258,7 +258,7 @@ describe('withinApproved', () => {
     assert.deepEqual(board.disabledTypes, ['Feature']);
     assert.ok(!sys.requests.some((request) => request.method === 'PATCH'));
     assert.ok(out.includes(`- ${OTHER}#2 keeps Task: onboard found it after showing its plan`));
-    assert.deepEqual(byHand, [`issue types: niyam onboard again, to retype ${SLUG}#1, ${OTHER}#2, ${OTHER}#3, found after the plan`]);
+    assert.deepEqual(byHand, [`Once: run niyam onboard again, so it retypes ${SLUG}#1, ${OTHER}#2, ${OTHER}#3, which it found after showing its plan.`]);
   });
 
   it('rejects as GitHub does when a call fails', async () => {

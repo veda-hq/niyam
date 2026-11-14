@@ -1,5 +1,5 @@
 import { API, isNoToken } from './agent.ts';
-import { SETUP_FIRST, workflowPins } from './onboard.ts';
+import { CLAUDE_CODE_WEB, SETUP_FIRST, workflowPins } from './onboard.ts';
 import { PRODUCT, tarballName } from './names.ts';
 import type { Output, Sys } from './types.ts';
 import { CLOUD_SETUP_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
@@ -196,11 +196,23 @@ export function cloudSetupSnippet(): string {
   ].join('\n');
 }
 
-/** Prints the Setup snippet for a Claude cloud environment, with what else agent sessions there need. */
+/**
+ * What `cloud-setup` says above the snippet, as comment lines of the script
+ * itself: `niyam cloud-setup | pbcopy` copies them with it, and the Setup
+ * field keeps them, so nothing is said on standard error behind a pipe.
+ */
+export function cloudSetupHelp(): string[] {
+  return [
+    `# Paste all of this at the top of the Claude cloud environment's Setup script, once (${CLAUDE_CODE_WEB} → the environment's settings).`,
+    `# It runs the clone's ${CLOUD_SETUP_PATH}, which niyam onboard keeps at the version the repo pins, so a new release needs no new paste.`,
+    `# ${SETUP_FIRST}`,
+    `# Cloud sessions also need claude.ai's GitHub connected as the agent the repo's settings name: ${CLAUDE_CODE_WEB}.`,
+  ];
+}
+
+/** Prints the Setup snippet for a Claude cloud environment, its instructions in comment lines at the top. */
 export function cloudSetup(io: Output): number {
-  io.err(
-    `niyam: paste this into the Claude cloud environment's Setup script, once; it runs ${CLOUD_SETUP_PATH}, which niyam onboard writes, so a new release needs no new paste. Connect claude.ai's GitHub as the agent account the repo's settings name. ${SETUP_FIRST}`,
-  );
-  io.out(cloudSetupSnippet().trimEnd());
+  const [shebang, ...rest] = cloudSetupSnippet().trimEnd().split('\n');
+  io.out([shebang, ...cloudSetupHelp(), ...rest].join('\n'));
   return 0;
 }

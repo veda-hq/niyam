@@ -193,8 +193,9 @@ describe('onboard', () => {
       `└  ${PULL_URL}  merges itself when checks pass`,
       '',
       'By hand:',
-      `  review routine → https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md`,
-      "  cloud sessions, once: claude.ai's GitHub as ExampleBot, Setup script from niyam cloud-setup, first",
+      `  Once for example-org/example-app: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ExampleBot and the prompt below the line in https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
+      '  Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.',
+      "  Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings.",
     ]);
     assert.deepEqual(sys.chosen, ['Go ahead?'], 'one question');
     assert.deepEqual(sys.opened, ['https://github.com/login/device'], 'the browser opens at the sign-in');
@@ -316,7 +317,7 @@ describe('onboard', () => {
     assert.ok(planned(out, 'Pull request').includes(`cloud-setup.sh: new, installs v${packageVersion()}, process-rules/cloud-setup.sh deleted`), out.join('\n'));
     assert.equal(repo(sys).get(CLOUD), CLOUD_FILE);
     assert.equal(repo(sys).has(OLD_CLOUD), false);
-    assert.ok(byHand(out).includes("cloud sessions, once: claude.ai's GitHub as ExampleBot, Setup script from niyam cloud-setup, first"), out.join('\n'));
+    assert.ok(byHand(out).includes("Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings."), out.join('\n'));
   });
 
   it('reads nothing from the settings file and workflow before niyam, and leaves them where they are (P-57)', async () => {
@@ -950,7 +951,7 @@ describe('onboard', () => {
     sys.files.set(PRE_PUSH, '#!/bin/sh\nnpm test\n');
     const { out } = await run(sys);
     assert.deepEqual(planned(out, 'This Mac'), []);
-    assert.ok(byHand(out).includes('add niyam pre-push "$@" → .git/hooks/pre-push'), out.join('\n'));
+    assert.ok(byHand(out).includes('Once on this Mac: add the line `niyam pre-push "$@"` to the pre-push git hook .git/hooks/pre-push, which is your own.'), out.join('\n'));
     assert.ok(opened(sys)?.body.includes('\n- Add the line `niyam pre-push "$@"` to the pre-push git hook .git/hooks/pre-push, which is your own.\n'), 'the pull request lists it too');
     assert.equal(sys.files.get(PRE_PUSH), '#!/bin/sh\nnpm test\n');
   });
@@ -966,7 +967,7 @@ describe('onboard', () => {
     const sys = fresh();
     sys.execOverride = (call) => (call.args[1] === '--git-path' ? { code: 0, stdout: '/shared/hooks/pre-push\n', stderr: '' } : undefined);
     const { out } = await run(sys);
-    assert.ok(byHand(out).includes('add niyam pre-push "$@" → /shared/hooks/pre-push'), out.join('\n'));
+    assert.ok(byHand(out).includes('Once on this Mac: add the line `niyam pre-push "$@"` to the pre-push git hook /shared/hooks/pre-push, which git runs from outside this repository.'), out.join('\n'));
     assert.ok(!sys.files.has('/shared/hooks/pre-push'));
   });
 
@@ -974,7 +975,7 @@ describe('onboard', () => {
     for (const text of ['#!/bin/sh\n# TODO: niyam pre-push\n', '#!/bin/sh\nnpm test\n  process-rules pre-push "$@"\n']) {
       const sys = fresh();
       sys.files.set(PRE_PUSH, text);
-      assert.ok(byHand((await run(sys)).out).includes('add niyam pre-push "$@" → .git/hooks/pre-push'), text);
+      assert.ok(byHand((await run(sys)).out).includes('Once on this Mac: add the line `niyam pre-push "$@"` to the pre-push git hook .git/hooks/pre-push, which is your own.'), text);
     }
     const ours = fresh();
     ours.files.set(PRE_PUSH, '#!/bin/sh\nnpm test\n  niyam pre-push "$@"\n');
@@ -1571,7 +1572,7 @@ describe('staged adoption', () => {
     assert.deepEqual(planned(out, 'This Mac'), ['pre-push hook: new']);
     assert.ok(out.includes(`└  ${PULL_URL}  merges itself when checks pass`));
     assert.deepEqual([...sys.committed.keys()], ['.github/niyam.json', '.claude/settings.json', CLOUD_SETUP_PATH]);
-    assert.deepEqual(byHand(out), ["cloud sessions, once: claude.ai's GitHub as ExampleBot, Setup script from niyam cloud-setup, first"]);
+    assert.deepEqual(byHand(out), ['Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.', "Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings."]);
     assert.deepEqual(sys.chosen, ['Go ahead?']);
   });
 
@@ -1678,7 +1679,7 @@ describe('staged adoption', () => {
     sys.files.set(WORKFLOW, own);
     const { out } = await run(sys);
     assert.equal(repo(sys).get(WORKFLOW), own);
-    assert.ok(byHand(out).includes('pass FIGMA_LIBRARY in niyam, niyam-weekly, niyam-merged, niyam-asks → .github/workflows/niyam.yml'), out.join('\n'));
+    assert.ok(byHand(out).includes('Once for example-org/example-app: in .github/workflows/niyam.yml, add FIGMA_LIBRARY: ${{ secrets.FIGMA_LIBRARY }} under the secrets of niyam, niyam-weekly, niyam-merged, niyam-asks, so the design check runs there.'), out.join('\n'));
     assert.ok(opened(sys) === undefined || opened(sys)?.body.includes('pass the shared checks no FIGMA_LIBRARY secret'));
     // A workflow the pull request replaces passes it: nothing to do by hand then, though the plan was made without the branch.
     const replaced = fresh();
@@ -1710,7 +1711,7 @@ describe('staged adoption', () => {
     const sys = fresh();
     sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity'], figma: { library: 'x; rm -rf ~' } }));
     const { out } = await run(sys);
-    assert.ok(byHand(out).includes("FIGMA_LIBRARY secret: the design library's file key → https://github.com/example-org/example-app/settings/secrets/actions"), out.join('\n'));
+    assert.ok(byHand(out).includes("Once for example-org/example-app: add the Actions secret FIGMA_LIBRARY, the design library's Figma file key, at https://github.com/example-org/example-app/settings/secrets/actions."), out.join('\n'));
     assert.deepEqual(planned(out, 'GitHub'), []);
     assert.ok(!out.some((line) => line.includes('gh secret set')));
     assert.ok(!sys.requests.some((r) => r.url.includes('/actions/secrets')), 'nothing that is not a file key is stored as one');
@@ -1841,10 +1842,10 @@ describe('the plan and its one question', () => {
     assert.deepEqual({ code, err }, { code: 0, err: [] });
     assert.equal(board.autoMerge, undefined, 'not asked for');
     assert.ok(out.includes(`└  Merge ${PULL_URL}`));
-    assert.equal(byHand(out)[0], 'auto-merge: turn on Allow auto-merge → https://github.com/example-org/example-app/settings, or merge it yourself');
+    assert.equal(byHand(out)[0], `Now: turn on Allow auto-merge at https://github.com/example-org/example-app/settings, or merge ${PULL_URL} yourself once its checks pass.`);
     for (const [refusal, line] of [
-      ['Pull request is in clean status', 'auto-merge: GitHub refused (Pull request is in clean status); merge it yourself'],
-      ['Pull request Auto merge is not allowed for this repository', 'auto-merge: turn on Allow auto-merge → https://github.com/example-org/example-app/settings, or merge it yourself'],
+      ['Pull request is in clean status', `Now: merge ${PULL_URL} yourself once its checks pass, since GitHub refused auto-merge (Pull request is in clean status).`],
+      ['Pull request Auto merge is not allowed for this repository', `Now: turn on Allow auto-merge at https://github.com/example-org/example-app/settings, or merge ${PULL_URL} yourself once its checks pass.`],
     ]) {
       const sys = fresh();
       new Board(sys).autoMergeRefusal = refusal;
@@ -1860,10 +1861,10 @@ describe('the plan and its one question', () => {
     const cut = await run(down);
     assert.deepEqual({ code: cut.code, err: cut.err }, { code: 0, err: [] });
     assert.ok(cut.out.includes(`└  Merge ${PULL_URL}`));
-    assert.equal(byHand(cut.out)[0], 'auto-merge: GitHub refused (POST api.github.com/graphql could not be made: ECONNRESET); merge it yourself');
+    assert.equal(byHand(cut.out)[0], `Now: merge ${PULL_URL} yourself once its checks pass, since GitHub refused auto-merge (POST api.github.com/graphql could not be made: ECONNRESET).`);
     const none = fresh();
     none.route('GET', REPO, { status: 200, json: { ...repoJson(), allow_squash_merge: false, allow_rebase_merge: false, allow_merge_commit: false } });
-    assert.equal(byHand((await run(none)).out)[0], 'auto-merge: GitHub refused (example-org/example-app allows no merge method); merge it yourself');
+    assert.equal(byHand((await run(none)).out)[0], `Now: merge ${PULL_URL} yourself once its checks pass, since GitHub refused auto-merge (example-org/example-app allows no merge method).`);
   });
 
   it('prints the plan and changes nothing with --dry-run, with no terminal too', async () => {
@@ -1983,7 +1984,7 @@ describe('the plan and its one question', () => {
     assert.equal(code, 0);
     assert.ok(!board.operations.includes('copyProjectV2'), 'not replaced');
     assert.equal(board.project?.closed, undefined);
-    assert.equal(byHand(out)[0], `Type on Needs you, group 2 views, auto-archive → ${URL}`);
+    assert.equal(byHand(out)[0], `Once for the board: at ${URL}, add the Type column to Needs you, group Work items by Step and Decisions by Decision, and set the Auto-archive items workflow to is:closed updated:<@today-7d, which GitHub's API cannot.`);
     assert.ok(opened(sys)?.body.includes('  - Finish the Project'), 'the checklist is in the pull request');
   });
 });
@@ -2052,7 +2053,7 @@ describe("onboard's pull request", () => {
     assert.match((patched?.body as { body: string }).body, /Running onboard again updates this pull request\.$/);
     assert.equal((patched?.body as { title: string }).title, `chore(niyam): onboard at v${packageVersion()}`, 'an older title is made conventional');
     assert.ok(out.includes('└  Merge https://github.com/example-org/example-app/pull/5'), 'no id from the open list: the owner merges it');
-    assert.ok(byHand(out).includes('auto-merge: GitHub refused (GitHub gave no id for the pull request); merge it yourself'), out.join('\n'));
+    assert.ok(byHand(out).includes('Now: merge https://github.com/example-org/example-app/pull/5 yourself once its checks pass, since GitHub refused auto-merge (GitHub gave no id for the pull request).'), out.join('\n'));
   });
 
   it('asks for no onboard pull request from the branch before P-56, and pushes to niyam/onboard (P-57)', async () => {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { CLOUD_DIR, CLOUD_NODE, CLOUD_NODE_SHA256, FROM_SETUP, INSTALL_FAILED as FAILED, PROXY_TOKEN, cloudRepoScript, cloudScriptVersion, cloudSetup, cloudSetupSnippet, cloudToken, fileFromSetup, ranFromSetup, releaseTarball, repoReleases } from './cloud.ts';
+import { CLOUD_DIR, CLOUD_NODE, CLOUD_NODE_SHA256, FROM_SETUP, INSTALL_FAILED as FAILED, PROXY_TOKEN, cloudRepoScript, cloudScriptVersion, cloudSetup, cloudSetupHelp, cloudSetupSnippet, cloudToken, fileFromSetup, ranFromSetup, releaseTarball, repoReleases } from './cloud.ts';
 import { CLOUD_SETUP_068 } from './older-texts.test.ts';
 import { workflow } from './onboard.ts';
 import { FakeSys, capture } from './fake.test.ts';
@@ -273,12 +273,19 @@ describe('cloudSetupSnippet', () => {
 });
 
 describe('cloudSetup', () => {
-  it('prints the Setup snippet, and what else agent sessions need', () => {
+  it('prints the Setup snippet with its instructions as comment lines on standard output, and nothing on standard error (#333)', () => {
     const { io, out, err } = capture();
     assert.equal(cloudSetup(io), 0);
-    assert.deepEqual(out, [cloudSetupSnippet().trimEnd()]);
-    assert.match(err[0] ?? '', /Setup script, once; it runs \.github\/niyam\/cloud-setup\.sh, which niyam onboard writes, so a new release needs no new paste/);
-    assert.match(err[0] ?? '', /Connect claude\.ai's GitHub as the agent account/);
-    assert.match(err[0] ?? '', /its own Setup script, put this first, then the repo's own: a repo's script may end with exit/);
+    assert.deepEqual(err, [], 'nothing hidden behind a pipe');
+    assert.equal(out.length, 1);
+    const lines = (out[0] as string).split('\n');
+    const snippet = cloudSetupSnippet().trimEnd().split('\n');
+    assert.deepEqual(lines, [snippet[0], ...cloudSetupHelp(), ...snippet.slice(1)], 'the shebang first, then the instructions, then the snippet');
+    assert.ok(cloudSetupHelp().every((line) => line.startsWith('# ')), 'each instruction a comment, so the pasted script runs as before');
+    const help = cloudSetupHelp().join('\n');
+    assert.match(help, /Paste all of this at the top of the Claude cloud environment's Setup script, once \(https:\/\/claude\.ai\/code/);
+    assert.match(help, /runs the clone's \.github\/niyam\/cloud-setup\.sh, which niyam onboard keeps at the version the repo pins/);
+    assert.match(help, /its own Setup script, put this first, then the repo's own: a repo's script may end with exit/);
+    assert.match(help, /claude\.ai's GitHub connected as the agent the repo's settings name/);
   });
 });

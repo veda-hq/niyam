@@ -347,7 +347,17 @@ Claude cloud sessions below).
    run asks you to name the owner. Without a terminal, `onboard` refuses
    unless given `--yes` or `--dry-run`. After the yes it shows one line per step, a
    spinner while it works, and ends with the pull request and a short "By
-   hand:" list of what GitHub's API cannot do.
+   hand:" list of what GitHub's and Claude's APIs cannot do. Each line there
+   is one sentence on standard output saying the whole step: how often (now,
+   once for the repository, once per claude.ai account), what to do, and its
+   link. A first onboarding with the review routine ends:
+
+   ```
+   By hand:
+     Once for owner/repo: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as AGENT and the prompt below the line in https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
+     Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as AGENT (or change it at https://claude.ai/customize/connectors); skip it if done.
+     Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings.
+   ```
 
    It writes `.github/niyam.json`, adds to `.claude/settings.json`
    the lock in `env`, a SessionStart hook running `niyam session-start`, a
@@ -1101,6 +1111,9 @@ cloned and before Claude Code starts, installs the CLI. Claude Code has no
 API or CLI for that field, so you paste it once, by hand, and it names no
 version: `niyam cloud-setup` prints a short snippet that finds the
 clone and runs its `.github/niyam/cloud-setup.sh`, with `NIYAM_SETUP` set.
+Its instructions are comment lines at the top of the snippet, on standard
+output with it, so `niyam cloud-setup | pbcopy` copies them too and nothing
+is left on standard error.
 `onboard` writes that file in its pull request at the version
 `.github/workflows/niyam.yml` pins, and writes it again on every
 run, so the pin bump that upgrades the checks upgrades cloud sessions too,
