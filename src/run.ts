@@ -166,7 +166,12 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
       }
     case 'pr-autocreate':
       // Its own errors never fail a push or hold a session: it says so and exits 0.
-      return prAutocreate(await sys(), io, rest);
+      try {
+        return await prAutocreate(await sys(), io, rest);
+      } catch (error) {
+        io.err(`pr-autocreate: unexpected error (${error instanceof Error ? error.message : String(error)}); nothing done`);
+        return 0;
+      }
     case 'as-agent':
       // Any failure runs nothing and says so with the locked code, never the command's own.
       try {

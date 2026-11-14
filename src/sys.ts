@@ -94,7 +94,10 @@ export function realSys(): Sys {
     detach(command, args, options) {
       const log = openSync(options.log, 'a');
       try {
-        spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['ignore', log, log] }).unref();
+        const child = spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['ignore', log, log] });
+        // A command that cannot start says so later, as an event; it must not end this process.
+        child.on('error', () => undefined);
+        child.unref();
       } finally {
         closeSync(log);
       }

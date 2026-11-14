@@ -285,11 +285,12 @@ function nothingAhead(sys: Sys, root: string, base: string, sha: string): boolea
 export class Pulls {
   private readonly sys: Sys;
   readonly slug: string;
-  private readonly token: string;
+  /** The token, or how to find it at the first request: a record that answers needs none. */
+  private token: string | (() => string | { problem: string });
   /** In a Claude cloud session: no Autofix to switch on, so a Stop is never held. */
   readonly cloud: boolean;
 
-  constructor(sys: Sys, slug: string, token: string, cloud: boolean) {
+  constructor(sys: Sys, slug: string, token: string | (() => string | { problem: string }), cloud: boolean) {
     this.sys = sys;
     this.slug = slug;
     this.token = token;
@@ -297,6 +298,11 @@ export class Pulls {
   }
 
   private async call(method: string, route: string, body?: unknown): Promise<HttpResult | string> {
+    if (typeof this.token === 'function') {
+      const found = this.token();
+      if (typeof found !== 'string') return found.problem;
+      this.token = found;
+    }
     try {
       return await this.sys.http(`${GITHUB_API}/repos/${this.slug}/${route}`, { method, token: this.token, timeoutMs: method === 'POST' ? 60_000 : 30_000, ...(body === undefined ? {} : { body }) });
     } catch (error) {
@@ -567,21 +573,22 @@ export function pullsFor(sys: Sys, root: string, session: string | undefined): P
   const slug = githubSlug(git(sys, root, ['config', '--get', `remote.${REMOTE}.url`]) ?? '');
   if (!slug) return { problem: `${REMOTE} is not a ${GITHUB_HOST} repository` };
   const cloud = sys.env.CLAUDE_CODE_REMOTE === 'true';
-  let token: string | undefined;
+  return new Pulls(sys, slug, () => tokenFor(sys, root, session), cloud);
+}
+
+function tokenFor(sys: Sys, root: string, session: string | undefined): string | { problem: string } {
   if (session !== undefined) {
     const env = agentEnv(sys, session, root);
     if ('problem' in env) return { problem: `niyam could not act as the agent (${env.problem}); run \`niyam doctor\`` };
-    token = env.env.GH_TOKEN;
-  } else {
-    token = sessionToken(sys);
-    if (!token) {
-      const read = sys.exec('gh', ['auth', 'token', '-h', GITHUB_HOST], { cwd: root, timeoutMs: 30_000 });
-      const found = read.code === 0 ? read.stdout.trim() : '';
-      token = found && !isNoToken(found) ? found : undefined;
-    }
+    // agentEnv always sets it; a lock's placeholder is no token.
+    const token = env.env.GH_TOKEN;
+    return token && !isNoToken(token) ? token : { problem: 'niyam gave the agent no token; run `niyam doctor`' };
   }
-  if (!token) return { problem: 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account' };
-  return new Pulls(sys, slug, token, cloud);
+  const token = sessionToken(sys);
+  if (token) return token;
+  const read = sys.exec('gh', ['auth', 'token', '-h', GITHUB_HOST], { cwd: root, timeoutMs: 30_000 });
+  const found = read.code === 0 ? read.stdout.trim() : '';
+  return found && !isNoToken(found) ? found : { problem: 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account' };
 }
 
 /**
@@ -650,11 +657,7 @@ export async function claudeHook(sys: Sys, io: Output, stdin: string, pullsOf: P
 
   const session = typeof input.session_id === 'string' && input.session_id ? input.session_id : undefined;
   const pulls = pullsOf(sys, root, session);
-  if ('problem' in pulls) {
-    // The doctor hint stands as its own line, as the hooks' other hints do.
-    io.err(pulls.problem.startsWith('niyam ') ? pulls.problem : `pr-autocreate: ${pulls.problem}`);
-    return 0;
-  }
+  if ('problem' in pulls) return bail(pulls.problem);
   let state: State | { problem: string };
   try {
     state = await ensurePr(sys, root, settings, branch, remoteSha, pulls);

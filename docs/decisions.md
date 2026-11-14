@@ -1691,8 +1691,15 @@
     session's hook takes the agent's token from `as-agent`'s checks
     in-process, instead of running gh through the launcher; the watcher
     takes the push's GH_TOKEN, or gh's signed-in account.
+    The token is looked up only when GitHub is asked, so a turn whose
+    record and ack answer reads no session file or token store.
   - Changed: GitHub's "no commits between" answer, and a branch with nothing
     ahead of the base, give the watcher a note and no retry.
+  - Changed defaults: `gh-readonly-queue/` (GitHub's merge queue) is skipped
+    beside `mergify/`; the configured base is never given a pull request
+    even when not in `protected`; the placeholder body has no footer unless
+    the settings give one; a push command is read by the guard's shell
+    reader, not Python's `shlex`.
   - A cloud session is told by `CLAUDE_CODE_REMOTE=true`, as everywhere in
     niyam, not by athya_mono's `cloud-check.sh` (spoofed flags on a laptop).
     A laptop that sets the flag gets the cloud's wording and a Stop that is

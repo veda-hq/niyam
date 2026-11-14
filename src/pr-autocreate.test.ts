@@ -207,12 +207,32 @@ describe('pr-autocreate claude-hook (real git, GitHub faked)', () => {
     assert.deepEqual(kept.pr, { number: 100, url: 'https://github.com/example-org/example-app/pull/100', state: 'OPEN' });
   });
 
-  it('(5) asks GitHub once per pushed commit and tells a session once', async () => {
+  it('(5) asks GitHub once per pushed commit and tells a session once, looking up no token when the record answers', async () => {
     await hook(sys, bash(w.work, 'git push'));
     const asked = github.calls.length;
-    assert.deepEqual(await hook(sys, bash(w.work, 'git push')), { code: 0, out: [], err: [] });
-    assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work })), { code: 0, out: [], err: [] });
+    let looked = 0;
+    const counted: PullsOf = (each) => new Pulls(each, SLUG, () => {
+      looked++;
+      return { problem: 'niyam could not act as the agent (x); run `niyam doctor`' };
+    }, false);
+    assert.deepEqual(await hook(sys, bash(w.work, 'git push'), counted), { code: 0, out: [], err: [] });
+    assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work }), counted), { code: 0, out: [], err: [] });
     assert.equal(github.calls.length, asked);
+    assert.equal(looked, 0);
+  });
+
+  it('(18) keeps branch names that differ only by / and _ apart', async () => {
+    assert.notEqual(statePath(w.work, 'claude/a'), statePath(w.work, 'claude_a'));
+    assert.match(statePath(w.work, 'claude/a'), /\/\.tmp\/pr-autocreate\/claude_a-[0-9a-f]{12}\.json$/);
+    w.git('checkout', '-q', '-b', 'claude/a');
+    w.git('push', '-q', '-u', 'origin', 'claude/a');
+    w.git('checkout', '-q', '-b', 'claude_a');
+    w.git('push', '-q', '-u', 'origin', 'claude_a');
+    await hook(sys, input('Stop', { cwd: w.work }));
+    w.git('checkout', '-q', 'claude/a');
+    await hook(sys, input('Stop', { cwd: w.work }));
+    assert.deepEqual([record(w.work, 'claude/a').branch, record(w.work, 'claude_a').branch], ['claude/a', 'claude_a']);
+    assert.equal(github.count('POST', 'pulls'), 2);
   });
 
   it('(6) tells another session once, at Stop, by holding it (exit 2)', async () => {
@@ -367,8 +387,9 @@ describe('pr-autocreate claude-hook (real git, GitHub faked)', () => {
   });
 
   it('says why when GitHub cannot be asked, and when the decision throws', async () => {
-    assert.deepEqual(await hook(sys, bash(w.work, 'git push'), () => ({ problem: 'niyam could not act as the agent (x); run `niyam doctor`' })), { code: 0, out: [], err: ['niyam could not act as the agent (x); run `niyam doctor`'] });
-    assert.deepEqual((await hook(sys, bash(w.work, 'git push'), () => ({ problem: 'no GitHub token' }))).err, ['pr-autocreate: no GitHub token']);
+    const refused: PullsOf = (each) => new Pulls(each, SLUG, () => ({ problem: 'niyam could not act as the agent (x); run `niyam doctor`' }), false);
+    assert.deepEqual(await hook(sys, bash(w.work, 'git push'), refused), { code: 0, out: [], err: ['pr-autocreate: could not list PRs for feature (niyam could not act as the agent (x); run `niyam doctor`); will retry'] });
+    assert.deepEqual((await hook(sys, bash(w.work, 'git push'), () => ({ problem: 'origin is not a github.com repository' }))).err, ['pr-autocreate: origin is not a github.com repository']);
     const throwing: PullsOf = (each) => Object.assign(new Pulls(each, SLUG, 't', false), { list: () => Promise.reject(new Error('boom')) });
     assert.deepEqual((await hook(sys, bash(w.work, 'git push'), throwing)).err, ['pr-autocreate: PR check failed for feature (boom)']);
   });
@@ -783,32 +804,50 @@ describe('pullsFor: the token GitHub is asked with', () => {
     return sys;
   }
 
-  it("acts as the session's agent, or not at all", () => {
+  /** The token the transport's first request carries, or why it made none. */
+  async function tokenOf(sys: FakeSys, session: string | undefined): Promise<string | undefined> {
+    const pulls = pullsFor(sys, ROOT, session);
+    assert.ok(pulls instanceof Pulls);
+    sys.requests.length = 0;
+    const listed = await pulls.list('feature');
+    return typeof listed === 'string' && sys.requests.length === 0 ? listed : sys.requests[0]?.token;
+  }
+
+  it("acts as the session's agent, or not at all", async () => {
     const sys = at();
-    const refused = pullsFor(sys, ROOT, ID);
-    assert.match('problem' in refused ? refused.problem : '', /^niyam could not act as the agent \(.*\); run `niyam doctor`$/);
+    assert.match((await tokenOf(sys, ID)) ?? '', /^niyam could not act as the agent \(.*\); run `niyam doctor`$/);
     sys.files.set(sessionRecord(HOME, ID) as string, `${JSON.stringify({ agent: 'ExampleBot' })}\n`);
     sys.env = { CLAUDE_CODE_REMOTE: 'true' };
     const cloud = pullsFor(sys, ROOT, ID);
     assert.ok(cloud instanceof Pulls && cloud.cloud && cloud.slug === SLUG);
-    sys.requests.length = 0;
-    void (cloud as Pulls).body(1);
-    assert.equal(sys.requests[0]?.token, PROXY_TOKEN);
+    assert.equal(await tokenOf(sys, ID), PROXY_TOKEN);
   });
 
-  it("uses the push's GH_TOKEN for the watcher, else gh's account, never the lock's placeholder", () => {
+  it("uses the push's GH_TOKEN for the watcher, else gh's account, never the lock's placeholder", async () => {
     const sys = at();
     sys.env = { GH_TOKEN: 'ghp_push' };
-    assert.ok(pullsFor(sys, ROOT, undefined) instanceof Pulls);
+    assert.equal(await tokenOf(sys, undefined), 'ghp_push');
     sys.env = { GH_TOKEN: NO_TOKEN };
-    sys.ghToken = 'ghp_gh';
     const base = sys.execOverride;
     sys.execOverride = (call) => (call.command === 'gh' ? { code: 0, stdout: 'ghp_gh\n', stderr: '' } : base(call));
-    assert.ok(pullsFor(sys, ROOT, undefined) instanceof Pulls);
+    assert.equal(await tokenOf(sys, undefined), 'ghp_gh');
     sys.execOverride = (call) => (call.command === 'gh' ? { code: 0, stdout: `${NO_TOKEN}\n`, stderr: '' } : base(call));
-    assert.deepEqual(pullsFor(sys, ROOT, undefined), { problem: 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account' });
+    assert.equal(await tokenOf(sys, undefined), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
     sys.execOverride = (call) => (call.command === 'gh' ? { code: 1, stdout: '', stderr: 'no' } : base(call));
-    assert.deepEqual(pullsFor(sys, ROOT, undefined), { problem: 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account' });
+    assert.equal(await tokenOf(sys, undefined), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
+  });
+
+  it('finds the token once, at the first request', async () => {
+    const sys = at();
+    let found = 0;
+    const pulls = new Pulls(sys, SLUG, () => {
+      found++;
+      return 'ghp_once';
+    }, false);
+    await pulls.list('a');
+    await pulls.body(1);
+    assert.equal(found, 1);
+    assert.deepEqual(sys.requests.map((request) => request.token), ['ghp_once', 'ghp_once']);
   });
 
   it('asks nothing of a repository whose origin is not on GitHub', () => {
@@ -824,6 +863,13 @@ describe('niyam pr-autocreate', () => {
     assert.equal(await run(['pr-autocreate'], seen.io, () => new FakeSys()), 0);
     assert.equal(await run(['pr-autocreate', 'nope', '--x'], seen.io, () => new FakeSys()), 0);
     assert.deepEqual(seen.err, ['pr-autocreate: unknown mode ""; it takes claude-hook, spawn-watchers or watch; nothing done', 'pr-autocreate: unknown mode "nope"; it takes claude-hook, spawn-watchers or watch; nothing done']);
+  });
+
+  it('exits 0 when the machine cannot even be read', async () => {
+    const seen = capture();
+    assert.equal(await run(['pr-autocreate', 'claude-hook'], seen.io, () => Promise.reject(new Error('no home'))), 0);
+    assert.deepEqual(seen.err, ['pr-autocreate: unexpected error (no home); nothing done']);
+    assert.equal(await run(['pr-autocreate', 'claude-hook'], seen.io, () => Promise.reject('plain')), 0);
   });
 
   it('reads the hook and pre-push input from stdin, and fails open on its own error', async () => {
