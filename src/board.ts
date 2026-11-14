@@ -310,18 +310,18 @@ export async function setUpBoard(
   const byHand: string[] = [];
   if (!done.grouped) {
     for (const line of viewsChecklist(project.url)) io.out(line);
-    byHand.push(`Type on Needs you, group 2 views, auto-archive → ${project.url}`);
+    byHand.push(`Once for the board: at ${project.url}, add the Type column to Needs you, group Work items by Step and Decisions by Decision, and set the Auto-archive items workflow to ${ARCHIVE_FILTER}, which GitHub's API cannot.`);
   } else {
     if (reset.includes('Needs you')) {
       // The column list sent could not name Type, so a Type the owner showed may be gone.
       io.out(`Needs you's columns were set through GitHub's API, which cannot see a Type column, so one shown there may be gone; in ${project.url}: ${TYPE_STEP}`);
-      byHand.push(`Type on Needs you again → ${project.url}`);
+      byHand.push(`Once for the board: at ${project.url}, add the Type column to Needs you again, which GitHub's API cannot.`);
     }
     io.out(`- Board shows slices and briefs; Done keeps one until the Auto-archive items workflow archives it, with the template's filter ${ARCHIVE_FILTER}, which GitHub's API can neither read nor set`);
   }
   if (done.off.length > 0) {
     io.out(`Turn on the workflows ${done.off.join(', ')} in ${project.url} → Workflows (GitHub's API cannot)`);
-    byHand.push(`turn on ${done.off.length} project workflow${done.off.length === 1 ? '' : 's'} → ${project.url}/workflows`);
+    byHand.push(`Once for the board: turn on the workflow${done.off.length === 1 ? '' : 's'} ${done.off.join(', ')} at ${project.url}/workflows, which GitHub's API cannot.`);
   }
   return { url: project.url, byHand: [...typesByHand, ...byHand] };
 }

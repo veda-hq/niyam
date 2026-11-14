@@ -60,7 +60,7 @@ describe('run', () => {
   it('prints the Setup snippet for cloud-setup, which names no version', async () => {
     const { code, out } = await capture(['cloud-setup']);
     assert.equal(code, 0);
-    assert.match(out[0] ?? '', /^#!\/bin\/bash\n# niyam for Claude cloud sessions: runs the clone's \.github\/niyam\/cloud-setup\.sh, which niyam onboard keeps/);
+    assert.match(out[0] ?? '', /^#!\/bin\/bash\n# Paste all of this at the top of the Claude cloud environment's Setup script, once/);
     assert.ok(!(out[0] ?? '').includes(String(expectedVersion)));
   });
 

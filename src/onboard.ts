@@ -46,6 +46,11 @@ import type { Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
 import { type Item, type Paint, closing, heading, painter, planLines, runStep } from './layout.ts';
 
+/** Where claude.ai connects the GitHub account its cloud sessions and routines work as. */
+export const CLAUDE_CODE_WEB = 'https://claude.ai/code';
+/** Where claude.ai changes that connection. */
+export const CLAUDE_CONNECTORS = 'https://claude.ai/customize/connectors';
+
 /** Where `cloud-setup`'s script goes in a Setup field the repo's own setup shares. */
 export const SETUP_FIRST = "If the repo has its own Setup script, put this first, then the repo's own: a repo's script may end with exit, and nothing after that runs.";
 
@@ -1127,7 +1132,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
           },
         });
       } else if (library !== undefined) {
-        byHand.push(`FIGMA_LIBRARY secret: the design library's file key → ${GITHUB_WEB}/${slug}/settings/secrets/actions`);
+        byHand.push(`Once for ${slug}: add the Actions secret FIGMA_LIBRARY, the design library's Figma file key, at ${GITHUB_WEB}/${slug}/settings/secrets/actions.`);
         later.push(`The "figma.library" taken out was not a Figma file key; set the FIGMA_LIBRARY Actions secret to the design library's file key under ${slug} → Settings → Secrets and variables → Actions.`);
       }
     }
@@ -1306,7 +1311,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
         // moves its items and closes it: that is left to the owner, with what the template would have set.
         const board = await setUpBoard(sys, out, (_, step) => Promise.resolve(step !== 'replace'), slug, owner, mine as string, typeof projectTitle === 'string' ? projectTitle : undefined, approved);
         byHand.unshift(...(board?.byHand ?? []));
-        later.unshift(...(board?.byHand ?? []).map((line) => `On the board: ${line}.`));
+        later.unshift(...(board?.byHand ?? []));
         return board !== undefined;
       },
     });
@@ -1327,8 +1332,9 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     });
   } else if (hook.state === 'outside' || hook.state === 'own') {
     // A hooks folder shared by other repositories (a global core.hooksPath), or the client's own hook, is the owner's to change.
-    byHand.push(`add ${hookLine} → ${hook.path}`);
-    later.push(`Add the line \`${hookLine}\` to the pre-push git hook ${hook.path}, which ${hook.state === 'own' ? 'is your own' : 'git runs from outside this repository'}.`);
+    const addLine = `Add the line \`${hookLine}\` to the pre-push git hook ${hook.path}, which ${hook.state === 'own' ? 'is your own' : 'git runs from outside this repository'}.`;
+    byHand.push(`Once on this Mac: ${addLine.charAt(0).toLowerCase()}${addLine.slice(1)}`);
+    later.push(addLine);
   }
 
   steps.push({
@@ -1341,7 +1347,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   // connection, so onboard cannot create one or check it.
   if (on('review')) {
     const routine = `${GITHUB_WEB}/${PRODUCT}/blob/v${version}/routines/review.md`;
-    byHand.push(`review routine → ${routine}`);
+    byHand.push(`Once for ${slug}: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ${agent} and the prompt below the line in ${routine}.`);
     later.push(
       `The review routine: create a weekly Claude routine on ${slug} (claude.ai/code/routines, or /schedule in Claude Code), with claude.ai's GitHub connected as ${agent}, and give it the prompt below the line in ${routine}. Until it gives its verdicts, the weekly job labels needs-owner each decision over a week past its review date.`,
     );
@@ -1360,7 +1366,10 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     }
     if (cloudBefore === undefined) {
       cloud.push({ label: 'Setup script', detail: 'niyam cloud-setup, first' }, { label: "claude.ai's GitHub", detail: `as ${agent}` });
-      byHand.push(`cloud sessions, once: claude.ai's GitHub as ${agent}, Setup script from niyam cloud-setup, first`);
+      byHand.push(
+        `Once per claude.ai account: sign in at ${CLAUDE_CODE_WEB} and connect GitHub as ${agent} (or change it at ${CLAUDE_CONNECTORS}); skip it if done.`,
+        `Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at ${CLAUDE_CODE_WEB} → the environment's settings.`,
+      );
       later.push(
         `Claude cloud sessions, once: connect claude.ai's GitHub as ${agent}, and paste what niyam cloud-setup prints into the cloud environment's Setup script, over any older niyam part. It runs ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so a new release needs no new paste. ${SETUP_FIRST}`,
       );
@@ -1394,7 +1403,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
       const text = fileAt(WORKFLOW_PATH);
       const unpassed = workflowNeeded && on('figma') && text !== undefined ? jobsWithoutLibrary(text) : [];
       if (unpassed.length > 0) {
-        byHand.unshift(`pass FIGMA_LIBRARY in ${unpassed.join(', ')} → ${WORKFLOW_PATH}`);
+        byHand.unshift(`Once for ${slug}: in ${WORKFLOW_PATH}, add FIGMA_LIBRARY: \${{ secrets.FIGMA_LIBRARY }} under the secrets of ${unpassed.join(', ')}, so the design check runs there.`);
         later.unshift(`In ${WORKFLOW_PATH}, ${unpassed.join(', ')} pass the shared checks no FIGMA_LIBRARY secret, so the design check stays off there; add \`FIGMA_LIBRARY: \${{ secrets.FIGMA_LIBRARY }}\` under their secrets.`);
       }
       // A change that puts a file back as it was is no change.
@@ -1419,8 +1428,8 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
         notAllowed: undefined,
       }));
       merging = refused === undefined;
-      if (refused?.notAllowed) byHand.unshift(`auto-merge: turn on Allow auto-merge → ${GITHUB_WEB}/${slug}/settings, or merge it yourself`);
-      else if (refused) byHand.unshift(`auto-merge: GitHub refused (${refused.problem}); merge it yourself`);
+      if (refused?.notAllowed) byHand.unshift(`Now: turn on Allow auto-merge at ${GITHUB_WEB}/${slug}/settings, or merge ${opened.url} yourself once its checks pass.`);
+      else if (refused) byHand.unshift(`Now: merge ${opened.url} yourself once its checks pass, since GitHub refused auto-merge (${refused.problem}).`);
       return true;
     },
   });

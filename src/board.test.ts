@@ -170,7 +170,7 @@ describe('setUpBoard', () => {
     board.copyOff = ['Item added to project', 'Pull request merged'];
     const { out, byHand } = await setUp(sys, ['y', 'y', 'y']);
     assert.equal(out.at(-1), `Turn on the workflows Item added to project, Pull request merged in ${COPY_URL} → Workflows (GitHub's API cannot)`);
-    assert.deepEqual(byHand, [`turn on 2 project workflows → ${COPY_URL}/workflows`]);
+    assert.deepEqual(byHand, [`Once for the board: turn on the workflows Item added to project, Pull request merged at ${COPY_URL}/workflows, which GitHub's API cannot.`]);
     assert.ok(!out.some((line) => line.startsWith('Finish the Project')));
   });
 
@@ -260,7 +260,7 @@ describe('setUpBoard', () => {
     older(board, [{ content: 'ISSUE_a', values: {} }]);
     const { url, out, byHand } = await setUp(sys, ['n']);
     assert.equal(url, URL);
-    assert.deepEqual(byHand, [`Type on Needs you, group 2 views, auto-archive → ${URL}`]);
+    assert.deepEqual(byHand, [`Once for the board: at ${URL}, add the Type column to Needs you, group Work items by Step and Decisions by Decision, and set the Auto-archive items workflow to is:closed updated:<@today-7d, which GitHub's API cannot.`]);
     assert.ok(!board.operations.includes('copyProjectV2'));
     assert.equal(board.project?.closed, undefined);
     assert.deepEqual(out.slice(-viewsChecklist(URL).length), viewsChecklist(URL));
@@ -373,7 +373,7 @@ describe('setUpBoard', () => {
     // The column list could not name Type, so the owner is told how to show it again.
     const again = `Needs you's columns were set through GitHub's API, which cannot see a Type column, so one shown there may be gone; in ${URL}: Needs you: add the Type column (+ at the right of the headers → Type, then Save)`;
     assert.ok(out.includes(again));
-    assert.deepEqual(byHand, [`Type on Needs you again → ${URL}`]);
+    assert.deepEqual(byHand, [`Once for the board: at ${URL}, add the Type column to Needs you again, which GitHub's API cannot.`]);
     // A rerun sends no columns, so a Type the owner adds stays.
     const operations = board.operations.length;
     const rerun = await setUp(sys, ['y', 'y']);
