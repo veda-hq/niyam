@@ -10,6 +10,7 @@ import { prIdentity } from './identity.ts';
 import { machine, machineArgs } from './machine.ts';
 import { brief, briefArgs, handoff, handoffArgs } from './handoff.ts';
 import { cubicDismiss, dismissArgs } from './cubic-dismiss.ts';
+import { keepGoing } from './keep-going.ts';
 import { prAutocreate } from './pr-autocreate.ts';
 import { prSignals, signalArgs } from './pr-signals.ts';
 import { reviewsDue } from './reviews.ts';
@@ -82,6 +83,10 @@ Commands:
                    A pushed branch gets its pull request: Claude Code's PostToolUse(Bash) and Stop
                    hook, the pre-push hook (git's ref lines on stdin) and the watcher it starts;
                    NIYAM_PR_AUTOCREATE=0 on a push opens none. Its own errors exit 0
+  keep-going [--stop <why>]
+                   Claude Code's Stop hook: sends a session back while its branch has commits the base
+                   lacks and its pull request has not merged, saying what is left ("1 of 5"); --stop
+                   records why started work stops at this commit. The hook always exits 0
   help            Show this text
   version          Print the installed version
 
@@ -122,7 +127,7 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
@@ -171,6 +176,14 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
       } catch (error) {
         io.err(`pr-autocreate: unexpected error (${error instanceof Error ? error.message : String(error)}); nothing done`);
         return 0;
+      }
+    case 'keep-going':
+      // The hook never holds a session on its own error; only --stop can fail.
+      try {
+        return await keepGoing(await sys(), io, rest);
+      } catch (error) {
+        io.err(`niyam keep-going: ${error instanceof Error ? error.message : String(error)}`);
+        return rest[0] === '--stop' ? 1 : 0;
       }
     case 'as-agent':
       // Any failure runs nothing and says so with the locked code, never the command's own.

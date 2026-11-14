@@ -808,6 +808,30 @@ a session. The settings:
 `retired`, a link, explains why a merged pull request retires its branch;
 `footer` ends the placeholder body.
 
+**Started work runs to merge.** `niyam keep-going`, Claude Code's Stop hook,
+sends a session back while its branch has commits the base lacks and its
+pull request has not merged at this commit, saying what is left (push, open
+the pull request, mark it ready, carry it to merge) and the count ("1 of
+5"). It lets the session stop for a subagent; on the base, another trunk or
+a detached HEAD; when another remote branch carries the commits; while a
+background task, `git commit` or `git push` runs (its exit wakes the
+session), except in print mode (`NIYAM_PRINT_MODE=1`), where the task dies
+with the turn; for a desktop session with every commit on a ready pull
+request, which Autofix wakes; when GitHub cannot say; and at a stop note for
+this commit, which `niyam keep-going --stop "<why>"` writes when only the
+owner can unblock the work or it is proven unneeded, and whose reason it
+shows once. At the sixth stop at one commit it writes that note itself. A new
+commit resets the count and voids the note. The pull request is read over
+REST, as the session's agent; a cloud session is held the same way. Its
+records are in `.tmp/keep-going/`. The settings:
+
+```json
+{ "keepGoing": { "base": "main", "trunks": [], "printMode": [], "owner": "the owner", "tag": "niyam keep-going" } }
+```
+
+`printMode` names older print-mode variables read beside `NIYAM_PRINT_MODE`;
+`owner` is who the messages tell a session to tell; `tag` ends each message.
+
 **Design frames** is the `figma` feature, an optional extension for clients
 that design in Figma: with it on and two Actions secrets, `FIGMA_LIBRARY`
 (the design library's file key) and `FIGMA_TOKEN`, each State of the slice
