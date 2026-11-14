@@ -6,9 +6,10 @@ name: Release
 # to npm as @veda-hq/niyam, signed with provenance from this workflow, so a
 # repository can pin it as an exact registry version (P-59).
 #
-# npm auth: NPM_TOKEN lives in the `npm` environment, which only v* tags may
-# deploy to, so a workflow pushed on a branch cannot read it. Trusted
-# publishing (OIDC) replaces it once the first version is on npm.
+# npm auth: trusted publishing (OIDC) only, set up on npmjs.com for
+# @veda-hq/niyam with this repository, this workflow and the `npm`
+# environment, which only v* tags may deploy to. There is no npm token, so a
+# leaked secret cannot publish.
 on:
   push:
     tags: ['v*']
@@ -49,8 +50,6 @@ jobs:
         run: pnpm pack --pack-destination "$RUNNER_TEMP"
       # A version on npm already is skipped, so a rerun is safe.
       - name: Publish the CLI package to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           name=$(jq -r .name package.json)
