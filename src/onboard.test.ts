@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { after, describe, it } from 'node:test';
+import { after, beforeEach, describe, it } from 'node:test';
 
 import { BUILT_IN, Board, COPY_URL, OWNER_TOKEN, URL, repoJson, settledViews } from './fake-board.test.ts';
 import { FIELDS, ISSUE_TYPES, LABELS } from './board.ts';
@@ -23,6 +23,7 @@ import {
   GUARD_COMMAND_0610,
   GUARD_COMMAND_069,
   HOOK_COMMAND_0610,
+  HOOK_COMMAND_0616,
   HOOK_COMMAND_069,
   PRE_PUSH_HOOK_0610,
   PRE_PUSH_HOOK_069,
@@ -175,8 +176,7 @@ describe('onboard', () => {
       '◇  This Mac',
       '│    pre-push hook  new',
       '│',
-      '◇  Claude cloud — by hand, once',
-      '│    Setup script        niyam cloud-setup, first',
+      '◇  Claude cloud — by hand, once per claude.ai account',
       "│    claude.ai's GitHub  as ExampleBot",
       '│',
       '◇  Check',
@@ -195,7 +195,6 @@ describe('onboard', () => {
       'By hand:',
       `  Once for example-org/example-app: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ExampleBot and the prompt below the line in https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
       '  Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.',
-      "  Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings.",
     ]);
     assert.deepEqual(sys.chosen, ['Go ahead?'], 'one question');
     assert.deepEqual(sys.opened, ['https://github.com/login/device'], 'the browser opens at the sign-in');
@@ -241,7 +240,7 @@ describe('onboard', () => {
     assert.ok(body.includes('\nLeft to do by hand:\n\n- The review routine: create a weekly Claude routine on example-org/example-app'), body);
     assert.ok(
       body.includes(
-        `\n- Claude cloud sessions, once: connect claude.ai's GitHub as ExampleBot, and paste what niyam cloud-setup prints into the cloud environment's Setup script, over any older niyam part. It runs ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so a new release needs no new paste. ${SETUP_FIRST}\n`,
+        `\n- Claude cloud sessions, once per claude.ai account: connect claude.ai's GitHub as ExampleBot. Each session with no niyam installs it from ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so there is nothing to paste; what niyam cloud-setup prints, put in the cloud environment's Setup script, makes sessions start faster, since Claude caches what a Setup script installs.\n`,
       ),
       body,
     );
@@ -275,7 +274,7 @@ describe('onboard', () => {
     assert.deepEqual(sys.chosen, ['Go ahead?']);
     assert.deepEqual(planned(out, 'Pull request'), [], 'no file to change');
     assert.deepEqual(planned(out, 'This Mac'), [], 'the pre-push hook is there');
-    assert.deepEqual(planned(out, 'Claude cloud — by hand, once'), [], 'the cloud setup file is there, so the Setup script was pasted');
+    assert.deepEqual(planned(out, 'Claude cloud — by hand, once'), [], 'the cloud setup file is there, so the account was connected before');
     assert.deepEqual(planned(out, 'GitHub'), ['board: set up or check', 'issue types: org-wide, the work model’s alone']);
     assert.ok(!sys.requests.some((r) => r.url.endsWith('/pulls')), 'nothing to change, no pull request');
     assert.ok(!sys.calls.some((c) => c.args[0] === 'read-tree'));
@@ -301,7 +300,7 @@ describe('onboard', () => {
     assert.deepEqual([...sys.committed.keys()], []);
     const body = opened(sys)?.body ?? '';
     assert.ok(body.includes(`\n- \`${LEFTOVER_CLOUD_SETUP_PATH}\`: moved to ${CLOUD_SETUP_PATH}, which the Setup snippet since 0.6.10 runs\n`), body);
-    assert.ok(body.includes(`a Setup script pasted before niyam 0.6.10 runs ${LEFTOVER_CLOUD_SETUP_PATH}, which this pull request deletes; if yours is one, paste what niyam cloud-setup prints over it, once.`), body);
+    assert.ok(body.includes(`a Setup script pasted before niyam 0.6.10 runs ${LEFTOVER_CLOUD_SETUP_PATH}, which this pull request deletes; if yours is one, delete niyam's part of it, since sessions now install niyam themselves, or paste what niyam cloud-setup prints over it.`), body);
     merge(sys);
     const again = await run(sys, []);
     assert.equal(again.code, 0);
@@ -317,7 +316,7 @@ describe('onboard', () => {
     assert.ok(planned(out, 'Pull request').includes(`cloud-setup.sh: new, installs v${packageVersion()}, process-rules/cloud-setup.sh deleted`), out.join('\n'));
     assert.equal(repo(sys).get(CLOUD), CLOUD_FILE);
     assert.equal(repo(sys).has(OLD_CLOUD), false);
-    assert.ok(byHand(out).includes("Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings."), out.join('\n'));
+    assert.ok(byHand(out).includes('Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.'), out.join('\n'));
   });
 
   it('reads nothing from the settings file and workflow before niyam, and leaves them where they are (P-57)', async () => {
@@ -467,7 +466,7 @@ describe('onboard', () => {
     const upgraded = await run(older, []);
     assert.equal(upgraded.code, 0);
     assert.deepEqual(planned(upgraded.out, 'Pull request'), [`cloud-setup.sh: v0.5.2 → v${packageVersion()}`, 'auto-merge: when checks pass']);
-    assert.deepEqual(planned(upgraded.out, 'Claude cloud — by hand, once'), [], 'pasted before: the snippet runs the file');
+    assert.deepEqual(planned(upgraded.out, 'Claude cloud — by hand, once'), [], 'onboarded before: nothing by hand');
     assert.deepEqual(byHand(upgraded.out), []);
     assert.equal(older.committed.get(CLOUD_SETUP_PATH), CLOUD_FILE);
 
@@ -484,7 +483,7 @@ describe('onboard', () => {
     assert.equal(left.code, 0);
     assert.ok(left.out.includes(`│  ! ${CLOUD_SETUP_PATH} left as it is: GitHub answered HTTP 404 for the v${packageVersion()} release`), left.out.join('\n'));
     assert.deepEqual(planned(left.out, 'Pull request'), []);
-    assert.deepEqual(planned(left.out, 'Claude cloud — by hand, once'), [], 'no file for the snippet to run, so no paste');
+    assert.deepEqual(planned(left.out, 'Claude cloud — by hand, once'), [], 'onboarded before: nothing by hand');
 
     const undigested = fresh();
     settled(undigested);
@@ -763,6 +762,73 @@ describe('onboard', () => {
       assert.equal(shell(HOOK_COMMAND, {}).stdout, 'launched session-start\n', 'the launcher, with nothing on PATH');
     });
 
+    describe('in a Claude cloud session with no CLI, the SessionStart hook installs it from the clone (P-60, #334)', () => {
+      const project = mkdtempSync(join(tmpdir(), 'niyam-clone-'));
+      const setup = join(project, CLOUD_SETUP_PATH);
+      const ran = join(project, 'setup-ran');
+      after(() => rmSync(project, { recursive: true, force: true }));
+      /** The clone's cloud setup file, which records that it ran, then runs `body`. */
+      const setupDoes = (body: string): void => {
+        rmSync(ran, { force: true });
+        cli(setup, `: > "${ran}"\n${body}`);
+      };
+      /** A cloud session's hook run: `CLAUDE_CODE_REMOTE` and the project folder Claude Code gives hooks, with `bin` on PATH. */
+      const cloudHook = (env: Record<string, string> = {}, input = '{"session_id":"s"}') =>
+        shell(HOOK_COMMAND, { PATH: `${bin}:/usr/bin:/bin`, CLAUDE_CODE_REMOTE: 'true', CLAUDE_PROJECT_DIR: project, ...env }, input);
+      const user = spawnSync('id', ['-un'], { encoding: 'utf8' }).stdout.trim();
+      const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim();
+      const STOP = /^niyam: STOP\. niyam session-start did not run here \(.*niyam: (?:command )?not found\), so this session cannot be given the agent identity/;
+      beforeEach(() => {
+        rmSync(launcher, { force: true });
+        rmSync(join(bin, 'niyam'), { force: true });
+        rmSync(setup, { force: true });
+      });
+
+      it('installs niyam, says so, and runs session-start with the hook\'s input, the install\'s own output dropped', () => {
+        setupDoes(`echo "Node unpacked"; echo "a warning" >&2\nprintf '#!/bin/sh\\necho "installed niyam ran $* with $(cat)"\\n' > "${bin}/niyam"; chmod 755 "${bin}/niyam"`);
+        const { stdout, status } = cloudHook();
+        assert.equal(status, 0);
+        assert.equal(
+          stdout,
+          `niyam: this cloud session had no niyam, so the SessionStart hook installed it from ${CLOUD_SETUP_PATH}.\ninstalled niyam ran session-start with {"session_id":"s"}\n`,
+        );
+      });
+
+      it('names the install\'s last error line and the user it ran as, then stops', () => {
+        setupDoes('echo "downloading" >&2\necho "mkdir: cannot create directory /opt/niyam: Permission denied" >&2\nexit 1');
+        const [said, stop, ...rest] = cloudHook().stdout.split('\n');
+        assert.equal(said, `niyam: this cloud session has no niyam, and installing it from ${CLOUD_SETUP_PATH} as ${user} (uid ${uid}) failed: mkdir: cannot create directory /opt/niyam: Permission denied`);
+        assert.match(stop ?? '', STOP);
+        assert.deepEqual(rest, ['']);
+      });
+
+      it('says to run onboard when the clone has no cloud setup file, then stops', () => {
+        const [said, stop] = cloudHook().stdout.split('\n');
+        assert.equal(said, `niyam: this cloud session has no niyam, and the clone has no ${CLOUD_SETUP_PATH} to install it from; run niyam onboard, which writes it.`);
+        assert.match(stop ?? '', STOP);
+      });
+
+      it('installs nothing where a CLI is found, or outside a cloud session', () => {
+        setupDoes('exit 0');
+        cli(join(bin, 'niyam'), 'echo "niyam on PATH ran $*"');
+        assert.equal(cloudHook().stdout, 'niyam on PATH ran session-start\n');
+        rmSync(join(bin, 'niyam'));
+        cli(launcher, 'echo "launcher ran $*"');
+        assert.equal(cloudHook().stdout, 'launcher ran session-start\n');
+        rmSync(launcher);
+        for (const env of [{ CLAUDE_CODE_REMOTE: '' }, { CLAUDE_CODE_REMOTE: 'false' }]) {
+          assert.match(cloudHook(env).stdout, STOP, 'a Mac session with no CLI stops, as before');
+        }
+        assert.equal(existsSync(ran), false, 'the cloud setup file never ran');
+      });
+
+      it("finds the cloud setup file from the working folder where Claude Code gives no project folder", () => {
+        setupDoes(`printf '#!/bin/sh\\necho "installed niyam ran $*"\\n' > "${bin}/niyam"; chmod 755 "${bin}/niyam"`);
+        const { stdout } = spawnSync('bash', ['-c', HOOK_COMMAND], { encoding: 'utf8', cwd: project, input: '', env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, CLAUDE_CODE_REMOTE: 'true' } });
+        assert.equal(stdout, `niyam: this cloud session had no niyam, so the SessionStart hook installed it from ${CLOUD_SETUP_PATH}.\ninstalled niyam ran session-start\n`);
+      });
+    });
+
     it('pre-push: the owner\'s pushes go ahead; an agent session\'s runs the CLI, refused without one', () => {
       rmSync(launcher, { force: true });
       const hook = (env: Record<string, string>) => spawnSync('sh', ['-c', `${PRE_PUSH_HOOK}`, 'pre-push', 'origin', 'url'], { encoding: 'utf8', env: { HOME: home, PATH: '/usr/bin:/bin', ...env } });
@@ -915,6 +981,18 @@ describe('onboard', () => {
     assert.ok(GUARD_COMMAND.includes(find), GUARD_COMMAND);
     assert.ok(PRE_PUSH_HOOK.includes('[ -z "$NIYAM_AGENT" ] && [ "$CLAUDECODE" != 1 ] && exit 0\ncli="$HOME/.config/niyam/bin/niyam"\n[ -x "$cli" ] || cli=niyam\n'), PRE_PUSH_HOOK);
     for (const text of [HOOK_COMMAND, GUARD_COMMAND, PRE_PUSH_HOOK]) assert.doesNotMatch(text, /process-rules|PROCESS_RULES/);
+  });
+
+  it("replaces 0.6.16's SessionStart hook in place, which stopped a cloud session with no CLI (P-60)", async () => {
+    assert.ok(OLDER_HOOK_COMMANDS.includes(HOOK_COMMAND_0616));
+    assert.notEqual(HOOK_COMMAND, HOOK_COMMAND_0616);
+    const sys = fresh();
+    const entry = (command: string, extra = {}) => ({ ...extra, hooks: [{ type: 'command', command }] });
+    const own = entry('echo mine');
+    sys.files.set(HOOKS, JSON.stringify({ hooks: { SessionStart: [own, entry(HOOK_COMMAND_0616)], PreToolUse: [GUARD_ENTRY] }, env: BASE_ENV, permissions: { allow: ALLOW } }, null, 2));
+    const { out } = await run(sys);
+    assert.ok(planned(out, 'Pull request').includes('settings.json: hooks updated'), out.join('\n'));
+    assert.deepEqual(JSON.parse(repo(sys).get(HOOKS) ?? ''), { hooks: { SessionStart: [own, SESSION_ENTRY], PreToolUse: [GUARD_ENTRY] }, env: BASE_ENV, permissions: { allow: ALLOW } });
   });
 
   it("replaces 0.6.10's hooks and pre-push hook in place, keeping the client's own (P-57)", async () => {
@@ -1572,7 +1650,7 @@ describe('staged adoption', () => {
     assert.deepEqual(planned(out, 'This Mac'), ['pre-push hook: new']);
     assert.ok(out.includes(`└  ${PULL_URL}  merges itself when checks pass`));
     assert.deepEqual([...sys.committed.keys()], ['.github/niyam.json', '.claude/settings.json', CLOUD_SETUP_PATH]);
-    assert.deepEqual(byHand(out), ['Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.', "Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings."]);
+    assert.deepEqual(byHand(out), ['Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.']);
     assert.deepEqual(sys.chosen, ['Go ahead?']);
   });
 
@@ -1882,7 +1960,7 @@ describe('the plan and its one question', () => {
       `cloud-setup.sh: new, installs v${packageVersion()}`,
       'auto-merge: when checks pass',
     ]);
-    assert.deepEqual(planned(out, 'Claude cloud — by hand, once'), ['Setup script: niyam cloud-setup, first', `claude.ai's GitHub: as ${AGENT}`]);
+    assert.deepEqual(planned(out, 'Claude cloud — by hand, once'), [`claude.ai's GitHub: as ${AGENT}`]);
     assert.equal(out.at(-1), '└  Dry run: nothing changed.');
     assert.ok(changedNothing(sys), 'nothing written, pushed or signed in to');
     assert.deepEqual(sys.committed.size, 0);

@@ -189,12 +189,29 @@ const HOOK_RUN =
   'else printf \'%s\\n\' "niyam: STOP. niyam session-start did not run here ($said), so this session cannot be given the agent identity and GitHub is locked out of it. Do not push, fetch, or run gh in this session; tell the owner."; fi';
 
 /**
+ * In a Claude cloud session with no CLI, the SessionStart hook installs it
+ * from the clone's cloud setup file, which onboard keeps at the pin, so no
+ * Setup script needs pasting: Claude Code has no API for one. The install's
+ * own output is dropped; a failure says its last line and the user it ran
+ * as, since it writes under /opt and /usr/local, before the STOP that
+ * follows when session-start still cannot run. On a Mac, or with a CLI
+ * found, it does nothing.
+ */
+const CLOUD_INSTALL =
+  `if [ "\${CLAUDE_CODE_REMOTE:-}" = true ] && ! command -v "$cli" >/dev/null 2>&1; then ` +
+  `setup="\${CLAUDE_PROJECT_DIR:-.}/${CLOUD_SETUP_PATH}"; ` +
+  'if [ ! -f "$setup" ]; then printf \'%s\\n\' "niyam: this cloud session has no niyam, and the clone has no ' + CLOUD_SETUP_PATH + ' to install it from; run niyam onboard, which writes it."; ' +
+  'elif failed=$(bash "$setup" </dev/null 2>&1 >/dev/null); then printf \'%s\\n\' "niyam: this cloud session had no niyam, so the SessionStart hook installed it from ' + CLOUD_SETUP_PATH + '."; ' +
+  'else printf \'%s\\n\' "niyam: this cloud session has no niyam, and installing it from ' + CLOUD_SETUP_PATH + ' as $(id -un) (uid $(id -u)) failed: $(printf \'%s\\n\' "$failed" | tail -n 1)"; fi; fi; ';
+
+/**
  * What the client's SessionStart hook runs, on a Mac and in a Claude cloud
  * session alike. When the CLI is missing or fails, what it printed reaches
  * the session inside a line telling it to stop; the settings' `env` has
- * already locked GitHub out.
+ * already locked GitHub out. A cloud session with no CLI installs it first
+ * (CLOUD_INSTALL).
  */
-export const HOOK_COMMAND = FIND_CLI + HOOK_RUN;
+export const HOOK_COMMAND = FIND_CLI + CLOUD_INSTALL + HOOK_RUN;
 
 /** The PreToolUse hook before it finds the CLI: a command naming neither gh nor git goes ahead. */
 const GUARD_SKIP =
@@ -248,6 +265,8 @@ export function missingAutoFixRules(settings: unknown): string[] {
 
 /** The hook commands older releases wrote, which onboard replaces with this release's. */
 export const OLDER_HOOK_COMMANDS = [
+  // 0.6.11 to 0.6.16's, before P-60: a cloud session with no CLI stopped.
+  FIND_CLI + HOOK_RUN,
   // 0.6.10's, before P-57.
   P55_FIND_CLI + HOOK_RUN,
   // 0.6.8 and 0.6.9's, before P-55: the launcher in the old folder alone.
@@ -1353,7 +1372,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     );
   }
   // Claude cloud sessions. Claude Code has no API for a cloud environment's Setup script, so the version lives in a
-  // file the repo owns, written at the pin on every run, and the Setup script runs it: one paste, the first time.
+  // file the repo owns, written at the pin on every run, and the SessionStart hook runs it when a session has no CLI.
   const cloudBefore = fileAt(CLOUD_SETUP_PATH);
   const released = await releaseSha256(sys, version, token);
   if ('problem' in released) warnings.push(`${CLOUD_SETUP_PATH} left as it is: ${released.problem}`);
@@ -1365,13 +1384,10 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
       change(CLOUD_SETUP_PATH, text, `installs niyam ${version} in Claude cloud sessions, its download checked against its sha256`);
     }
     if (cloudBefore === undefined) {
-      cloud.push({ label: 'Setup script', detail: 'niyam cloud-setup, first' }, { label: "claude.ai's GitHub", detail: `as ${agent}` });
-      byHand.push(
-        `Once per claude.ai account: sign in at ${CLAUDE_CODE_WEB} and connect GitHub as ${agent} (or change it at ${CLAUDE_CONNECTORS}); skip it if done.`,
-        `Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at ${CLAUDE_CODE_WEB} → the environment's settings.`,
-      );
+      cloud.push({ label: "claude.ai's GitHub", detail: `as ${agent}` });
+      byHand.push(`Once per claude.ai account: sign in at ${CLAUDE_CODE_WEB} and connect GitHub as ${agent} (or change it at ${CLAUDE_CONNECTORS}); skip it if done.`);
       later.push(
-        `Claude cloud sessions, once: connect claude.ai's GitHub as ${agent}, and paste what niyam cloud-setup prints into the cloud environment's Setup script, over any older niyam part. It runs ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so a new release needs no new paste. ${SETUP_FIRST}`,
+        `Claude cloud sessions, once per claude.ai account: connect claude.ai's GitHub as ${agent}. Each session with no niyam installs it from ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so there is nothing to paste; what niyam cloud-setup prints, put in the cloud environment's Setup script, makes sessions start faster, since Claude caches what a Setup script installs.`,
       );
     }
   }
@@ -1384,7 +1400,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     else pull.push({ label: 'cloud-setup.sh', detail: deleted });
     if (cloudBefore !== undefined) {
       later.push(
-        `Claude cloud sessions: a Setup script pasted before niyam 0.6.10 runs ${LEFTOVER_CLOUD_SETUP_PATH}, which this pull request deletes; if yours is one, paste what niyam cloud-setup prints over it, once. ${SETUP_FIRST}`,
+        `Claude cloud sessions: a Setup script pasted before niyam 0.6.10 runs ${LEFTOVER_CLOUD_SETUP_PATH}, which this pull request deletes; if yours is one, delete niyam's part of it, since sessions now install niyam themselves, or paste what niyam cloud-setup prints over it. ${SETUP_FIRST}`,
       );
     }
   }
@@ -1453,7 +1469,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     },
     { title: asOwnerItems ? (signedAs && 'login' in signedAs ? `GitHub — signed in as ${signedAs.login}` : `GitHub — one sign-in as ${owner}`) : 'GitHub', items: github },
     { title: 'This Mac', items: mac },
-    { title: 'Claude cloud — by hand, once', items: cloud },
+    { title: 'Claude cloud — by hand, once per claude.ai account', items: cloud },
     { title: 'Check', items: [{ label: `one signed test commit by ${agent}, deleted after` }] },
   ];
   for (const line of planLines(paint, planHead(paint, { from: workflowNeeded ? workflowFrom : undefined, version, slug, owner, agent, warnings }), groups)) io.out(line);

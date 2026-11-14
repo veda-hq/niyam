@@ -329,8 +329,7 @@ Claude cloud sessions below).
    ◇  This Mac
    │    pre-push hook  new
    │
-   ◇  Claude cloud — by hand, once
-   │    Setup script        niyam cloud-setup, first
+   ◇  Claude cloud — by hand, once per claude.ai account
    │    claude.ai's GitHub  as AGENT
    │
    ◇  Check
@@ -356,7 +355,6 @@ Claude cloud sessions below).
    By hand:
      Once for owner/repo: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as AGENT and the prompt below the line in https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
      Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as AGENT (or change it at https://claude.ai/customize/connectors); skip it if done.
-     Once per Claude cloud environment: run niyam cloud-setup and paste what it prints at the top of the environment's Setup script, at https://claude.ai/code → the environment's settings.
    ```
 
    It writes `.github/niyam.json`, adds to `.claude/settings.json`
@@ -376,14 +374,16 @@ Claude cloud sessions below).
    `niyam / Work rules`. With identity alone `onboard` writes no workflow. It writes
    `.github/niyam/cloud-setup.sh`, which installs the CLI in Claude
    cloud sessions at the version the workflow pins, and writes it again on
-   every run (see Claude cloud sessions below); the first time, the plan
-   lists the one paste into the cloud environment's Setup script. Where the
+   every run (see Claude cloud sessions below); a cloud session with no
+   niyam runs it from the SessionStart hook, so there is nothing to paste,
+   and the first time, the plan lists the one connection of claude.ai's
+   GitHub as the agent, once per claude.ai account. Where the
    repo still has `.github/process-rules/cloud-setup.sh`, which releases up
    to 0.6.10 wrote beside it, the pull request deletes it, but only where it
    leaves `.github/niyam/cloud-setup.sh` (one the run could not write, as
    when GitHub names no sha256 for the release, keeps the old file too), and
-   the description says to paste the new snippet once if the Setup script
-   was pasted before 0.6.10. It checks the agent can
+   the description says to delete niyam's part of a Setup script pasted
+   before 0.6.10. It checks the agent can
    push. With no access, or read access only (a public repo, or an
    organisation's base permission), the plan gives it write access as you
    and accepts the invitation as the agent; and `onboard` names
@@ -1137,33 +1137,42 @@ read only its REST API, here and everywhere else. The one exception is who
 edited an owner's edited `Decision:` comment, which only GraphQL names; here
 such a comment does not count.
 
-The cloud environment's Setup script, which runs as root once the repo is
-cloned and before Claude Code starts, installs the CLI. Claude Code has no
-API or CLI for that field, so you paste it once, by hand, and it names no
-version: `niyam cloud-setup` prints a short snippet that finds the
-clone and runs its `.github/niyam/cloud-setup.sh`, with `NIYAM_SETUP` set.
-Its instructions are comment lines at the top of the snippet, on standard
-output with it, so `niyam cloud-setup | pbcopy` copies them too and nothing
-is left on standard error.
-`onboard` writes that file in its pull request at the version
-`.github/workflows/niyam.yml` pins, and writes it again on every
-run, so the pin bump that upgrades the checks upgrades cloud sessions too,
-with no new paste. A snippet pasted before 0.6.10 runs
-`.github/process-rules/cloud-setup.sh` alone, which `onboard` deletes since
-P-57: paste the new snippet over it, once. The Setup script runs from the folder that holds the
-clone (the VM's home, the clone one folder down), so the snippet looks there
-and in each home. The file unpacks Node and the CLI under
-`/opt/niyam`, each once it matches the sha256 the file pins (Node's
-from this release, the CLI's from GitHub's record of the release archive),
-and puts `niyam` on `PATH`, leaving the image's own Node alone. The
-environment needs the network to reach nodejs.org and GitHub's release
-downloads.
+**Installing niyam there.** Claude Code has no API, CLI or repo file for a
+cloud environment's Setup script, but a repo's SessionStart hooks run in its
+cloud sessions. So when `CLAUDE_CODE_REMOTE=true` and the hook finds no
+niyam CLI, it runs the clone's `.github/niyam/cloud-setup.sh` (from
+`CLAUDE_PROJECT_DIR`, else the working folder), then `session-start` as
+usual, and says in one line that it installed niyam. `onboard` writes that
+file in its pull request at the version `.github/workflows/niyam.yml` pins,
+and writes it again on every run, so the pin bump that upgrades the checks
+upgrades cloud sessions too. The file unpacks Node and the CLI under
+`/opt/niyam`, each once it matches the sha256 the file pins (Node's from
+this release, the CLI's from GitHub's record of the release archive), and
+puts `niyam` in `/usr/local/bin`, leaving the image's own Node alone, so it
+needs root; the environment needs the network to reach nodejs.org and
+GitHub's release downloads, which the default Limited access allows. The
+install's own output is dropped. When it fails, the hook's line names its
+last error line and the user it ran as, and the STOP follows; a clone with
+no such file says to run `onboard`. On a Mac, or where a CLI is found, the
+hook does as before.
 
-The Setup field holds one script, so the snippet runs in a shell of its
-own (`bash <<'NIYAM' … NIYAM`): a failed download, or a
-clone with no such file, says so on standard error and the commands after
-it still run. If the repo has its own Setup script, put this first, then
-the repo's own: a repo's script may end with `exit`, and nothing after that
+What a hook installs is not cached, so each such session downloads about
+50 MB first. Claude keeps a snapshot of what a Setup script installs, so
+`niyam cloud-setup` prints an optional snippet that makes sessions start
+faster: pasted at the top of the environment's Setup script, it finds the
+clone and runs the same file, with `NIYAM_SETUP` set. It names no version,
+so a new release needs no new paste. Its instructions are comment lines at
+the top of the snippet, on standard output with it, so `niyam cloud-setup
+| pbcopy` copies them too and nothing is left on standard error. A snippet
+pasted before 0.6.10 runs `.github/process-rules/cloud-setup.sh` alone,
+which `onboard` deletes since P-57: delete it, or paste the new snippet
+over it. The Setup script runs as root from the folder that holds the clone
+(the VM's home, the clone one folder down), so the snippet looks there and
+in each home. The Setup field holds one script, so the snippet runs in a
+shell of its own (`bash <<'NIYAM' … NIYAM`): a failed download, or a clone
+with no such file, says so on standard error and the commands after it
+still run. If the repo has its own Setup script, put this first, then the
+repo's own: a repo's script may end with `exit`, and nothing after that
 runs.
 
 Claude keeps a snapshot of the environment once its Setup script has run,
@@ -1174,8 +1183,9 @@ says so in one line; the session goes on with the new CLI, and the snapshot
 catches up on its next build. When the repo has no `cloud-setup.sh` while
 the workflow pins another release, or the file is not at the workflow's
 pin, the line says to run `onboard` again. When the Setup script still
-installs a release of its own (an older paste), the line also says to paste
-the snippet over it, once. It only warns: the session works on.
+installs a release of its own (an older paste), the line also says to
+delete niyam's part of it or paste the snippet over it. It only warns: the
+session works on.
 
 claude.ai has one GitHub connection per account, so it is the agent's for
 every cloud session that account starts.
@@ -1189,13 +1199,13 @@ reads, in the same layout and with the same exit codes as on a Mac:
 ◇  This cloud session
 ✗  .github/niyam/cloud-setup.sh installs 0.5.24, but .github/workflows/niyam.yml pins v0.5.25 → niyam onboard again
 ✓  niyam 0.5.24 runs here
-▲  /opt/niyam/from-setup missing, so the cloud environment's Setup script does not run .github/niyam/cloud-setup.sh → paste what niyam cloud-setup prints into the cloud environment's Setup script, once
+✓  the SessionStart hook installs niyam from .github/niyam/cloud-setup.sh when a session has none; the Setup script does not run it, which only makes sessions start slower
 │
 ◇  GitHub — as AGENT
 ✓  the proxy acts as AGENT, an agent the repo's settings name
 ✓  session-start gave this session AGENT's identity
 │
-└  2 to fix
+└  1 to fix
 ```
 
 This cloud session checks that `cloud-setup.sh` opens with the comment
@@ -1203,8 +1213,9 @@ This cloud session checks that `cloud-setup.sh` opens with the comment
 the workflow's pin (`✗`, fixed by running `onboard` again; a workflow that pins no one version is `▲`), that the CLI running is that
 release (`▲`: `session-start` installs it, or `bash
 .github/niyam/cloud-setup.sh` does), and that the Setup script
-runs the repo's file (`▲` without `/opt/niyam/from-setup`),
-naming the file it ran: the mark holds its path. GitHub
+runs the repo's file, naming the file it ran (the mark
+`/opt/niyam/from-setup` holds its path), or that the SessionStart hook
+installs it, since the Setup script does not: both are `✓`. GitHub
 checks that the account the proxy acts as is one of the settings' agents,
 and that `session-start` gave the session that identity (`✗` otherwise:
 `gh` and git stay locked out). This repo lists hooks that reach GitHub
@@ -1389,7 +1400,7 @@ What P-57 removed for good, by hand where it is on a machine:
   `doctor` marks either one still there ▲.
 - `niyam onboard` deletes `.github/process-rules/cloud-setup.sh` wherever it
   leaves `.github/niyam/cloud-setup.sh`, and writes and runs none under that
-  name; a Setup snippet pasted before 0.6.10 needs the new one pasted once.
+  name; a Setup snippet pasted before 0.6.10 needs the new one pasted once, or, since P-60, deleting.
 - `niyam owner-step required-checks` takes each `process-rules / …` check out of
   a ruleset: no workflow reports one since P-53, so it would hold every pull
   request. The `niyam / …` check of the same job takes its place where the

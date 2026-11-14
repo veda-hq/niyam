@@ -271,7 +271,7 @@ async function cloudDoctor(sys: Sys, io: Output, named?: string): Promise<number
     const { pinned, scripted, workflow, script } = repoReleases(sys, root);
     setupFile = script;
     if (scripted === undefined) {
-      session.push({ mark: '✗', text: `${script} missing, or not the file onboard writes, so the Setup script installs no niyam`, fix: ONBOARD });
+      session.push({ mark: '✗', text: `${script} missing, or not the file onboard writes, so a session without niyam cannot install it`, fix: ONBOARD });
     } else if (pinned === undefined) {
       session.push({ mark: '▲', text: `${workflow} is missing or pins no one version, so ${script} is not checked against it`, fix: ONBOARD });
     } else if (pinned !== scripted) {
@@ -292,11 +292,8 @@ async function cloudDoctor(sys: Sys, io: Output, named?: string): Promise<number
   session.push(
     ranFromSetup(sys)
       ? { mark: '✓', text: `the Setup script runs ${fileFromSetup(sys) ?? "the repo's cloud setup file"}` }
-      : {
-          mark: '▲',
-          text: `${FROM_SETUP} missing, so the cloud environment's Setup script does not run ${setupFile}`,
-          fix: "paste what niyam cloud-setup prints into the cloud environment's Setup script, once",
-        },
+      : // The SessionStart hook installs niyam where the Setup script does not (P-60): the paste only makes sessions start faster.
+        { mark: '✓', text: `the SessionStart hook installs niyam from ${setupFile} when a session has none; the Setup script does not run it, which only makes sessions start slower` },
   );
 
   let agents: readonly string[] | undefined = named === undefined ? undefined : [named];

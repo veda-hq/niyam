@@ -1675,6 +1675,46 @@
   - athya_mono's faults suite is a sweep here: each git call fails in turn,
     the run never exits 0 without the commit, the file is as it was or as a
     clean run leaves it, and a rerun converges on one commit.
+- **2026-11-14 — Record: Claude cloud sessions install niyam themselves
+  (P-60, Work item #331, slices #333 and #334).** Alok, after onboarding
+  veda (veda-hq/veda#73): "people will not do 100 steps to get onboarded."
+  onboard ended with a Setup-script paste and a GitHub connection for cloud
+  sessions, plus the review routine. Claude Code has no API, CLI or repo
+  file for a cloud environment's Setup script, but a repo's SessionStart
+  hooks run in cloud sessions.
+  - When `CLAUDE_CODE_REMOTE=true` and no CLI is found, the SessionStart
+    hook runs the clone's `.github/niyam/cloud-setup.sh`, which onboard
+    already keeps at the pin, then `session-start`. `session-start` already
+    ran that file for a wrong release (#165, #166); this covers no CLI at
+    all. The change is all inside `HOOK_COMMAND`, one shell string with no
+    new settings field, so veda-hq/niyam#318 can move it into
+    `.claude/sarathi.json` as it is.
+  - onboard no longer asks for the paste. `niyam cloud-setup` stays, as an
+    option: Claude caches what a Setup script installs, not what a hook
+    does. `doctor` marks a Setup script that does not run the file `✓`.
+  - "By hand:" keeps the claude.ai GitHub connection, once per claude.ai
+    account (Alok's decision (a) on #331), and the review routine, once per
+    repository (decision (b)). Each line says the whole step in one sentence
+    on standard output, with its link.
+  - Cost: a session in an environment without the paste downloads about
+    50 MB at each start. Claude's hooks time out after 600 s. The install
+    writes to `/opt/niyam` and `/usr/local/bin`, so it needs the hook to
+    run as root, which the docs do not say, so the pull request waited on
+    one real cloud session to prove it.
+  - Rejected: installing `@veda-hq/niyam` from npm, published with
+    provenance since 0.6.16 (P-59), as the install path, since the release
+    tarball is pinned by sha256 already; it is the fallback if a hook cannot
+    write there or reach the release. Also
+    rejected: a claude-code-action weekly job in place of the routine,
+    which would store the agent's token and an Anthropic credential as
+    Actions secrets (decision (b)).
+- **2026-11-15 — Record: the release publishes to npm by trusted publishing
+  (State #342 of P-59).** 0.6.16 put `@veda-hq/niyam` on npm with the
+  `npm` environment's token. Alok then set up trusted publishing for it on
+  npmjs.com (veda-hq/niyam, `release.yml`, environment `npm`) and deleted the
+  token, so the Release workflow publishes with GitHub's OIDC token alone, as
+  veda's does. The `npm` environment stays: the trusted publisher names it,
+  and only `v*` tags may deploy to it.
 - **2026-11-15 — Record: `pr-autocreate` (W-56.4, Work item #320, slice
   #327).** athya_mono's `scripts/lib/pr-autocreate.py` becomes TypeScript
   here, and athya_mono deletes it; no Python is needed. What it leaves alone
