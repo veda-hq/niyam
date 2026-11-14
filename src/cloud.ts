@@ -126,17 +126,18 @@ export async function releaseSha256(sys: Sys, version: string, token: string): P
  * release of the CLI, unpacked under CLOUD_DIR as root, and a `niyam` on
  * PATH that runs one with the other, leaving the image's own Node alone. Each download is checked against the sha256 pinned here
  * before it is unpacked; a Node already unpacked at this version is kept,
- * so a session that runs it again fetches the CLI alone. The Setup snippet
- * runs it before a session starts, and session-start runs it when the
- * environment's snapshot holds another release.
+ * so a session that runs it again fetches the CLI alone. The SessionStart
+ * hook runs it when a session has no CLI (HOOK_COMMAND), session-start when
+ * the environment's snapshot holds another release, and the Setup snippet,
+ * where it is pasted, before a session starts.
  */
 export function cloudRepoScript(version: string, sha256: string): string {
   return [
     '#!/bin/bash',
     `# niyam ${version} for Claude cloud sessions: Node ${CLOUD_NODE} and the CLI, as niyam on PATH.`,
     `# niyam onboard writes this file at the version ${WORKFLOW_PATH} pins, and writes it again on every run.`,
-    "# The cloud environment's Setup script runs it, from what niyam cloud-setup prints, and so does",
-    '# session-start when the environment holds another release. Change it by running onboard, not by hand.',
+    "# The SessionStart hook runs it when a session has no niyam, session-start when it has another release,",
+    "# and the Setup script when it holds what niyam cloud-setup prints. Change it by running onboard, not by hand.",
     'set -euo pipefail',
     `dir=${CLOUD_DIR}`,
     `node=${CLOUD_NODE}`,
@@ -170,8 +171,10 @@ export function cloudRepoScript(version: string, sha256: string): string {
 }
 
 /**
- * The Setup snippet for a Claude cloud environment, pasted once: it names
- * no version, so a new release needs no new paste. It runs the clone's
+ * The Setup snippet for a Claude cloud environment, optional since P-60,
+ * when the SessionStart hook installs niyam itself: Claude caches what a
+ * Setup script installs, so sessions start faster. It names no version,
+ * so a new release needs no new paste. It runs the clone's
  * CLOUD_SETUP_PATH, which onboard keeps at the workflow's pin, setting the
  * mark's variable. The Setup
  * script runs as root after the clone, from the folder that holds it (the
@@ -203,6 +206,7 @@ export function cloudSetupSnippet(): string {
  */
 export function cloudSetupHelp(): string[] {
   return [
+    "# Optional: cloud sessions install niyam themselves when they have none. This makes them start faster, since Claude caches what a Setup script installs.",
     `# Paste all of this at the top of the Claude cloud environment's Setup script, once (${CLAUDE_CODE_WEB} → the environment's settings).`,
     `# It runs the clone's ${CLOUD_SETUP_PATH}, which niyam onboard keeps at the version the repo pins, so a new release needs no new paste.`,
     `# ${SETUP_FIRST}`,

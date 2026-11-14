@@ -77,7 +77,7 @@ function cloudDrift(sys: Sys): string | undefined {
   const file = `${root}/${script}`;
   if (scripted === undefined) {
     if (!pinned || pinned === installed) return undefined;
-    return `niyam: this cloud session runs niyam ${installed}, but ${workflow} pins v${pinned}, and the repo has no ${CLOUD_SETUP_PATH} to install it from. Run niyam onboard again, which writes it; then paste what niyam cloud-setup prints into the cloud environment's Setup script, once.`;
+    return `niyam: this cloud session runs niyam ${installed}, but ${workflow} pins v${pinned}, and the repo has no ${CLOUD_SETUP_PATH} to install it from. Run niyam onboard again, which writes it.`;
   }
   if (pinned && pinned !== scripted) {
     return `niyam: ${script} installs niyam ${scripted}, but ${workflow} pins v${pinned}. Run niyam onboard again, which writes the file at the pin.`;
@@ -86,7 +86,7 @@ function cloudDrift(sys: Sys): string | undefined {
   const ran = sys.exec('bash', [file], { input: '', timeoutMs: CLOUD_INSTALL_MS });
   const paste = ranFromSetup(sys)
     ? ''
-    : ` The cloud environment's Setup script installs a release of its own: paste what niyam cloud-setup prints over its own part, once, and new releases then need no paste.`;
+    : ` The cloud environment's Setup script installs a release of its own: delete niyam's part of it, since sessions install niyam themselves, or paste what niyam cloud-setup prints over it.`;
   if (ran.code !== 0) {
     const why = ran.stderr.trim().split('\n').at(-1) || `exit ${ran.code}`;
     return `niyam: this cloud session runs niyam ${installed}, but ${script} installs ${scripted}, and running it failed (${why}); the session works on with ${installed}.${paste}`;

@@ -234,7 +234,7 @@ describe('sessionStart', () => {
       it('names the one paste when the Setup script installs a release of its own', async () => {
         const sys = repoAt('0.0.1', '0.0.1');
         assert.deepEqual((await start(sys)).out.slice(1), [
-          `niyam: this cloud session's environment held niyam ${v}; installed 0.0.1 from ${CLOUD_SETUP_PATH}, as the repo pins, for this session. The environment catches up when Claude builds it again. The cloud environment's Setup script installs a release of its own: paste what niyam cloud-setup prints over its own part, once, and new releases then need no paste.`,
+          `niyam: this cloud session's environment held niyam ${v}; installed 0.0.1 from ${CLOUD_SETUP_PATH}, as the repo pins, for this session. The environment catches up when Claude builds it again. The cloud environment's Setup script installs a release of its own: delete niyam's part of it, since sessions install niyam themselves, or paste what niyam cloud-setup prints over it.`,
         ]);
       });
 
@@ -254,7 +254,7 @@ describe('sessionStart', () => {
       it('says to run onboard again, not to paste, when the cloud setup file is missing or not at the pin', async () => {
         const missing = repoAt('0.0.1');
         assert.deepEqual((await start(missing)).out.slice(1), [
-          `niyam: this cloud session runs niyam ${v}, but ${WORKFLOW_PATH} pins v0.0.1, and the repo has no ${CLOUD_SETUP_PATH} to install it from. Run niyam onboard again, which writes it; then paste what niyam cloud-setup prints into the cloud environment's Setup script, once.`,
+          `niyam: this cloud session runs niyam ${v}, but ${WORKFLOW_PATH} pins v0.0.1, and the repo has no ${CLOUD_SETUP_PATH} to install it from. Run niyam onboard again, which writes it.`,
         ]);
         const behind = repoAt('0.0.2', '0.0.1');
         assert.deepEqual((await start(behind)).out.slice(1), [
