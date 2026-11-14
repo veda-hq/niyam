@@ -1708,3 +1708,10 @@
     rejected: a claude-code-action weekly job in place of the routine,
     which would store the agent's token and an Anthropic credential as
     Actions secrets (decision (b)).
+- **2026-11-15 — Record: the release publishes to npm by trusted publishing
+  (State #342 of P-59).** 0.6.16 put `@veda-hq/niyam` on npm with the
+  `npm` environment's token. Alok then set up trusted publishing for it on
+  npmjs.com (veda-hq/niyam, `release.yml`, environment `npm`) and deleted the
+  token, so the Release workflow publishes with GitHub's OIDC token alone, as
+  veda's does. The `npm` environment stays: the trusted publisher names it,
+  and only `v*` tags may deploy to it.
