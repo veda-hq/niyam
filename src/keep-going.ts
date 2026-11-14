@@ -2,7 +2,7 @@ import { basename, dirname } from 'node:path';
 
 import { githubSlug, isNoToken, SETTINGS_PATH } from './agent.ts';
 import { agentEnv } from './as-agent.ts';
-import { restList } from './pages.ts';
+import { GITHUB_API } from './host.ts';
 import type { Output, Sys } from './types.ts';
 import { sessionToken } from './work.ts';
 
@@ -36,13 +36,15 @@ import { sessionToken } from './work.ts';
  */
 
 export const CAP = 5;
+/** How many pages of pull requests a branch name is read to: a reused name has a few. */
+const PAGES = 10;
 export const STORE = '.tmp/keep-going';
 export const PRINT_MODE_VAR = 'NIYAM_PRINT_MODE';
 export const STOP_COMMAND = 'niyam keep-going --stop "<why, in plain English>"';
 
 /** `.github/niyam.json`'s `"keepGoing"`. */
 export interface KeepGoingSettings {
-  /** The branch work merges into. */
+  /** The branch work merges into; '' in the file's absence, for origin's default branch. */
   base: string;
   /** Other shared branches, whose unpushed commits are not a session's. */
   trunks: string[];
@@ -54,7 +56,7 @@ export interface KeepGoingSettings {
   tag: string;
 }
 
-const DEFAULTS: KeepGoingSettings = { base: 'main', trunks: [], printMode: [], owner: 'the owner', tag: 'niyam keep-going' };
+const DEFAULTS: KeepGoingSettings = { base: '', trunks: [], printMode: [], owner: 'the owner', tag: 'niyam keep-going' };
 const where = `${SETTINGS_PATH} "keepGoing"`;
 const BRANCH = /^(?!\/)(?!.*\/\/)(?!.*\.\.)[\w.\/+-]+$/;
 
@@ -71,15 +73,19 @@ export function keepGoingSettings(raw: unknown): KeepGoingSettings {
   const { base = DEFAULTS.base, trunks = DEFAULTS.trunks, printMode = DEFAULTS.printMode, owner = DEFAULTS.owner, tag = DEFAULTS.tag, ...rest } = value as Record<string, unknown>;
   const extra = Object.keys(rest)[0];
   if (extra !== undefined) throw new Error(`${where} has an unknown key "${extra}"; it takes "base", "trunks", "printMode", "owner" and "tag"`);
-  if (typeof base !== 'string' || !BRANCH.test(base)) throw new Error(`${where}.base must be a branch name`);
+  if (typeof base !== 'string' || (base !== '' && !BRANCH.test(base))) throw new Error(`${where}.base must be a branch name`);
   if (!Array.isArray(trunks) || !trunks.every((item) => typeof item === 'string' && BRANCH.test(item))) throw new Error(`${where}.trunks must be a list of branch names`);
   if (!Array.isArray(printMode) || !printMode.every((item) => typeof item === 'string' && /^[A-Z_][A-Z0-9_]*$/.test(item))) throw new Error(`${where}.printMode must be a list of variable names`);
   return { base, trunks: trunks as string[], printMode: printMode as string[], owner: oneLine(owner, 'owner'), tag: oneLine(tag, 'tag') };
 }
 
-function settingsAt(sys: Sys, root: string): KeepGoingSettings {
+/** The settings in the repository at `root`, the base resolved: origin's default branch when none is set, else main. */
+export function settingsAt(sys: Sys, root: string): KeepGoingSettings {
   const path = `${root}/${SETTINGS_PATH}`;
-  return sys.exists(path) ? keepGoingSettings(JSON.parse(sys.read(path)) as unknown) : { ...DEFAULTS };
+  const settings = sys.exists(path) ? keepGoingSettings(JSON.parse(sys.read(path)) as unknown) : { ...DEFAULTS };
+  if (settings.base) return settings;
+  const head = out(sys, root, 'git', ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+  return { ...settings, base: head?.startsWith('origin/') ? head.slice('origin/'.length) : 'main' };
 }
 
 export interface PullRequest {
@@ -265,10 +271,13 @@ export function writeStopNote(sys: Sys, root: string, note: StopNote): void {
 }
 
 /** The token to read the pull request with: the session's agent, or the shell's own outside a session; undefined when there is none. */
-function tokenFor(sys: Sys, root: string, session: string | undefined): string | undefined {
+function tokenFor(sys: Sys, root: string, session: string | undefined, err?: (line: string) => void): string | undefined {
   if (session === undefined) return sessionToken(sys);
   const env = agentEnv(sys, session, root);
-  if ('problem' in env) return undefined;
+  if ('problem' in env) {
+    err?.(`niyam could not act as the agent (${env.problem}); run \`niyam doctor\``);
+    return undefined;
+  }
   const token = env.env.GH_TOKEN;
   return token && !isNoToken(token) ? token : undefined;
 }
@@ -278,16 +287,25 @@ function tokenFor(sys: Sys, root: string, session: string | undefined): string |
  * carrying this commit, else the newest from it; null with none; 'unknown'
  * when origin is not on GitHub, there is no token, or GitHub cannot say.
  */
-export async function readPr(sys: Sys, root: string, branch: string, head: string, session: string | undefined): Promise<PullRequest | null | 'unknown'> {
+export async function readPr(sys: Sys, root: string, branch: string, head: string, session: string | undefined, err?: (line: string) => void): Promise<PullRequest | null | 'unknown'> {
   const slug = githubSlug(out(sys, root, 'git', ['config', '--get', 'remote.origin.url']) ?? '');
   if (!slug) return 'unknown';
-  const token = tokenFor(sys, root, session);
+  const token = tokenFor(sys, root, session, err);
   if (!token) return 'unknown';
-  let pulls: unknown[];
-  try {
-    pulls = await restList(sys, token, `repos/${slug}/pulls?head=${encodeURIComponent(`${slug.split('/')[0]}:${branch}`)}&state=all`);
-  } catch {
-    return 'unknown';
+  const pulls: unknown[] = [];
+  const route = `${GITHUB_API}/repos/${slug}/pulls?head=${encodeURIComponent(`${slug.split('/')[0]}:${branch}`)}&state=all&per_page=100`;
+  // Each page bounded, and the pages too, under the hook's own timeout.
+  for (let page = 1; ; page++) {
+    if (page > PAGES) return 'unknown';
+    let got;
+    try {
+      got = await sys.http(`${route}&page=${page}`, { token, timeoutMs: 15_000 });
+    } catch {
+      return 'unknown';
+    }
+    if (got.status !== 200 || !Array.isArray(got.json)) return 'unknown';
+    pulls.push(...(got.json as unknown[]));
+    if (got.json.length < 100) break;
   }
   const own: PullRequest[] = [];
   for (const item of pulls) {
@@ -302,7 +320,7 @@ export async function readPr(sys: Sys, root: string, branch: string, head: strin
   return own.find((pr) => pr.headRefOid === head) ?? own[0] ?? null;
 }
 
-export async function gather(sys: Sys, root: string, settings: KeepGoingSettings, subagent: boolean, session: string | undefined): Promise<Facts> {
+export async function gather(sys: Sys, root: string, settings: KeepGoingSettings, subagent: boolean, session: string | undefined, err?: (line: string) => void): Promise<Facts> {
   const head = out(sys, root, 'git', ['rev-parse', 'HEAD']) ?? '';
   const branch = out(sys, root, 'git', ['symbolic-ref', '--quiet', '--short', 'HEAD']) ?? '';
   const facts: Facts = {
@@ -328,13 +346,14 @@ export async function gather(sys: Sys, root: string, settings: KeepGoingSettings
   if (notStarted(facts, settings) || noteHolds(facts)) return facts;
   facts.pushing = backgroundTask(sys, sys.env.CLAUDE_PID, root) || pushInFlight(sys, root);
   if (facts.pushing) return facts;
-  facts.dirty = Boolean(out(sys, root, 'git', ['status', '--porcelain']));
-  facts.pr = await readPr(sys, root, branch, head, session);
+  // Its own records, and pr-autocreate's, are no work left, where a client does not ignore .tmp/.
+  facts.dirty = Boolean(out(sys, root, 'git', ['status', '--porcelain', '--', '.', `:(exclude)${STORE}`, ':(exclude).tmp/pr-autocreate']));
+  facts.pr = await readPr(sys, root, branch, head, session, err);
   return facts;
 }
 
 /** The hook: reads the Stop input, returns a block decision, a message, or nothing. Never throws. */
-export async function stopHook(sys: Sys, input: string): Promise<string> {
+export async function stopHook(sys: Sys, input: string, err?: (line: string) => void): Promise<string> {
   try {
     const data = JSON.parse(input || 'null') as { session_id?: unknown; cwd?: unknown; agent_id?: unknown } | null;
     const cwd = typeof data?.cwd === 'string' && data.cwd ? data.cwd : sys.env.CLAUDE_PROJECT_DIR;
@@ -345,7 +364,7 @@ export async function stopHook(sys: Sys, input: string): Promise<string> {
     const session = typeof data.session_id === 'string' && data.session_id ? data.session_id : undefined;
     const file = `${root}/${STORE}/${(session ?? 'unknown').replace(/[^\w-]/g, '_')}.json`;
     const previous = sys.exists(file) ? (JSON.parse(sys.read(file)) as Counter) : null;
-    const facts = await gather(sys, root, settings, Boolean(data.agent_id), session);
+    const facts = await gather(sys, root, settings, Boolean(data.agent_id), session, err);
     const decision = decide(facts, previous, settings);
     sys.mkdir(`${root}/${STORE}`);
     sys.write(file, JSON.stringify(decision.counter));
@@ -402,7 +421,7 @@ export async function keepGoing(sys: Sys, io: Output, args: readonly string[]): 
   } catch {
     return 0;
   }
-  const said = await stopHook(sys, input);
+  const said = await stopHook(sys, input, (line) => io.err(line));
   if (said) io.out(said);
   return 0;
 }

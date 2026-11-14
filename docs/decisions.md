@@ -1759,7 +1759,12 @@
   - Changed: the pull request is read over REST everywhere, as the session's
     agent with `as-agent`'s checks in-process, not through gh and the
     launcher. With no agent it reads as "GitHub cannot say", and the stop
-    goes through, as a refused gh did.
+    goes through, as a refused gh did, with the `niyam doctor` hint on
+    standard error. Each page is bounded at 15 s, ten pages at most.
+  - Changed: with no `base` set, the base is origin's default branch
+    (`origin/HEAD`), else `main`. Its own records and pr-autocreate's are
+    left out of "uncommitted work", for a client that does not ignore
+    `.tmp/`.
   - Changed: its records move from `.tmp/slice-keep-going/` to
     `.tmp/keep-going/`. A stop note written by the old copy is not read; it
     voided at the next commit anyway.

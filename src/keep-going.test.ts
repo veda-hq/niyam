@@ -22,6 +22,7 @@ import {
   keepGoingSettings,
   pushInFlight,
   readPr,
+  settingsAt,
   stopHook,
   type Facts,
   type PullRequest,
@@ -31,8 +32,9 @@ import { realSys } from './sys.ts';
 
 const HEAD = 'a'.repeat(40);
 const OLD = 'b'.repeat(40);
-const SETTINGS = keepGoingSettings({});
-const ATHYA_LIKE = keepGoingSettings({ keepGoing: { trunks: ['prod'], printMode: ['OLD_PRINT_MODE'], owner: 'Alok', tag: 'D-17 stop hook' } });
+const SETTINGS = keepGoingSettings({ keepGoing: { base: 'main' } });
+/** A client's own words: another trunk, an older print-mode variable, its owner's name and its tag. */
+const CLIENT = keepGoingSettings({ keepGoing: { base: 'main', trunks: ['prod'], printMode: ['OLD_PRINT_MODE'], owner: 'Pat', tag: 'D-9 stop hook' } });
 
 function facts(over: Partial<Facts> = {}): Facts {
   return { desktop: false, print: false, subagent: false, branch: 'feature', head: HEAD, ahead: 2, carried: false, note: null, remote: HEAD, pr: null, pushing: false, dirty: false, ...over };
@@ -50,7 +52,7 @@ describe('decide', () => {
     for (const over of [{ subagent: true }, { ahead: 0 }, { ahead: null }, { branch: '' }, { branch: 'main' }, { carried: true }, { pushing: true }, { pr: 'unknown' as const }]) {
       assert.equal(decide(facts(over), null, SETTINGS).stop, true, JSON.stringify(over));
     }
-    assert.equal(decide(facts({ branch: 'prod' }), null, ATHYA_LIKE).stop, true);
+    assert.equal(decide(facts({ branch: 'prod' }), null, CLIENT).stop, true);
     assert.equal(decide(facts({ branch: 'prod' }), null, SETTINGS).stop, false);
   });
 
@@ -85,13 +87,13 @@ describe('decide', () => {
   it('counts at one commit, starts again at a new one, and at the cap records why it let go', () => {
     let counter = null as ReturnType<typeof decide>['counter'] | null;
     for (let n = 1; n <= CAP; n++) {
-      const decision = decide(facts(), counter, ATHYA_LIKE);
-      assert.match(reason(decision), new RegExp(`\\(D-17 stop hook, ${n} of ${CAP}\\.\\)$`));
-      assert.match(reason(decision), /If only Alok can unblock it/);
+      const decision = decide(facts(), counter, CLIENT);
+      assert.match(reason(decision), new RegExp(`\\(D-9 stop hook, ${n} of ${CAP}\\.\\)$`));
+      assert.match(reason(decision), /If only Pat can unblock it/);
       counter = decision.counter;
     }
-    const capped = decide(facts(), counter, ATHYA_LIKE);
-    assert.deepEqual(capped, { stop: true, counter: { head: HEAD, count: CAP + 1 }, record: `stop hook: the session tried to stop ${CAP + 1} times at ${HEAD.slice(0, 9)} with no new commit and gave no reason; cause unknown, Alok to look (D-17 stop hook cap)` });
+    const capped = decide(facts(), counter, CLIENT);
+    assert.deepEqual(capped, { stop: true, counter: { head: HEAD, count: CAP + 1 }, record: `stop hook: the session tried to stop ${CAP + 1} times at ${HEAD.slice(0, 9)} with no new commit and gave no reason; cause unknown, Pat to look (D-9 stop hook cap)` });
     assert.equal(decide(facts({ head: OLD }), counter, SETTINGS).counter.count, 1);
   });
 
@@ -104,9 +106,23 @@ describe('decide', () => {
   });
 });
 
+describe('settingsAt', () => {
+  it("takes origin's default branch when no base is set, else main", () => {
+    assert.equal(settingsAt(checkout({ 'symbolic-ref --quiet --short refs/remotes/origin/HEAD': 'origin/trunk' }), ROOT).base, 'trunk');
+    assert.equal(settingsAt(checkout({ 'symbolic-ref --quiet --short refs/remotes/origin/HEAD': null }), ROOT).base, 'main');
+    const set = checkout();
+    set.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ keepGoing: { base: 'develop' } }));
+    assert.equal(settingsAt(set, ROOT).base, 'develop');
+    const none = checkout();
+    none.files.delete(`${ROOT}/.github/niyam.json`);
+    assert.equal(settingsAt(none, ROOT).base, 'main');
+  });
+});
+
 describe('keepGoingSettings', () => {
   it('names the first key it cannot take', () => {
-    assert.deepEqual(keepGoingSettings(null), SETTINGS);
+    assert.deepEqual(keepGoingSettings(null), keepGoingSettings({}));
+    assert.equal(keepGoingSettings({}).base, '');
     for (const [value, error] of [
       [[], /must be an object/],
       [{ nope: 1 }, /unknown key "nope"/],
@@ -184,7 +200,8 @@ function checkout(answers: Record<string, string | null> = {}): FakeSys {
     'symbolic-ref --quiet --short HEAD': 'feature',
     'rev-parse --verify --quiet @{u}': HEAD,
     'rev-list --count origin/main..HEAD': '2',
-    'status --porcelain': '',
+    'status --porcelain -- . :(exclude).tmp/keep-going :(exclude).tmp/pr-autocreate': '',
+    'symbolic-ref --quiet --short refs/remotes/origin/HEAD': 'origin/main',
     'config --get remote.origin.url': 'https://github.com/example-org/example-app.git',
     'for-each-ref --contains HEAD --format=%(refname:short) refs/remotes/origin': 'origin/feature',
     ...answers,
@@ -259,9 +276,29 @@ describe('readPr', () => {
     }
   });
 
-  it("reads as the session's agent, or not at all", async () => {
+  it('reads every page, and gives up past ten', async () => {
+    const sys = checkout();
+    const full = Array.from({ length: 100 }, (_, n) => restPull({ number: 1000 + n, head: { sha: OLD, repo: { full_name: 'example-org/example-app' } } }));
+    let page = 0;
+    pulls(sys, () => (++page === 1 ? { status: 200, json: full } : { status: 200, json: [restPull()] }));
+    assert.equal((await readPr(sys, ROOT, 'feature', HEAD, undefined) as PullRequest).number, 7);
+    assert.match(sys.requests[1]?.url ?? '', /&page=2$/);
+    assert.equal(sys.requests[0]?.timeoutMs, 15_000);
+    const endless = checkout();
+    pulls(endless, full);
+    assert.equal(await readPr(endless, ROOT, 'feature', HEAD, undefined), 'unknown');
+    assert.equal(endless.requests.length, 10);
+    const offline = checkout();
+    offline.http = () => Promise.reject(new Error('offline'));
+    assert.equal(await readPr(offline, ROOT, 'feature', HEAD, undefined), 'unknown');
+  });
+
+  it("reads as the session's agent, or not at all, and then says how to fix it", async () => {
     const sys = checkout();
     pulls(sys, [restPull()]);
+    const said: string[] = [];
+    assert.equal(await readPr(sys, ROOT, 'feature', HEAD, 'abc-123', (line) => said.push(line)), 'unknown');
+    assert.match(said[0] ?? '', /^niyam could not act as the agent \(.*\); run `niyam doctor`$/);
     assert.equal(await readPr(sys, ROOT, 'feature', HEAD, 'abc-123'), 'unknown');
     sys.ready();
     sys.files.set(sessionRecord(HOME, 'abc-123') as string, `${JSON.stringify({ agent: 'ExampleBot' })}\n`);
@@ -276,7 +313,7 @@ describe('gather', () => {
     const sys = checkout();
     pulls(sys, [restPull()]);
     sys.env = { ...sys.env, CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', OLD_PRINT_MODE: '1' };
-    assert.deepEqual(await gather(sys, ROOT, ATHYA_LIKE, false, undefined), facts({ desktop: true, print: true, pr: open() }));
+    assert.deepEqual(await gather(sys, ROOT, CLIENT, false, undefined), facts({ desktop: true, print: true, pr: open() }));
     const sub = checkout();
     assert.deepEqual(await gather(sub, ROOT, SETTINGS, true, undefined), facts({ subagent: true, ahead: null }));
     assert.equal(sub.requests.length, 0);
@@ -365,11 +402,11 @@ describe('stopHook', () => {
 describe('niyam keep-going', () => {
   it('writes the stop note at this branch and commit, trimmed, naming who to tell', async () => {
     const sys = checkout();
-    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ keepGoing: { owner: 'Alok' } }));
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ keepGoing: { owner: 'Pat' } }));
     const seen = capture();
-    assert.equal(await keepGoing(sys, seen.io, ['--stop', '  waiting', 'on', 'Alok  ']), 0);
-    assert.deepEqual(seen.out, [`Stop note written for feature at ${HEAD.slice(0, 9)}; a new commit voids it. Tell Alok what happened, why, and the options; then stop.`]);
-    assert.deepEqual(JSON.parse(sys.files.get(`${ROOT}/${STORE}/stop-note.json`) as string), { branch: 'feature', head: HEAD, reason: 'waiting on Alok', at: sys.now().toISOString() });
+    assert.equal(await keepGoing(sys, seen.io, ['--stop', '  waiting', 'on', 'Pat  ']), 0);
+    assert.deepEqual(seen.out, [`Stop note written for feature at ${HEAD.slice(0, 9)}; a new commit voids it. Tell Pat what happened, why, and the options; then stop.`]);
+    assert.deepEqual(JSON.parse(sys.files.get(`${ROOT}/${STORE}/stop-note.json`) as string), { branch: 'feature', head: HEAD, reason: 'waiting on Pat', at: sys.now().toISOString() });
   });
 
   it('refuses a stop with no reason or off a branch (exit 1), and says who to tell when the settings are torn', async () => {
@@ -447,5 +484,24 @@ describe('keep-going on real git', () => {
     const seen = capture();
     assert.equal(await keepGoing(sys, seen.io, ['--stop', 'proven', 'unneeded']), 0);
     assert.deepEqual(JSON.parse(readFileSync(join(work, STORE, 'stop-note.json'), 'utf8')).head, git('rev-parse', 'HEAD'));
+
+    // A desktop session with every commit on a ready PR stops at every turn end, its own records not read as work
+    // left, where the repository does not ignore .tmp/.
+    rmSync(join(work, '.tmp'), { recursive: true, force: true });
+    git('remote', 'set-url', 'origin', 'https://github.com/example-org/example-app.git');
+    git('config', `url.${bare}.insteadOf`, 'https://github.com/example-org/example-app.git');
+    git('push', '-q', '-u', 'origin', 'feature');
+    mkdirSync(join(work, '.tmp/pr-autocreate'), { recursive: true });
+    writeFileSync(join(work, '.tmp/pr-autocreate/feature-0.json'), '{}');
+    const head = git('rev-parse', 'HEAD');
+    const desktop = {
+      ...sys,
+      env: { ...sys.env, CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', GH_TOKEN: 'ghp_shell' },
+      http: () => Promise.resolve({ status: 200, json: [restPull({ head: { sha: head, repo: { full_name: 'example-org/example-app' } } })] }),
+    };
+    assert.equal(await stopHook(desktop, JSON.stringify({ cwd: work })), '');
+    assert.equal(await stopHook(desktop, JSON.stringify({ cwd: work })), '');
+    writeFileSync(join(work, 'b'), 'edited\n');
+    assert.match(await stopHook(desktop, JSON.stringify({ cwd: work })), /PR 7 is open/);
   });
 });

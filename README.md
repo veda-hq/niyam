@@ -826,10 +826,11 @@ REST, as the session's agent; a cloud session is held the same way. Its
 records are in `.tmp/keep-going/`. The settings:
 
 ```json
-{ "keepGoing": { "base": "main", "trunks": [], "printMode": [], "owner": "the owner", "tag": "niyam keep-going" } }
+{ "keepGoing": { "trunks": [], "printMode": [], "owner": "the owner", "tag": "niyam keep-going" } }
 ```
 
-`printMode` names older print-mode variables read beside `NIYAM_PRINT_MODE`;
+`base`, when set, names the branch work merges into; otherwise it is
+origin's default branch. `printMode` names older print-mode variables read beside `NIYAM_PRINT_MODE`;
 `owner` is who the messages tell a session to tell; `tag` ends each message.
 
 **Design frames** is the `figma` feature, an optional extension for clients
