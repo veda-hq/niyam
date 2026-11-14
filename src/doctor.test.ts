@@ -461,7 +461,6 @@ describe('doctor in a Claude cloud session', () => {
   const v = packageVersion();
   const WORKFLOW = `${ROOT}/${WORKFLOW_PATH}`;
   const CLOUD_FILE = `${ROOT}/${CLOUD_SETUP_PATH}`;
-  const PASTE = "paste what niyam cloud-setup prints into the cloud environment's Setup script, once";
 
   /**
    * A cloud session session-start gave the agent's identity, in a clone whose
@@ -520,7 +519,7 @@ describe('doctor in a Claude cloud session', () => {
       const { code, out } = await check(sys);
       assert.equal(code, 1);
       assert.deepEqual(marked(out, '✗'), [
-        `✗  ${CLOUD_SETUP_PATH} missing, or not the file onboard writes, so the Setup script installs no niyam → niyam onboard again`,
+        `✗  ${CLOUD_SETUP_PATH} missing, or not the file onboard writes, so a session without niyam cannot install it → niyam onboard again`,
       ]);
       assert.ok(out.includes(`✓  niyam ${v} runs here`), 'still checked against the pin');
     }
@@ -558,13 +557,17 @@ describe('doctor in a Claude cloud session', () => {
     ]);
   });
 
-  it('asks for the one paste when the Setup script did not run the repo file, and still passes', async () => {
+  it('asks for no paste when the Setup script did not run the repo file, since the SessionStart hook installs niyam (P-60)', async () => {
     const sys = cloud();
     sys.files.delete(FROM_SETUP);
     const { code, out } = await check(sys);
     assert.equal(code, 0);
-    assert.deepEqual(marked(out, '▲'), [`▲  ${FROM_SETUP} missing, so the cloud environment's Setup script does not run ${CLOUD_SETUP_PATH} → ${PASTE}`]);
-    assert.equal((await check(sys)).out.at(-1), '└  1 to fix');
+    assert.deepEqual(marked(out, '▲'), []);
+    assert.ok(
+      out.includes(`✓  the SessionStart hook installs niyam from ${CLOUD_SETUP_PATH} when a session has none; the Setup script does not run it, which only makes sessions start slower`),
+      out.join('\n'),
+    );
+    assert.ok(!out.join('\n').includes('paste'), 'no paste asked for');
   });
 
   it('reads no workflow, cloud setup file or Setup mark under their names before P-56 (P-57)', async () => {
@@ -577,8 +580,8 @@ describe('doctor in a Claude cloud session', () => {
     sys.files.set('/opt/process-rules/from-setup', '');
     const { code, out } = await check(sys);
     assert.equal(code, 1, out.join('\n'));
-    assert.ok(out.includes(`✗  ${CLOUD_SETUP_PATH} missing, or not the file onboard writes, so the Setup script installs no niyam → niyam onboard again`), out.join('\n'));
-    assert.ok(out.some((line) => line.startsWith(`▲  ${FROM_SETUP} missing`)), out.join('\n'));
+    assert.ok(out.includes(`✗  ${CLOUD_SETUP_PATH} missing, or not the file onboard writes, so a session without niyam cannot install it → niyam onboard again`), out.join('\n'));
+    assert.ok(out.some((line) => line.startsWith('✓  the SessionStart hook installs niyam')), 'the old mark is not the Setup script running the repo file');
   });
 
   it('names the cloud setup file the Setup snippet ran, as its mark records it, or none where the mark names neither (P-56)', async () => {
