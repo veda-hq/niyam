@@ -2,14 +2,20 @@ import { spawn, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import * as http from 'node:http';
 import { constants, homedir, tmpdir } from 'node:os';
@@ -58,6 +64,41 @@ export function realSys(): Sys {
     list: (path) => (existsSync(path) ? readdirSync(path) : []),
     tempDir: (prefix) => mkdtempSync(prefix ?? join(tmpdir(), `${CLI}-`)),
     remove: (path) => rmSync(path, { recursive: true, force: true }),
+    claim(path) {
+      try {
+        closeSync(openSync(path, 'wx'));
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+        throw error;
+      }
+    },
+    modified(path) {
+      try {
+        return statSync(path).mtime;
+      } catch {
+        return undefined;
+      }
+    },
+    replace(path, data) {
+      const temp = `${path}.${process.pid}.tmp`;
+      const fd = openSync(temp, 'w');
+      try {
+        writeSync(fd, data);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(temp, path);
+    },
+    detach(command, args, options) {
+      const log = openSync(options.log, 'a');
+      try {
+        spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, detached: true, stdio: ['ignore', log, log] }).unref();
+      } finally {
+        closeSync(log);
+      }
+    },
     async http(url, options = {}) {
       const method = (options.method ?? 'GET').toUpperCase();
       // One deadline for the call, a repeat included, so timeoutMs bounds all of it.

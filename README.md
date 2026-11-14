@@ -777,6 +777,37 @@ call the agent made alone. A failed commit restores the file. The settings:
 { "cubicDismiss": { "file": ".cubic-dismiss", "subject": "chore(review): dismiss {count} Cubic finding{s}", "ownerBasis": "owner" } }
 ```
 
+**A pushed branch gets its pull request.** git has no post-push hook, so
+`niyam pr-autocreate` takes a push from three sides. `claude-hook`, Claude
+Code's PostToolUse(Bash) and Stop hook, catches a session's foreground push
+once the tracking ref moved (a background one at Stop), opens the pull
+request, and tells the session once to switch Autofix on: in context after
+the push, or by holding Stop (exit 2); a cloud session, which has no
+Autofix, gets a `systemMessage` instead. `spawn-watchers --root <repo>
+--remote <name>`, run by the pre-push hook with git's ref lines on stdin,
+starts one detached `watch` per pushed branch, which waits for the remote to
+hold the pushed commit, then opens the pull request, retrying GitHub for ten
+minutes. Nothing opens for a protected or merge-queue branch, another remote,
+a branch with no commits ahead of the base, one with a merged pull request
+(it is retired) or a closed one (reopening is a person's call), or in CI.
+`NIYAM_PR_AUTOCREATE=0` on a push opens none for the commit it sent: the
+choice is recorded before git sends the refs, and a push whose choice cannot
+be recorded is refused (exit 3). Every answer is kept in
+`.tmp/pr-autocreate/` (one JSON record per branch, its opt-outs, the watch
+log), so GitHub is asked once per pushed commit. A session's hook reaches
+GitHub as the session's agent, with every check `as-agent` makes, and the
+watcher with the push's own token. Its own errors never fail a push or hold
+a session. The settings:
+
+```json
+{ "prAutocreate": { "base": "main", "draft": false, "protected": ["main", "master", "develop", "prod", "production"], "skip": ["mergify/", "gh-readonly-queue/"], "optOut": [], "describe": "`gh pr edit --body-file`" } }
+```
+
+`optOut` names older opt-out variables read beside `NIYAM_PR_AUTOCREATE`;
+`describe` says how the pushing session writes the real description;
+`retired`, a link, explains why a merged pull request retires its branch;
+`footer` ends the placeholder body.
+
 **Design frames** is the `figma` feature, an optional extension for clients
 that design in Figma: with it on and two Actions secrets, `FIGMA_LIBRARY`
 (the design library's file key) and `FIGMA_TOKEN`, each State of the slice

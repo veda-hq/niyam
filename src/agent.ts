@@ -28,6 +28,10 @@ const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 const GITHUB_REMOTE = new RegExp(
   `^(?:https://(?:[^@/\\s]+@)?${GITHUB_HOST_RE}/|git@${GITHUB_HOST_RE}:|ssh://git@(?:ssh\\.)?${GITHUB_HOST_RE}(?::\\d+)?/)([^/\\s]+/[^/\\s]+?)(?:\\.git)?/?$`,
 );
+/** The owner/name a GitHub remote's url names; undefined for any other url. */
+export function githubSlug(url: string): string | undefined {
+  return GITHUB_REMOTE.exec(url.trim())?.[1];
+}
 /** The classic-token scopes an agent account needs (docs/decisions.md). */
 export const TOKEN_SCOPES = ['repo', 'workflow', 'read:org', 'project', 'write:ssh_signing_key'];
 /** Broader scopes that include a needed one. */

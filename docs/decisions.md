@@ -1675,3 +1675,28 @@
   - athya_mono's faults suite is a sweep here: each git call fails in turn,
     the run never exits 0 without the commit, the file is as it was or as a
     clean run leaves it, and a rerun converges on one commit.
+- **2026-11-15 — Record: `pr-autocreate` (W-56.4, Work item #320, slice
+  #327).** athya_mono's `scripts/lib/pr-autocreate.py` becomes TypeScript
+  here, and athya_mono deletes it; no Python is needed. What it leaves alone
+  and when it speaks are unchanged. Its records in `.tmp/pr-autocreate/`
+  keep their names and fields, so the desktop app's mods read them as
+  before.
+  - What was athya_mono's is now settings, under `"prAutocreate"`: the base,
+    draft or ready, protected branches, skipped prefixes, the old opt-out
+    variable (`ATHYA_PR_AUTOCREATE` there), how the session describes the
+    pull request, the page on retired branches and a body footer.
+    `NIYAM_PR_AUTOCREATE=0` always opts out.
+  - Changed: pull requests are listed, opened and read through GitHub's REST
+    API everywhere, not `gh pr` on a laptop and `gh api` in the cloud. A
+    session's hook takes the agent's token from `as-agent`'s checks
+    in-process, instead of running gh through the launcher; the watcher
+    takes the push's GH_TOKEN, or gh's signed-in account.
+  - Changed: GitHub's "no commits between" answer, and a branch with nothing
+    ahead of the base, give the watcher a note and no retry.
+  - A cloud session is told by `CLAUDE_CODE_REMOTE=true`, as everywhere in
+    niyam, not by athya_mono's `cloud-check.sh` (spoofed flags on a laptop).
+    A laptop that sets the flag gets the cloud's wording and a Stop that is
+    never held, and the proxy's placeholder token, as `as-agent` gives it
+    there, which GitHub refuses: no pull request opens.
+  - The command exits 0 on its own errors, bad arguments included, so no
+    hook holds a session or fails a push for them.

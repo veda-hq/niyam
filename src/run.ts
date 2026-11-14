@@ -10,6 +10,7 @@ import { prIdentity } from './identity.ts';
 import { machine, machineArgs } from './machine.ts';
 import { brief, briefArgs, handoff, handoffArgs } from './handoff.ts';
 import { cubicDismiss, dismissArgs } from './cubic-dismiss.ts';
+import { prAutocreate } from './pr-autocreate.ts';
 import { prSignals, signalArgs } from './pr-signals.ts';
 import { reviewsDue } from './reviews.ts';
 import { reviewThread, threadArgs } from './review-thread.ts';
@@ -76,6 +77,11 @@ Commands:
   cubic-dismiss (--evidence <proof> | --decision <where the owner chose>)
                 ((--title <exact> --reason <why>)... | --from <file.json>) [--context <id>]
                    Record a Cubic finding as dismissed, committing the dismiss file alone with its basis
+  pr-autocreate claude-hook | spawn-watchers --root <repo> --remote <name>
+                | watch --root <repo> --branch <branch> --sha <commit>
+                   A pushed branch gets its pull request: Claude Code's PostToolUse(Bash) and Stop
+                   hook, the pre-push hook (git's ref lines on stdin) and the watcher it starts;
+                   NIYAM_PR_AUTOCREATE=0 on a push opens none. Its own errors exit 0
   help            Show this text
   version          Print the installed version
 
@@ -116,7 +122,7 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
@@ -158,6 +164,9 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         io.err(`niyam guard: refused, because the check failed: ${error instanceof Error ? error.message : String(error)}`);
         return 2;
       }
+    case 'pr-autocreate':
+      // Its own errors never fail a push or hold a session: it says so and exits 0.
+      return prAutocreate(await sys(), io, rest);
     case 'as-agent':
       // Any failure runs nothing and says so with the locked code, never the command's own.
       try {
