@@ -1747,3 +1747,27 @@
     there, which GitHub refuses: no pull request opens.
   - The command exits 0 on its own errors, bad arguments included, so no
     hook holds a session or fails a push for them.
+- **2026-11-15 — Record: `keep-going` (W-56.5, Work item #320, slice
+  #329).** athya_mono's `scripts/lib/slice-keep-going.ts` moves here as
+  `niyam keep-going`, and athya_mono deletes it. When it sends a session
+  back, what it says is left, and when it lets one stop, are unchanged,
+  including the cap of five at one commit and the stop note it then writes.
+  - What was athya_mono's is now settings, under `"keepGoing"`: the base,
+    other trunks (`prod` there), the old print-mode variable
+    (`ATHYA_PRINT_MODE`), the owner's name in the messages and the tag that
+    ends them. `NIYAM_PRINT_MODE=1` always means print mode.
+  - Changed: the pull request is read over REST everywhere, as the session's
+    agent with `as-agent`'s checks in-process, not through gh and the
+    launcher. With no agent it reads as "GitHub cannot say", and the stop
+    goes through, as a refused gh did, with the `niyam doctor` hint on
+    standard error. Each page is bounded at 15 s, ten pages at most.
+  - Changed: with no `base` set, the base is origin's default branch
+    (`origin/HEAD`), else `main`. Its own records and pr-autocreate's are
+    left out of "uncommitted work", for a client that does not ignore
+    `.tmp/`.
+  - Changed: its records move from `.tmp/slice-keep-going/` to
+    `.tmp/keep-going/`. A stop note written by the old copy is not read; it
+    voided at the next commit anyway.
+  - A cloud session is held as on a laptop (athya_mono's W-44), and is told
+    by `CLAUDE_CODE_REMOTE=true` without `cloud-check.sh`, which only chose
+    gh's REST over GraphQL there.
