@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, beforeEach, describe, it } from 'node:test';
@@ -16,6 +16,7 @@ import {
   Pulls,
   RETIRED_REFUSAL,
   RETIRED_UNCHECKED,
+  STATE_DIR,
   autocreateSettings,
   claudeHook,
   ensurePr,
@@ -1029,5 +1030,79 @@ describe('retiredBy and pushedRefs', () => {
     assert.deepEqual(pushedRefs([`refs/heads/a ${SHA} refs/heads/b ${OTHER}`, `x ${'0'.repeat(40)} refs/heads/gone ${OTHER}`, `refs/tags/t ${SHA} refs/tags/t ${OTHER}`, '  ', 'a b c'].join('\n')), [
       { localSha: SHA, branch: 'b', remoteSha: OTHER },
     ]);
+  });
+});
+
+describe('pr-autocreate behind a link out of the toplevel (real git, GitHub faked)', () => {
+  let w: ReturnType<typeof world>;
+  let github: FakeGitHub;
+  let sys: ReturnType<typeof machine>;
+  let away: string;
+  beforeEach(() => {
+    w = world();
+    github = new FakeGitHub();
+    sys = machine(github, w.dir);
+    away = join(w.dir, 'away');
+    mkdirSync(away);
+  });
+  const link = (at: string, to: string): void => {
+    mkdirSync(join(at, '..'), { recursive: true });
+    symlinkSync(to, at);
+  };
+  const refused = (path: string, leads: string): string => `refused to write ${path}: it leads to ${leads}, outside the git toplevel ${w.work}`;
+
+  for (const linked of [STATE_DIR, '.tmp']) {
+    it(`opens no pull request and writes nothing where ${linked} is a link, and says why`, async () => {
+      link(join(w.work, linked), away);
+      const got = await hook(sys, bash(w.work, 'git push origin feature'));
+      const lock = `${statePath(w.work, 'feature')}.lock`;
+      assert.deepEqual(got, { code: 0, out: [], err: [`pr-autocreate: PR check failed for feature (${refused(lock, away)})`] });
+      assert.equal(github.calls.length, 0);
+      assert.deepEqual(readdirSync(away), []);
+    });
+  }
+
+  it("leaves a branch's linked record and a linked stale lock as they are: nothing outside is written or removed", async () => {
+    writeFileSync(join(away, 'record'), 'outside\n');
+    writeFileSync(join(away, 'lock'), '');
+    link(statePath(w.work, 'feature'), join(away, 'record'));
+    const got = await hook(sys, bash(w.work, 'git push origin feature'));
+    assert.deepEqual(got.err, [`pr-autocreate: PR check failed for feature (${refused(statePath(w.work, 'feature'), join(away, 'record'))})`]);
+    rmSync(statePath(w.work, 'feature'));
+    // A lock three minutes old would be removed as abandoned; through a link, that would delete a file outside.
+    link(`${statePath(w.work, 'feature')}.lock`, join(away, 'lock'));
+    sys.clock += 10 * 60 * 1000;
+    await assert.rejects(withLock(sys, w.work, 'feature', () => 'ran'), { message: refused(`${statePath(w.work, 'feature')}.lock`, join(away, 'lock')) });
+    assert.deepEqual(readdirSync(away).sort(), ['lock', 'record']);
+    assert.equal(readFileSync(join(away, 'record'), 'utf8'), 'outside\n');
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('records no Autofix ack through a linked acks folder, and does not tell the session to switch it on', async () => {
+    link(join(w.work, STATE_DIR, 'acks'), away);
+    const got = await hook(sys, bash(w.work, 'git push origin feature'));
+    assert.equal(got.code, 0);
+    assert.deepEqual(got.err, [`pr-autocreate: could not record the Autofix ack (${refused(`${w.work}/${STATE_DIR}/acks/s1-100`, away)}); not instructing, to avoid a loop`]);
+    assert.deepEqual(got.out, []);
+    assert.deepEqual(readdirSync(away), []);
+  });
+
+  it('starts no watcher through a linked record folder, and refuses an opted-out push it cannot record', async () => {
+    link(join(w.work, STATE_DIR), away);
+    const lines = `refs/heads/feature ${SHA} refs/heads/feature ${OTHER}\n`;
+    const seen = capture();
+    assert.equal(await spawnWatchers(sys, seen.io, ['--root', w.work, '--remote', 'origin'], lines), 0);
+    const lock = `${statePath(w.work, 'feature')}.lock`;
+    assert.deepEqual(seen.out, [
+      `⚠️  Could not record feature's push for the PR opt-out (${refused(lock, away)}); if an earlier push of this commit said NIYAM_PR_AUTOCREATE=0, no PR opens for it automatically: open one yourself.`,
+      `⚠️  Could not start the PR watcher for feature (${refused(`${w.work}/${STATE_DIR}/watch.log`, away)}); open its PR yourself.`,
+    ]);
+    assert.deepEqual(sys.detached, []);
+    const opted = { ...sys, env: { ...sys.env, NIYAM_PR_AUTOCREATE: '0' } };
+    const held = capture();
+    assert.equal(await spawnWatchers(opted, held.io, ['--root', w.work, '--remote', 'origin'], lines), 3);
+    assert.match(held.out[0] ?? '', /^❌ Could not record NIYAM_PR_AUTOCREATE=0 for feature \(refused to write /);
+    assert.deepEqual(readdirSync(away), []);
+    assert.equal(existsSync(join(w.work, STATE_DIR, 'watch.log')), false);
   });
 });
