@@ -1095,7 +1095,7 @@ describe('onboard', () => {
   });
 
   it("refuses to pin a release whose tag is not on main, or when GitHub cannot say, changing nothing (P-61)", async () => {
-    const compare = `/repos/veda-hq/niyam/compare/v${packageVersion()}...main?per_page=1`;
+    const compare = `/repos/veda-hq/niyam/compare/refs/tags/v${packageVersion()}...refs/heads/main?per_page=1`;
     for (const [answer, message] of [
       [
         { status: 200, json: { status: 'diverged', base_commit: { sha: '7c'.repeat(20) } } },

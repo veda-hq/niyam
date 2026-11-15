@@ -386,7 +386,7 @@ export class FakeSys implements Sys {
       return { status: 200, json: { tag_name: `v${version}`, assets: [{ name: tarballName(version) }] } };
     }
     // Every release tag is on main, unless a test routes its comparison.
-    if (/^https:\/\/api\.github\.com\/repos\/veda-hq\/niyam\/compare\/v[^/]+\.\.\.main\?per_page=1$/.test(url)) return { status: 200, json: { status: 'ahead', base_commit: { sha: TAG_SHA } } };
+    if (/^https:\/\/api\.github\.com\/repos\/veda-hq\/niyam\/compare\/refs\/tags\/v[^/]+\.\.\.refs\/heads\/main\?per_page=1$/.test(url)) return { status: 200, json: { status: 'ahead', base_commit: { sha: TAG_SHA } } };
     if (release) return { status: 200, json: { assets: [{ name: tarballName(release[1] as string), digest: `sha256:${RELEASE_SHA256}` }] } };
     if (url === 'https://api.github.com/repos/example-org/example-app') return { status: 200, json: { owner: { login: 'example-org', type: this.ownerType } } };
     if (url === 'https://api.github.com/users/example-org') return { status: 200, json: { login: 'example-org', type: this.ownerType } };

@@ -1791,7 +1791,9 @@
     or that run fails at the gate (a re-run then finishes it).
   - `niyam upgrade`, before it installs, and `niyam onboard`, before it pins
     a release into the workflow and writes `.github/niyam/cloud-setup.sh` at
-    it, ask `GET /repos/veda-hq/niyam/compare/vX.Y.Z...main` with no token.
+    it, ask `GET /repos/veda-hq/niyam/compare/refs/tags/vX.Y.Z...refs/heads/main`
+    with no token, both refs in full so a branch named like the tag, or a
+    tag named `main`, is never the one compared.
     The tag's commit is the comparison's base, and it is on `main` exactly
     when the status is `ahead` or `identical`. Otherwise each refuses,
     naming the tag and the commit; no such tag, and no answer from GitHub,
@@ -1799,13 +1801,15 @@
     changed. The cloud session installs only the tarball whose sha256
     onboard pinned after that check, so it asks nothing itself. `doctor`
     does not ask.
+  - The workflow's tag is annotated, not signed, unlike the tags AthyaBot
+    pushed: what vouches for a release is that its commit is on `main`.
   - Tag creation stays open: not checked by hand, since AthyaBot is not an
     admin and changes no ruleset. The "release tags" ruleset holds `v*`
     against deletion, update and force-push, not creation; its bypass list
     reads as empty, which GitHub may only show admins. The rulesets REST API
-    takes bypass actors by type (`Integration`, `RepositoryRole`, `Team`,
-    `OrganizationAdmin`, `DeployKey`, `User`), with no way to name one
-    workflow or branch. GitHub Actions (app 15368) can be written as an
+    takes a bypass actor as a type and an id (an app, a role, a team,
+    organisation admins, deploy keys), with no way to name one workflow or
+    branch. GitHub Actions (app 15368) can be written as an
     `Integration` actor, but GitHub's docs never name it as a bypass, and
     reports from November 2026 say GitHub refuses it with a 422 on repos a
     user owns; on an organisation's repo, as this one is, it is unconfirmed.

@@ -13,7 +13,8 @@ name: Release
 #
 # npm auth: trusted publishing (OIDC) only, set up on npmjs.com for
 # @veda-hq/niyam with this repository, this workflow and the `npm`
-# environment, which only main may deploy to. There is no npm token, so a
+# environment, which only main may deploy to (once the owner moves its rule
+# from v* tags to main, P-61). There is no npm token, so a
 # leaked secret cannot publish. Keep this file's name and the environment's.
 on:
   push:

@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { FakeSys, TAG_SHA } from './fake.test.ts';
 import { tagOnMain } from './release-tag.ts';
 
-const COMPARE = '/repos/veda-hq/niyam/compare/v0.6.9...main?per_page=1';
+const COMPARE = '/repos/veda-hq/niyam/compare/refs/tags/v0.6.9...refs/heads/main?per_page=1';
 const OFF_MAIN = '7c'.repeat(20);
 
 describe('tagOnMain (P-61)', () => {

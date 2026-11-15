@@ -16,14 +16,16 @@ export const RELEASE_BRANCH = 'main';
  * commit, so `upgrade` and `onboard` ask before they install or pin a
  * release. Comparing the tag with main gives the tag's commit as the base,
  * and says main is `ahead` of it, or `identical`, exactly when that commit
- * is on main. Anything else is a refusal: a tag off main, no such tag, or no
- * answer, each with its own words, so nothing is installed for want of one.
+ * is on main. Both refs are written in full, so a branch named like the
+ * tag, or a tag named main, is never the one compared. Anything else is a
+ * refusal: a tag off main, no such tag, or no answer, each with its own
+ * words, so nothing is installed for want of one.
  */
 export async function tagOnMain(sys: Sys, version: string): Promise<{ sha: string } | { problem: string }> {
   const tag = `v${version}`;
   let answer: { status: number; json: unknown };
   try {
-    answer = await sys.http(`${API}/repos/${PRODUCT}/compare/${tag}...${RELEASE_BRANCH}?per_page=1`, { timeoutMs: COMPARE_MS });
+    answer = await sys.http(`${API}/repos/${PRODUCT}/compare/refs/tags/${tag}...refs/heads/${RELEASE_BRANCH}?per_page=1`, { timeoutMs: COMPARE_MS });
   } catch (error) {
     return { problem: `GitHub could not be asked whether the ${tag} tag is on ${RELEASE_BRANCH} (${error instanceof Error ? error.message : String(error)})` };
   }

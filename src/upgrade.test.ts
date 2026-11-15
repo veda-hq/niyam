@@ -232,7 +232,7 @@ describe('upgrade', () => {
 
   it('refuses a release whose tag is not on main, naming the tag and its commit (P-61)', async () => {
     const sys = machine();
-    const compare = `/repos/veda-hq/niyam/compare/v${NEW}...main?per_page=1`;
+    const compare = `/repos/veda-hq/niyam/compare/refs/tags/v${NEW}...refs/heads/main?per_page=1`;
     sys.route('GET', compare, { status: 200, json: { status: 'diverged', base_commit: { sha: '7c'.repeat(20) } } });
     assert.deepEqual(await upgraded(sys), {
       code: 1,
