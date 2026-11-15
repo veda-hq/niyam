@@ -1949,3 +1949,17 @@
   `cancel-in-progress` from `guard.yml` (a guard file, and a stale run
   could then finish last and show an old verdict), and ignoring every
   cancelled run (one that nothing replaced proves nothing).
+- **2026-11-15 — Record: agents turn auto-merge on for every pull request
+  (P-65, Work item #303, slice #305).** Alok, 2026-11-14: "I'll not read the
+  PRs which would come my way." With Guard (P-62) required on `main`, an
+  agent holding a `.github/` change by hand only left it waiting, as #301
+  waited.
+  - `CLAUDE.md`'s Merging section: auto-merge goes on right after
+    `gh pr create` for every pull request, `.github/` changes included.
+    Guard and the other required checks decide whether it merges, and
+    CODEOWNERS (P-63) holds a change to the guard itself for Alok.
+  - An agent leaves auto-merge off, saying why in the pull request, only
+    where Alok's yes is needed for a reason no check sees: a new dependency,
+    vendored third-party code, or a major release.
+  - The section no longer says a merge publishes nothing: since P-61,
+    merging a version bump releases it.
