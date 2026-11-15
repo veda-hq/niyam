@@ -2023,3 +2023,38 @@
     follows a link, so a dangling one would pass). `pr-autocreate` writes
     under `.tmp/pr-autocreate` the same way but is not a command kavach
     lists; it is left for its own slice.
+- **2026-11-15 — Record: any agent runner gets the agent identity and the
+  lock (P-68, Work item #367, slice #50).** On 2026-10-31 the owner kept
+  Claude Code the only runner: "Athya's agents run in Claude Code only",
+  open for adoption outside Athya. The `approved` label on #367 reopens it.
+  The identity and the lock reached a session only through Claude Code's
+  SessionStart hook and `CLAUDE_ENV_FILE`, so an agent run from Codex,
+  Cursor, Copilot's agent, Aider or a script acted as the owner until PR
+  identity caught it after the push.
+  - `niyam env` prints the lines session-start gives a Claude Code session,
+    from the same code (`localIdentity`): the lock, then the session file
+    `machine` wrote, checked as session-start checks it. Claude Code's hook
+    is one integration of it. The lines hold the keychain's read command,
+    never the token, which the shell reads itself; a test checks a known
+    token is in no output.
+  - `niyam env -- <command>` runs the command under them through `/bin/sh`,
+    so a runner started that way cannot start without niyam;
+    `eval "$(niyam env)"` with niyam missing evaluates nothing, so the
+    README leads with the wrapper. Printed, the lines carry no comments and
+    each ends in `;`: unquoted, `eval $(niyam env)` had evaluated nothing
+    after the lock's opening comment, which swallowed the rest once the
+    shell turned newlines into spaces. Under `set -x` the eval form traces
+    the token as it is exported; the wrapper's shell traces nothing. Every
+    failure of env's own check still
+    prints the lock, or runs nothing. Printing exits 0 as the agent and 77
+    (P-43's locked code) otherwise; running exits with the command's code,
+    and runs it locked when it cannot work as the agent, as a Claude Code
+    session starts locked.
+  - No hook changes: the session file sets `NIYAM_AGENT`, which the pre-push
+    hook already reads. Other runners have no PreToolUse guard; the lock and
+    the pre-push hook hold there, as for a script in Claude Code (P-17). A
+    runner never started through `niyam env` still acts as the owner (P-18).
+  - Rejected: a second command, `niyam run`, doing what `env --` does;
+    printing the token itself, which would land in scrollback and runner
+    logs; and per-runner integrations (Cursor rules, Codex config), many
+    and changing, where one shell entry point covers them all.

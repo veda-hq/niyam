@@ -414,6 +414,18 @@ describe('sessionStart', () => {
     ]);
   });
 
+  it('still writes the lock when checking for the identity fails', async () => {
+    const sys = ready();
+    const exists = sys.exists.bind(sys);
+    sys.exists = (path) => {
+      if (path === SESSION) throw new Error('EIO');
+      return exists(path);
+    };
+    const { out, env } = await start(sys);
+    assert.equal(env, `\n${lockScript(HOME)}`);
+    assert.deepEqual(out, ['niyam: GitHub is locked out of this session: the check failed (EIO). Do not work around the lock; tell the owner.']);
+  });
+
   it('stays locked when the identity cannot be appended', async () => {
     const sys = ready();
     const append = sys.append.bind(sys);
