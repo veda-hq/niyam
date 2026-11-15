@@ -21,12 +21,18 @@ import { sessionToken } from './work.ts';
  *   watch           Polls `git ls-remote` until the remote branch holds the
  *                   pushed commit, then makes sure the branch has its PR.
  *
+ * A fourth, refuse-retired, opens nothing: the pre-push hook calls it before
+ * its expensive checks, with the same ref lines, to refuse a push to a branch
+ * whose pull request already merged. It asks GitHub what ensurePr asks and
+ * judges by the same rule (retiredBy).
+ *
  * Records live in `.tmp/pr-autocreate/` in the formats the Python original
  * wrote, which the desktop app's mods read. Pull requests are listed, opened
  * and read through GitHub's REST API, which a cloud session's proxy allows.
  * Nothing here fails a push or holds a session on its own error: claude-hook's
- * one non-zero exit is 2 at Stop, the Autofix instruction, and spawn-watchers'
- * is 3, an opt-out it could not record.
+ * one non-zero exit is 2 at Stop, the Autofix instruction; spawn-watchers' is
+ * 3, an opt-out it could not record; refuse-retired's is 3, a retired branch,
+ * and 4 when it crashed, so a crash never reads as a branch found live.
  */
 
 /** `.github/niyam.json`'s `"prAutocreate"`: what a client sets. */
@@ -45,6 +51,8 @@ export interface AutocreateSettings {
   describe: string;
   /** A page saying why a merged pull request retires its branch, named in that note. */
   retired?: string;
+  /** The command that retires a branch, `{number}` its merged pull request, named when a push to one is refused. */
+  retire?: string;
   /** A last line for the placeholder body. */
   footer?: string;
 }
@@ -78,9 +86,9 @@ export function autocreateSettings(raw: unknown): AutocreateSettings {
   const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).prAutocreate : undefined;
   if (value === undefined) return { ...DEFAULTS };
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${where} must be an object`);
-  const { base = DEFAULTS.base, draft = DEFAULTS.draft, protected: guarded = DEFAULTS.protected, skip = DEFAULTS.skip, optOut = DEFAULTS.optOut, describe, retired, footer, ...rest } = value as Record<string, unknown>;
+  const { base = DEFAULTS.base, draft = DEFAULTS.draft, protected: guarded = DEFAULTS.protected, skip = DEFAULTS.skip, optOut = DEFAULTS.optOut, describe, retired, retire, footer, ...rest } = value as Record<string, unknown>;
   const extra = Object.keys(rest)[0];
-  if (extra !== undefined) throw new Error(`${where} has an unknown key "${extra}"; it takes "base", "draft", "protected", "skip", "optOut", "describe", "retired" and "footer"`);
+  if (extra !== undefined) throw new Error(`${where} has an unknown key "${extra}"; it takes "base", "draft", "protected", "skip", "optOut", "describe", "retired", "retire" and "footer"`);
   if (typeof base !== 'string' || !BRANCH.test(base)) throw new Error(`${where}.base must be a branch name`);
   if (typeof draft !== 'boolean') throw new Error(`${where}.draft must be true or false`);
   const settings: AutocreateSettings = {
@@ -93,8 +101,10 @@ export function autocreateSettings(raw: unknown): AutocreateSettings {
   };
   const page = line(retired, 'retired');
   if (page !== undefined && !/^https:\/\/\S+$/.test(page)) throw new Error(`${where}.retired must be an https link`);
+  const way = line(retire, 'retire');
+  if (way !== undefined && !way.includes('{number}')) throw new Error(`${where}.retire must name the merged pull request as {number}`);
   const last = line(footer, 'footer');
-  return { ...settings, ...(page === undefined ? {} : { retired: page }), ...(last === undefined ? {} : { footer: last }) };
+  return { ...settings, ...(page === undefined ? {} : { retired: page }), ...(way === undefined ? {} : { retire: way }), ...(last === undefined ? {} : { footer: last }) };
 }
 
 /** The settings in the repository at `root`; the defaults where it has no settings file. */
@@ -152,6 +162,20 @@ export interface Pull {
   number: number;
   url: string;
   state: 'OPEN' | 'MERGED' | 'CLOSED';
+}
+
+/** How many pull requests one listing of a branch asks for. */
+export const PR_LIST_LIMIT = 20;
+
+/**
+ * The merged pull request that retired a branch, given its pull requests, or
+ * undefined. A branch with an open one is live whatever merged before it; one
+ * whose pull requests only closed unmerged was never retired. ensurePr opens
+ * none for a retired branch, and refuse-retired refuses a push to one.
+ */
+export function retiredBy(pulls: readonly Pull[]): Pull | undefined {
+  if (pulls.some((pull) => pull.state === 'OPEN')) return undefined;
+  return pulls.find((pull) => pull.state === 'MERGED');
 }
 
 /** A branch's record. */
@@ -320,8 +344,18 @@ export class Pulls {
 
   /** The branch's pull requests, newest first; a string says why they could not be listed. */
   async list(branch: string): Promise<Pull[] | string> {
+    const listed = await this.listing(branch);
+    return typeof listed === 'string' ? listed : listed.pulls;
+  }
+
+  /**
+   * The branch's pull requests, newest first, and whether GitHub's page was
+   * full (`PR_LIST_LIMIT` entries before any was dropped), so it may hold
+   * back more; a string says why they could not be listed.
+   */
+  async listing(branch: string): Promise<{ pulls: Pull[]; full: boolean } | string> {
     const owner = this.slug.split('/')[0] as string;
-    const got = await this.call('GET', `pulls?head=${encodeURIComponent(`${owner}:${branch}`)}&state=all&per_page=20`);
+    const got = await this.call('GET', `pulls?head=${encodeURIComponent(`${owner}:${branch}`)}&state=all&per_page=${PR_LIST_LIMIT}`);
     if (typeof got === 'string') return got;
     if (got.status !== 200) return `GitHub answered ${got.status} listing pull requests`;
     // Any unreadable part makes the whole list unreadable: a pull request
@@ -334,7 +368,7 @@ export class Pulls {
       const head = (item as { head?: { ref?: unknown } }).head?.ref;
       if (head === branch) pulls.push(pull);
     }
-    return pulls;
+    return { pulls, full: got.json.length >= PR_LIST_LIMIT };
   }
 
   /** Opens a pull request: it, or "none ahead" when the branch adds nothing, or why it could not. */
@@ -400,7 +434,7 @@ export async function ensurePr(sys: Sys, root: string, settings: AutocreateSetti
     const listed = await pulls.list(branch);
     if (typeof listed === 'string') return { problem: `could not list PRs for ${branch} (${listed}); will retry` };
     const open = listed.find((pull) => pull.state === 'OPEN');
-    const merged = listed.find((pull) => pull.state === 'MERGED');
+    const merged = retiredBy(listed);
     let pr: Pull | null = null;
     let created = false;
     const notes: string[] = [];
@@ -708,6 +742,92 @@ function flags(args: readonly string[], names: readonly string[]): Map<string, s
 }
 
 /**
+ * The branches git's pre-push ref lines update on the remote, in order: each
+ * refs/heads/* destination with a real local commit. A deletion (an all-zero
+ * local sha), a tag and a line that is not a ref line name none. The branch
+ * is the remote ref, the pull request's head: `git push origin HEAD:x` pushes x.
+ */
+export function pushedRefs(stdin: string): { localSha: string; branch: string; remoteSha: string }[] {
+  const refs: { localSha: string; branch: string; remoteSha: string }[] = [];
+  for (const each of stdin.split('\n')) {
+    const parts = each.trim().split(/\s+/);
+    if (parts.length !== 4) continue;
+    const [, localSha, remoteRef, remoteSha] = parts as [string, string, string, string];
+    if (ZERO_SHA.test(localSha) || !remoteRef.startsWith('refs/heads/')) continue;
+    refs.push({ localSha, branch: remoteRef.slice('refs/heads/'.length), remoteSha });
+  }
+  return refs;
+}
+
+/** refuse-retired's exits: a push to a retired branch, and a check that crashed. */
+export const RETIRED_REFUSAL = 3;
+export const RETIRED_UNCHECKED = 4;
+
+/**
+ * The pre-push hook's check before its expensive ones, git's ref lines on
+ * stdin. A push to a branch whose pull request already merged, with none
+ * open, recreates a branch the merge retired, and its commits then sit in no
+ * pull request: RETIRED_REFUSAL names each such branch and the way out. A
+ * branch GitHub cannot answer for warns in one line and refuses nothing, as
+ * every other path here fails open; so does a listing as long as one page,
+ * which may hold back the open pull request that keeps the branch live.
+ */
+export async function refuseRetired(sys: Sys, io: Output, args: readonly string[], stdin: string, pullsOf: PullsOf = pullsFor): Promise<number> {
+  const unchecked = (why: string): number => {
+    io.out(`⚠️  Could not check whether a pushed branch's PR already merged (${why}); not checked.`);
+    return RETIRED_UNCHECKED;
+  };
+  let root: string;
+  let remote: string;
+  try {
+    const given = flags(args, ['--root', '--remote']);
+    const named = given.get('--root');
+    if (!named) throw new Error('refuse-retired needs --root <repository>');
+    root = named;
+    remote = given.get('--remote') ?? '';
+  } catch (error) {
+    return unchecked(error instanceof Error ? error.message : String(error));
+  }
+  // A workflow's push is not a session reviving a branch, and its token answers for no worktree.
+  if (sys.env.CI || remote !== REMOTE) return 0;
+  let settings: AutocreateSettings;
+  try {
+    settings = settingsAt(sys, root);
+  } catch (error) {
+    return unchecked(error instanceof Error ? error.message : String(error));
+  }
+  const branches = [...new Set(pushedRefs(stdin).map((ref) => ref.branch).filter((branch) => eligible(settings, branch)))];
+  if (branches.length === 0) return 0;
+  const pulls = pullsOf(sys, root, undefined);
+  const retired: [string, number][] = [];
+  const skip = (branch: string, why: string): void => io.out(`⚠️  Could not ask GitHub whether ${branch}'s PR already merged (${why}); not checked.`);
+  for (const branch of branches) {
+    const listed = 'problem' in pulls ? pulls.problem : await pulls.listing(branch);
+    if (typeof listed === 'string') {
+      skip(branch, listed);
+      continue;
+    }
+    if (listed.full) {
+      skip(branch, `GitHub listed ${PR_LIST_LIMIT} or more PRs, more than one page shows`);
+      continue;
+    }
+    const pull = retiredBy(listed.pulls);
+    if (pull) retired.push([branch, pull.number]);
+  }
+  for (const [branch, number] of retired) {
+    io.out(`❌ Error: ${branch} already has MERGED PR #${number} and no open PR. Pushing it`);
+    io.out('   recreates a branch the merge retired, and the commits after the merge land in no PR.');
+    if (settings.retire) {
+      io.out('   Retire it: move the commits missing from the PR head to a fresh branch, then push that:');
+      io.out(`     ${settings.retire.replaceAll('{number}', String(number))}`);
+    } else {
+      io.out(`   Move the commits missing from the PR head to a fresh branch, then push that${settings.retired ? ` (${settings.retired})` : ''}.`);
+    }
+  }
+  return retired.length > 0 ? RETIRED_REFUSAL : 0;
+}
+
+/**
  * The pre-push hook's half, git's ref lines on stdin: records each pushed
  * branch's opt-out before the refs are sent, then starts one detached watcher
  * per branch. Exit 3 only when an opt-out cannot be recorded, so the push is
@@ -737,12 +857,7 @@ export async function spawnWatchers(sys: Sys, io: Output, args: readonly string[
   const opted = optedOutNow(sys, settings);
   const names = [OPT_OUT_VAR, ...settings.optOut].join(' or ');
   const started: string[] = [];
-  for (const each of stdin.split('\n')) {
-    const parts = each.trim().split(/\s+/);
-    if (parts.length !== 4) continue;
-    const [, localSha, remoteRef, remoteSha] = parts as [string, string, string, string];
-    if (ZERO_SHA.test(localSha) || !remoteRef.startsWith('refs/heads/')) continue;
-    const branch = remoteRef.slice('refs/heads/'.length);
+  for (const { localSha, branch, remoteSha } of pushedRefs(stdin)) {
     if (!eligible(settings, branch)) continue;
     // Written before the refs are sent, so no turn-end hook sees the push land without it.
     try {
@@ -853,17 +968,24 @@ export async function watch(sys: Sys, io: Output, args: readonly string[], pulls
   }
 }
 
-/** `niyam pr-autocreate <claude-hook | spawn-watchers | watch> ...`: never a usage exit, which would hold a hook. */
+/** `niyam pr-autocreate <claude-hook | spawn-watchers | refuse-retired | watch> ...`: never a usage exit, which would hold a hook. */
 export async function prAutocreate(sys: Sys, io: Output, args: readonly string[]): Promise<number> {
   const [mode, ...rest] = args;
   try {
     if (mode === 'claude-hook') return await claudeHook(sys, io, sys.readStdin());
     if (mode === 'spawn-watchers') return await spawnWatchers(sys, io, rest, sys.readStdin());
+    if (mode === 'refuse-retired') return await refuseRetired(sys, io, rest, sys.readStdin());
     if (mode === 'watch') return await watch(sys, io, rest);
-    io.err(`pr-autocreate: unknown mode "${mode ?? ''}"; it takes claude-hook, spawn-watchers or watch; nothing done`);
+    io.err(`pr-autocreate: unknown mode "${mode ?? ''}"; it takes claude-hook, spawn-watchers, refuse-retired or watch; nothing done`);
     return 0;
   } catch (error) {
-    io.err(`pr-autocreate: unexpected error (${error instanceof Error ? error.message : String(error)}); nothing done`);
+    const why = error instanceof Error ? error.message : String(error);
+    // A crash is not "not retired": the hook reports RETIRED_UNCHECKED as not checked, never the 0 of a live branch.
+    if (mode === 'refuse-retired') {
+      io.out(`⚠️  Could not check whether a pushed branch's PR already merged (pr-autocreate crashed: ${why}); not checked.`);
+      return RETIRED_UNCHECKED;
+    }
+    io.err(`pr-autocreate: unexpected error (${why}); nothing done`);
     return 0;
   }
 }

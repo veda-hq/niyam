@@ -797,7 +797,16 @@ be recorded is refused (exit 3). Every answer is kept in
 log), so GitHub is asked once per pushed commit. A session's hook reaches
 GitHub as the session's agent, with every check `as-agent` makes, and the
 watcher with the push's own token. Its own errors never fail a push or hold
-a session. The settings:
+a session.
+
+`refuse-retired --root <repo> --remote <name>`, which the pre-push hook runs
+before its expensive checks with the same ref lines, refuses (exit 3) a push to
+a branch whose pull request merged while none is open. Such a push recreates a
+branch the merge retired, and the commits after the merge land in no pull
+request. The refusal names the way out. A branch GitHub cannot answer for, or
+one with a full page of pull requests (which may hide the open one), only
+warns. Exit 4 means it could not check at all; a hook reports that as not
+checked. The settings:
 
 ```json
 { "prAutocreate": { "base": "main", "draft": false, "protected": ["main", "master", "develop", "prod", "production"], "skip": ["mergify/", "gh-readonly-queue/"], "optOut": [], "describe": "`gh pr edit --body-file`" } }
@@ -806,7 +815,8 @@ a session. The settings:
 `optOut` names older opt-out variables read beside `NIYAM_PR_AUTOCREATE`;
 `describe` says how the pushing session writes the real description;
 `retired`, a link, explains why a merged pull request retires its branch;
-`footer` ends the placeholder body.
+`retire`, a command with `{number}` for the merged pull request, is the way out
+`refuse-retired` names; `footer` ends the placeholder body.
 
 **Started work runs to merge.** `niyam keep-going`, Claude Code's Stop hook,
 sends a session back while its branch has commits the base lacks and its
@@ -1327,7 +1337,7 @@ pins it as an exact version. Install the attached package on each machine with
 pnpm, once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.17/veda-hq-niyam-0.6.17.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.18/veda-hq-niyam-0.6.18.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release

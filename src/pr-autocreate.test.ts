@@ -12,7 +12,10 @@ import { GITHUB_API } from './host.ts';
 import {
   MARKER,
   OPTOUT_KEPT,
+  PR_LIST_LIMIT,
   Pulls,
+  RETIRED_REFUSAL,
+  RETIRED_UNCHECKED,
   autocreateSettings,
   claudeHook,
   ensurePr,
@@ -22,7 +25,10 @@ import {
   prAutocreate,
   pullsFor,
   pushTarget,
+  pushedRefs,
   recordOptout,
+  refuseRetired,
+  retiredBy,
   spawnWatchers,
   statePath,
   watch,
@@ -769,7 +775,7 @@ describe('pushTarget', () => {
 describe('autocreateSettings', () => {
   it('takes the defaults, or what the client sets', () => {
     assert.deepEqual(autocreateSettings(null), autocreateSettings({}));
-    assert.deepEqual(autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: [], optOut: ['OLD_VAR'], retired: 'https://x.invalid/a', footer: 'f' } }), {
+    assert.deepEqual(autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: [], optOut: ['OLD_VAR'], retired: 'https://x.invalid/a', retire: 'tool retire --pr {number}', footer: 'f' } }), {
       base: 'trunk',
       draft: false,
       protected: ['release'],
@@ -777,6 +783,7 @@ describe('autocreateSettings', () => {
       optOut: ['OLD_VAR'],
       describe: '`gh pr edit --body-file`',
       retired: 'https://x.invalid/a',
+      retire: 'tool retire --pr {number}',
       footer: 'f',
     });
   });
@@ -790,6 +797,8 @@ describe('autocreateSettings', () => {
       [{ describe: 'a\nb' }, /describe must be one line/],
       [{ footer: ' ' }, /footer must be one line/],
       [{ retired: 'http://x' }, /retired must be an https link/],
+      [{ retire: 'tool retire' }, /retire must name the merged pull request as \{number\}/],
+      [{ retire: 'a\nb' }, /retire must be one line/],
     ] as const) {
       assert.throws(() => autocreateSettings({ prAutocreate: value }), error);
     }
@@ -862,7 +871,10 @@ describe('niyam pr-autocreate', () => {
     const seen = capture();
     assert.equal(await run(['pr-autocreate'], seen.io, () => new FakeSys()), 0);
     assert.equal(await run(['pr-autocreate', 'nope', '--x'], seen.io, () => new FakeSys()), 0);
-    assert.deepEqual(seen.err, ['pr-autocreate: unknown mode ""; it takes claude-hook, spawn-watchers or watch; nothing done', 'pr-autocreate: unknown mode "nope"; it takes claude-hook, spawn-watchers or watch; nothing done']);
+    assert.deepEqual(seen.err, [
+      'pr-autocreate: unknown mode ""; it takes claude-hook, spawn-watchers, refuse-retired or watch; nothing done',
+      'pr-autocreate: unknown mode "nope"; it takes claude-hook, spawn-watchers, refuse-retired or watch; nothing done',
+    ]);
   });
 
   it('exits 0 when the machine cannot even be read', async () => {
@@ -889,5 +901,133 @@ describe('niyam pr-autocreate', () => {
     const broken = capture();
     assert.equal(await prAutocreate(sys, broken.io, ['claude-hook']), 0);
     assert.deepEqual(broken.err, ['pr-autocreate: unexpected error (EBADF); nothing done']);
+  });
+
+  it('runs refuse-retired from stdin, and a crash there exits RETIRED_UNCHECKED, never the 0 of a live branch', async () => {
+    const sys = new FakeSys();
+    sys.stdin = '';
+    assert.equal(await prAutocreate(sys, capture().io, ['refuse-retired', '--root', ROOT, '--remote', 'origin']), 0);
+    sys.readStdin = () => {
+      throw new Error('EBADF');
+    };
+    const broken = capture();
+    assert.equal(await prAutocreate(sys, broken.io, ['refuse-retired', '--root', ROOT, '--remote', 'origin']), RETIRED_UNCHECKED);
+    assert.deepEqual(broken.out, ["⚠️  Could not check whether a pushed branch's PR already merged (pr-autocreate crashed: EBADF); not checked."]);
+    sys.readStdin = () => {
+      throw 'plain';
+    };
+    const plain = capture();
+    assert.equal(await prAutocreate(sys, plain.io, ['refuse-retired']), RETIRED_UNCHECKED);
+    assert.match(plain.out[0] as string, /pr-autocreate crashed: plain\); not checked\.$/);
+  });
+});
+
+describe('pr-autocreate refuse-retired (real git, GitHub faked)', () => {
+  let w: ReturnType<typeof world>;
+  let github: FakeGitHub;
+  let sys: ReturnType<typeof machine>;
+  beforeEach(() => {
+    w = world();
+    github = new FakeGitHub();
+    sys = machine(github, w.dir);
+  });
+
+  const zero = '0'.repeat(40);
+  const line = (branch: string): string => `refs/heads/${branch} ${SHA} refs/heads/${branch} ${OTHER}`;
+  async function refuse(lines: string, args = ['--root', w.work, '--remote', 'origin'], pullsOf: PullsOf = viaToken(), on: Sys = sys): Promise<{ code: number; out: string[]; err: string[] }> {
+    const seen = capture();
+    const code = await refuseRetired(on, seen.io, args, lines, pullsOf);
+    return { code, out: seen.out, err: seen.err };
+  }
+
+  it('(L-04) refuses a push to a branch whose PR merged, with none open, and names the way out', async () => {
+    github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+    assert.deepEqual(await refuse(line('feature')), {
+      code: RETIRED_REFUSAL,
+      out: [
+        '❌ Error: feature already has MERGED PR #7 and no open PR. Pushing it',
+        '   recreates a branch the merge retired, and the commits after the merge land in no PR.',
+        '   Move the commits missing from the PR head to a fresh branch, then push that.',
+      ],
+      err: [],
+    });
+  });
+
+  it("names the client's retire command, or its page, when the settings give one", async () => {
+    github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { retire: 'tool retire --pr {number}' } }));
+    assert.deepEqual((await refuse(line('feature'))).out.slice(2), ['   Retire it: move the commits missing from the PR head to a fresh branch, then push that:', '     tool retire --pr 7']);
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { retired: 'https://x.invalid/retired' } }));
+    assert.deepEqual((await refuse(line('feature'))).out.slice(2), ['   Move the commits missing from the PR head to a fresh branch, then push that (https://x.invalid/retired).']);
+  });
+
+  it('passes a live branch: an open PR after a merged one, one closed unmerged, or none', async () => {
+    github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+    github.pulls.push({ number: 8, head: 'feature', state: 'open', merged_at: null, body: '' });
+    github.pulls.push({ number: 9, head: 'closed-one', state: 'closed', merged_at: null, body: '' });
+    assert.deepEqual(await refuse([line('feature'), line('closed-one'), line('fresh')].join('\n')), { code: 0, out: [], err: [] });
+    assert.equal(github.count('GET', 'pulls?'), 3);
+  });
+
+  it('judges no deletion, tag, protected branch, other remote or CI push, and asks GitHub nothing for them', async () => {
+    github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+    const lines = [`(delete) ${zero} refs/heads/feature ${OTHER}`, `refs/tags/v1 ${SHA} refs/tags/v1 ${zero}`, `refs/heads/x ${SHA} refs/heads/main ${OTHER}`, 'not a ref line'].join('\n');
+    assert.equal((await refuse(lines)).code, 0);
+    assert.equal((await refuse(line('feature'), ['--root', w.work, '--remote', 'fork'])).code, 0);
+    assert.equal((await refuse(line('feature'), undefined, undefined, { ...sys, env: { CI: 'true' } })).code, 0);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('asks once per branch, however many ref lines push it', async () => {
+    assert.equal((await refuse([line('feature'), `refs/heads/local ${SHA} refs/heads/feature ${OTHER}`].join('\n'))).code, 0);
+    assert.equal(github.count('GET', 'pulls?'), 1);
+  });
+
+  it('warns and refuses nothing when GitHub cannot answer, or a page may hold back the open PR', async () => {
+    github.queued.push({ status: 502, json: null });
+    assert.deepEqual(await refuse(line('feature')), { code: 0, out: ["⚠️  Could not ask GitHub whether feature's PR already merged (GitHub answered 502 listing pull requests); not checked."], err: [] });
+    const full = `⚠️  Could not ask GitHub whether feature's PR already merged (GitHub listed ${PR_LIST_LIMIT} or more PRs, more than one page shows); not checked.`;
+    for (let n = 0; n < PR_LIST_LIMIT; n++) github.pulls.push({ number: n + 1, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+    assert.deepEqual((await refuse(line('feature'))).out, [full]);
+    // A page filled by other heads counts too: what it held back may be this branch's open PR.
+    github.pulls = [{ number: 1, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' }];
+    github.extra = Array.from({ length: PR_LIST_LIMIT - 1 }, (_, n) => ({ number: 50 + n, html_url: `https://github.com/${SLUG}/pull/${50 + n}`, state: 'closed', merged_at: null, head: { ref: 'other' } }));
+    assert.deepEqual((await refuse(line('feature'))).out, [full]);
+    github.extra = github.extra.slice(1);
+    assert.equal((await refuse(line('feature'))).code, RETIRED_REFUSAL);
+    assert.deepEqual((await refuse(line('feature'), undefined, () => ({ problem: 'origin is not a github.com repository' }))).out, [
+      "⚠️  Could not ask GitHub whether feature's PR already merged (origin is not a github.com repository); not checked.",
+    ]);
+  });
+
+  it('exits RETIRED_UNCHECKED on arguments or settings it cannot read', async () => {
+    assert.deepEqual(await refuse(line('feature'), ['--remote', 'origin']), {
+      code: RETIRED_UNCHECKED,
+      out: ["⚠️  Could not check whether a pushed branch's PR already merged (refuse-retired needs --root <repository>); not checked."],
+      err: [],
+    });
+    assert.match((await refuse(line('feature'), ['--nope'])).out[0] as string, /unexpected argument "--nope"/);
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: [] }));
+    const bad = await refuse(line('feature'));
+    assert.equal(bad.code, RETIRED_UNCHECKED);
+    assert.match(bad.out[0] as string, /"prAutocreate" must be an object\); not checked\.$/);
+  });
+});
+
+describe('retiredBy and pushedRefs', () => {
+  const pull = (number: number, state: 'OPEN' | 'MERGED' | 'CLOSED') => ({ number, url: `https://github.com/${SLUG}/pull/${number}`, state });
+  it('a merged PR retires a branch only while none is open', () => {
+    assert.equal(retiredBy([]), undefined);
+    assert.equal(retiredBy([pull(1, 'CLOSED')]), undefined);
+    assert.equal(retiredBy([pull(2, 'OPEN'), pull(1, 'MERGED')]), undefined);
+    assert.deepEqual(retiredBy([pull(3, 'CLOSED'), pull(1, 'MERGED')]), pull(1, 'MERGED'));
+  });
+
+  it("reads git's pre-push ref lines: the remote branch of each real commit", () => {
+    assert.deepEqual(pushedRefs([`refs/heads/a ${SHA} refs/heads/b ${OTHER}`, `x ${'0'.repeat(40)} refs/heads/gone ${OTHER}`, `refs/tags/t ${SHA} refs/tags/t ${OTHER}`, '  ', 'a b c'].join('\n')), [
+      { localSha: SHA, branch: 'b', remoteSha: OTHER },
+    ]);
   });
 });
