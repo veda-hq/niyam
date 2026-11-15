@@ -1,0 +1,73 @@
+{
+  "worktree": {
+    "readOnlyCommands": [
+      {
+        "pattern": "niyam (?:--version|-v|version)",
+        "env": {
+          "CLAUDECODE": [
+            "1"
+          ]
+        },
+        "reason": "it prints niyam's version and writes nothing (niyam 0.6.14 audited)"
+      },
+      {
+        "pattern": "niyam propose [1-9][0-9]*(?: [1-9][0-9]*)*(?: --page(?: |=)https://claude\\.ai/(?:code/)?artifact/[A-Za-z0-9_-]+)?",
+        "env": {
+          "CLAUDECODE": [
+            "1"
+          ]
+        },
+        "reason": "it writes nothing locally (niyam 0.6.14 audited); it posts the owner ask and its label to GitHub"
+      },
+      {
+        "pattern": "niyam review-thread PRRT_[A-Za-z0-9_-]+ --resolve",
+        "env": {
+          "CLAUDECODE": [
+            "1"
+          ]
+        },
+        "reason": "it writes nothing locally (niyam 0.6.14 audited); it resolves the thread on GitHub"
+      },
+      {
+        "pattern": "niyam onboard(?: [A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?){0,2} --dry-run",
+        "env": {
+          "CLAUDECODE": [
+            "1"
+          ]
+        },
+        "reason": "a dry run holds its changes in memory and writes nothing (niyam 0.6.14 audited); it reads GitHub, the owner and agent logins included, and the keychain"
+      }
+    ],
+    "reviewedCLIs": [
+      {
+        "program": "niyam",
+        "subcommands": {
+          "review-thread": {
+            "pathOptions": [
+              "--body-file"
+            ]
+          }
+        },
+        "reason": "it reads only the --body-file it is given and writes nothing locally (niyam 0.6.20 audited); it replies to, resolves or reacts on the thread on GitHub"
+      }
+    ],
+    "ownCheckout": {
+      "env": {
+        "CLAUDE_CODE_REMOTE": [
+          "true"
+        ]
+      },
+      "reason": "a Claude cloud session clones the repository for itself, with no worktree; Claude Code sets CLAUDE_CODE_REMOTE there and leaves it unset on the desktop (checked 2026-11-15)",
+      "protectedPaths": [
+        ".claude/hooks/",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".claude/kavach.json",
+        ".claude/sarathi.json",
+        "node_modules/",
+        "package.json",
+        "pnpm-lock.yaml"
+      ]
+    }
+  }
+}
