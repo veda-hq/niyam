@@ -1865,3 +1865,20 @@
     on the first one merged after it, Alok runs
     `niyam owner-step required-checks veda-hq/niyam main --check "Guard"`
     (or uses the ruleset page until #314 is released).
+- **2026-11-15 — Record: CODEOWNERS holds a change to the guard itself for
+  Alok (P-63, Work item #303, slice #309).** Guard (P-62) judges a change to
+  niyam's checks against the slice's `**Guards:**` section, but it cannot
+  tell whether a change to its own rules weakens them. That is the one
+  change automation cannot judge, so it needs Alok's yes.
+  - `.github/CODEOWNERS` names `@AlokBansal8` for the guard's files only:
+    `/.github/workflows/guard.yml`, `/scripts/guard.mjs`,
+    `/scripts/guard.test.mjs` and `/.github/CODEOWNERS`. Nothing else gets an
+    owner, so every other pull request, including one under `.github/` that
+    Guard passed, merges without a person.
+  - The paths are anchored at the root, so no file of the same name
+    elsewhere is caught. A file the guard comes to read later (a fixture, a
+    helper module) needs its own line in the same pull request.
+  - By hand, Alok: turn on "Require review from Code Owners" in the `main`
+    ruleset's pull request rule (Settings, Rules, ruleset `main`). No
+    `niyam owner-step` does this. Until then CODEOWNERS only requests his
+    review; it does not hold the merge.
