@@ -373,6 +373,33 @@ async function answered(sys: Sys, token: string, slug: string, number: number, {
   return waiting.length > 0 ? { waiting } : { answer: [...new Set(how.values())].join(' and ') };
 }
 
+interface IssueEvent {
+  event?: string;
+  created_at?: string;
+  actor?: { login?: string } | null;
+  label?: { name?: string } | null;
+}
+
+/**
+ * How the owner has answered issue `number` since the ask `ask`, the ask's
+ * own run reading it, or undefined: their `approved` label, a `Decision:`
+ * comment no one but owners edited, or a 👍 on the ask, each newer than the
+ * ask. The owner's approval runs its own job, which takes off only a label
+ * its event shows, so an ask whose run labels the issue after that answer
+ * reads it here (#355).
+ */
+async function answeredSince(sys: Sys, token: string, slug: string, number: number, ask: { id: number; created_at: string }, owners: string[]): Promise<string | undefined> {
+  const owner = (login: string | undefined) => anyLogin(owners, login);
+  const events = await every<IssueEvent>(sys, token, `${API}/repos/${slug}/issues/${number}/events`);
+  const approved = events.some((one) => one.event === 'labeled' && one.label?.name === 'approved' && owner(one.actor?.login ?? undefined) && (one.created_at ?? '') > ask.created_at);
+  if (approved) return 'their approved label';
+  const comments = await every<Comment>(sys, token, `${API}/repos/${slug}/issues/${number}/comments?since=${encodeURIComponent(ask.created_at)}`);
+  const decisions = comments.filter((comment) => comment.created_at > ask.created_at && owner(comment.user?.login ?? undefined) && opensDecision(comment.body ?? ''));
+  if (decisions.length > 0 && (await ownersAlone(sys, token, decisions, owners)).kept.length > 0) return 'a Decision: comment';
+  const reactions = await every<Reaction>(sys, token, `${API}/repos/${slug}/issues/comments/${ask.id}/reactions?content=%2B1`);
+  return reactions.some((reaction) => owner(reaction.user?.login ?? undefined) && reaction.created_at > ask.created_at) ? 'a 👍 on the ask' : undefined;
+}
+
 /** The asks still waiting, as the sweep names them. */
 function waitingOn(waiting: Owed[]): string {
   return waiting.map(({ kind, number }) => (kind === 'Proposal' ? `the proposal for #${number}` : 'the Needs you: ask')).join(', ');
@@ -456,9 +483,25 @@ export async function needsOwner(sys: Sys, io: Output): Promise<number> {
   if ((name === 'issue_comment' || name === 'pull_request_review_comment') && issue !== undefined) {
     const author = event.comment?.user?.login ?? undefined;
     const body = event.comment?.body ?? '';
-    if (event.action === 'created' && anyLogin(settings.agents, author) && opensAsk(body)) {
+    const kind = opensAsk(body);
+    if (event.action === 'created' && anyLogin(settings.agents, author) && kind) {
+      // The owner may answer while this run is still going: read their answer before labelling, and again after,
+      // since their approval's run takes off only a label its event shows. An issue's comment alone is read, by its id and time.
+      const { id, created_at } = event.comment ?? {};
+      const ask = !labelled && name === 'issue_comment' && id !== undefined && created_at ? { id, created_at } : undefined;
+      const before = ask ? await answeredSince(sys, token, slug, issue, ask, settings.owners) : undefined;
+      if (before) {
+        io.out(`needs-owner: #${issue} asks the owner (${kind}:), and the owner already answered with ${before}; not labelled ${NEEDS_OWNER}`);
+        return 0;
+      }
       if (!labelled) await addLabel(sys, token, slug, issue);
-      io.out(`needs-owner: #${issue} asks the owner (${opensAsk(body)}:); labelled ${NEEDS_OWNER}`);
+      const after = ask ? await answeredSince(sys, token, slug, issue, ask, settings.owners) : undefined;
+      if (after) {
+        await removeLabel(sys, token, slug, issue);
+        io.out(`needs-owner: #${issue} asks the owner (${kind}:), and the owner answered with ${after} as it was labelled; ${NEEDS_OWNER} taken off`);
+        return 0;
+      }
+      io.out(`needs-owner: #${issue} asks the owner (${kind}:); labelled ${NEEDS_OWNER}`);
       return 0;
     }
     // The owner's batch answer on the Approvals issue names a proposal's own issue, such as a dropped State, not
