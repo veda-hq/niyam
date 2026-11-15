@@ -82,8 +82,12 @@ describe('realGit', () => {
   test('sets core.hooksPath in a real main checkout, and nothing in its worktree', (t) => {
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'hooks-path-')));
     t.after(() => rmSync(scratch, { recursive: true, force: true }));
-    const env = { ...process.env, GIT_CONFIG_COUNT: '0', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
     for (const name of Object.keys(env)) if (name.startsWith('GIT_CONFIG_KEY_') || name.startsWith('GIT_CONFIG_VALUE_')) delete env[name];
+    // No automatic maintenance: a commit's detached `git maintenance run
+    // --auto` outlives it and can write into the scratch folder while it is
+    // removed, which fails the cleanup with ENOTEMPTY.
+    Object.assign(env, { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'maintenance.auto', GIT_CONFIG_VALUE_0: 'false', GIT_CONFIG_KEY_1: 'gc.auto', GIT_CONFIG_VALUE_1: '0' });
     const run = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8' }).trim();
     const main_ = join(scratch, 'main');
     run(scratch, 'init', '-q', '-b', 'main', main_);
