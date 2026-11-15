@@ -23,7 +23,7 @@ import {
 import { setUpBoard } from './board.ts';
 import { type TypesPlan, typesDetail, typesLines, typesPlan } from './issue-types.ts';
 import { type OwnerToken, asOwner, isOrganisation, ownerScopes, signInOnce } from './owner-login.ts';
-import { appendToArray, replaceValues, setMember } from './jsonedit.ts';
+import { appendToArray, removeElements, replaceValues, setMember } from './jsonedit.ts';
 import { HOURLY } from './asks.ts';
 import { DEFAULT_SCHEDULE, type Feature, FEATURES, FIGMA_FILE_KEY, NEEDS_ISSUE_TYPES, featuresIn, parseFeatures, renamedLines, scheduleIn } from './features.ts';
 import {
@@ -32,6 +32,7 @@ import {
   HOOKS_PATH,
   LEFTOVER_CLOUD_SETUP_PATH,
   ONBOARD_BRANCH,
+  SARATHI_PATH,
   WORKFLOW_PATH,
   autoMerge,
   mergeQueue,
@@ -57,7 +58,7 @@ export const SETUP_FIRST = "If the repo has its own Setup script, put this first
 
 /** This product's repository: clients call its shared workflow. */
 export { PRODUCT } from './names.ts';
-export { HOOKS_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
+export { HOOKS_PATH, SARATHI_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
 /** The launcher `machine` writes, as a hook's shell spells it. */
 const HOOK_LAUNCHER = `$HOME/${CONFIG_DIR}/bin/${CLI}`;
 
@@ -803,27 +804,194 @@ function hooksOf(settings: object, event: string): { command?: unknown }[] {
   });
 }
 
+/** A sarathi handler, as `.claude/sarathi.json` lists it under an event. */
+interface Handler {
+  matcher?: string;
+  command: string;
+  timeout?: number;
+  failClosed?: boolean;
+}
+
+/** How long sarathi gives a handler with no `timeout` of its own, in seconds. */
+const SARATHI_DEFAULT_TIMEOUT = 60;
+
+/**
+ * niyam's hooks as sarathi handlers (P-66). session-start's installs, the
+ * drift install and a cloud session's, need the 600 s Claude Code gives a
+ * hook in the settings, not sarathi's 60 s. The guard only reads local state,
+ * so sarathi's default does; it fails closed, as its own exits already do.
+ */
+export const SARATHI_HANDLERS: Readonly<Record<'SessionStart' | 'PreToolUse', Handler>> = {
+  SessionStart: { command: HOOK_COMMAND, timeout: 600 },
+  PreToolUse: { matcher: 'Bash', command: GUARD_COMMAND, failClosed: true },
+};
+
+/** A matcher's plain form, as Claude Code and sarathi read it: names, or `A|B`. Anything else is a regular expression. */
+const PLAIN_MATCHER = /^[\w|-]+$/;
+
+/** Whether a hook with `matcher` fires for `target`, by Claude Code's rules: absent, empty and `*` match all. */
+function matcherTakes(matcher: string | undefined, target: string): boolean {
+  if (matcher === undefined || matcher === '' || matcher === '*') return true;
+  if (PLAIN_MATCHER.test(matcher)) return matcher.split('|').includes(target);
+  try {
+    return new RegExp(matcher).test(target);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a settings entry with `runner`'s matcher lets a handler with `handler`'s fire whenever it would. */
+function matcherCovers(runner: string | undefined, handler: string | undefined): boolean {
+  if (runner === undefined || runner === '' || runner === '*') return true;
+  if (handler === undefined || handler === '' || handler === '*' || !PLAIN_MATCHER.test(handler)) return false;
+  return handler.split('|').every((name) => matcherTakes(runner, name));
+}
+
+/**
+ * Whether a settings command runs sarathi for `event`, as `sarathi check`
+ * reads it: it names sarathi, the program or a launcher named after it,
+ * and passes the event as a word of its own (`sarathi hook PreToolUse`,
+ * `"$CLAUDE_PROJECT_DIR"/.claude/hooks/sarathi.sh PreToolUse`).
+ */
+export function runsSarathiFor(command: string, event: string): boolean {
+  return /\bsarathi\b/.test(command) && new RegExp(`(?:^|[\\s"'])${event}(?:$|[\\s"'])`).test(command);
+}
+
+/** The settings entry that runs sarathi for `event`, where it stands, with its matcher and timeout. */
+interface Runner {
+  group: number;
+  hook: number;
+  matcher?: string;
+  timeout?: number;
+}
+
+/** The first settings entry that runs sarathi for `event`, or undefined. */
+export function sarathiRunner(settings: unknown, event: string): Runner | undefined {
+  const groups = (settings as { hooks?: Record<string, unknown> } | null)?.hooks?.[event];
+  if (!Array.isArray(groups)) return undefined;
+  for (const [group, entry] of groups.entries()) {
+    const { matcher, hooks } = (entry ?? {}) as { matcher?: unknown; hooks?: unknown };
+    for (const [hook, item] of (Array.isArray(hooks) ? hooks : []).entries()) {
+      const { command, timeout } = (item ?? {}) as { command?: unknown; timeout?: unknown };
+      if (typeof command !== 'string' || !runsSarathiFor(command, event)) continue;
+      return { group, hook, ...(typeof matcher === 'string' ? { matcher } : {}), ...(typeof timeout === 'number' ? { timeout } : {}) };
+    }
+  }
+  return undefined;
+}
+
+/** The handlers `.claude/sarathi.json` lists under `event`. */
+function handlersOf(sarathi: object, event: string): { command?: unknown; timeout?: unknown }[] {
+  const list = (sarathi as { hooks?: Record<string, unknown> }).hooks?.[event];
+  return Array.isArray(list) ? list.filter((entry): entry is { command?: unknown; timeout?: unknown } => typeof entry === 'object' && entry !== null) : [];
+}
+
+/** The edits onboard makes to `.claude/sarathi.json`, said as for settings.json. */
+export interface SarathiEdit {
+  text: string;
+  changes: string[];
+  labels: string[];
+}
+
 /**
  * The client's Claude Code settings with this release's hooks and lock: each
  * entry an older release wrote swapped where it stands, a missing one added,
  * the lock's variables set in `env`, and REVIEW_THREAD_RULE and AUTO_FIX_RULES allowed. Every edit is made in the text, so
  * the rest of the file keeps its layout. Says what changed, for the question.
+ *
+ * Where the project keeps `.claude/sarathi.json` (`sarathiBefore`) and the
+ * settings run sarathi for an event, with a matcher that lets niyam's hook
+ * fire, that hook goes into sarathi.json as a handler instead (P-66): an
+ * older one swapped in place, a missing one added, and niyam's hooks taken
+ * out of the settings, so sarathi's is the event's one entry there. sarathi's
+ * own entry gets at least the handler's timeout, as `sarathi check` asks.
+ * `sarathi` is said only when that file changes.
  */
-export function claudeSettings(before: string | undefined): { text: string; changes: string[]; labels: string[] } {
+export function claudeSettings(before: string | undefined, sarathiBefore?: string): { text: string; changes: string[]; labels: string[]; sarathi?: SarathiEdit } {
   let text = before ?? '{}\n';
   const changes: string[] = [];
   // The same, in a word or two each, for the plan.
   let hooksChanged: 'added' | 'updated' | undefined;
+  let moved = false;
+  let timed = false;
   const labels: string[] = [];
   const parsed = (): object => JSON.parse(text) as object;
   const first: unknown = parsed();
   if (typeof first !== 'object' || first === null || Array.isArray(first)) throw new Error(`${HOOKS_PATH} is not a JSON object`);
-  const hooks: [string, string, readonly string[], string, Record<string, unknown>][] = [
+  let sarathi: SarathiEdit | undefined;
+  if (sarathiBefore !== undefined) {
+    let list: unknown;
+    try {
+      list = JSON.parse(sarathiBefore);
+    } catch (error) {
+      throw new Error(`${SARATHI_PATH} is not JSON (${(error as Error).message})`);
+    }
+    if (typeof list !== 'object' || list === null || Array.isArray(list)) throw new Error(`${SARATHI_PATH} is not a JSON object`);
+    sarathi = { text: sarathiBefore, changes: [], labels: [] };
+  }
+  let handlersChanged: 'added' | 'updated' | undefined;
+  let handlersTimed = false;
+  const hooks: ['SessionStart' | 'PreToolUse', string, readonly string[], string, Record<string, unknown>][] = [
     ['SessionStart', HOOK_COMMAND, OLDER_HOOK_COMMANDS, 'the SessionStart hook that runs niyam session-start', {}],
     ['PreToolUse', GUARD_COMMAND, OLDER_GUARD_COMMANDS, "the PreToolUse hook that refuses gh and git's remote commands outside the agent identity", { matcher: 'Bash' }],
   ];
-  try {
-    for (const [event, command, older, name, extra] of hooks) {
+  for (const [event, command, older, name, extra] of hooks) {
+    const handler = SARATHI_HANDLERS[event];
+    const runner = sarathi === undefined ? undefined : sarathiRunner(first, event);
+    if (sarathi !== undefined && runner !== undefined && matcherCovers(runner.matcher, handler.matcher)) {
+      const edit = sarathi;
+      try {
+        const swapped = replaceValues(edit.text, ['hooks', event, '*', 'command'], (value) => (typeof value === 'string' && older.includes(value) ? command : undefined));
+        if (swapped.replaced > 0) {
+          edit.text = swapped.text;
+          edit.changes.push(`replace the older ${name.replace(/^the /, '')} with this release's`);
+          handlersChanged = 'updated';
+        } else if (!handlersOf(JSON.parse(edit.text) as object, event).some((entry) => entry.command === command)) {
+          edit.text = appendToArray(edit.text, ['hooks'], event, handler);
+          edit.changes.push(`add ${name}, as a handler sarathi runs`);
+          handlersChanged ??= 'added';
+        }
+        // A handler moved there by hand may have sarathi's 60 s, too short for session-start's installs.
+        const wanted = handler.timeout;
+        for (const [at, entry] of handlersOf(JSON.parse(edit.text) as object, event).entries()) {
+          if (wanted === undefined || entry.command !== command || (typeof entry.timeout === 'number' && entry.timeout >= wanted)) continue;
+          edit.text = setMember(edit.text, ['hooks', event, String(at)], 'timeout', wanted);
+          edit.changes.push(`give ${name} ${wanted} s, as long as Claude Code gives it in the settings`);
+          handlersTimed = true;
+        }
+      } catch (error) {
+        throw new Error(`${SARATHI_PATH}: ${(error as Error).message}`);
+      }
+      try {
+        const own = (value: unknown): boolean => {
+          const found = (value as { command?: unknown } | null)?.command;
+          return typeof found === 'string' && (found === command || older.includes(found));
+        };
+        // A group of niyam's hooks alone goes whole; niyam's hook in a group beside others goes alone.
+        const groups = removeElements(text, ['hooks', event], (group) => {
+          const inner = (group as { hooks?: unknown } | null)?.hooks;
+          return Array.isArray(inner) && inner.length > 0 && inner.every(own);
+        });
+        const single = removeElements(groups.text, ['hooks', event, '*', 'hooks'], own);
+        if (groups.removed + single.removed > 0) {
+          text = single.text;
+          changes.push(`take out ${name}, which ${SARATHI_PATH} now runs under sarathi`);
+          moved = true;
+        }
+        // Found again: taking niyam's groups out moves sarathi's.
+        const now = sarathiRunner(parsed(), event) as Runner;
+        const needed = handler.timeout ?? SARATHI_DEFAULT_TIMEOUT;
+        if (now.timeout === undefined || now.timeout < needed) {
+          text = setMember(text, ['hooks', event, String(now.group), 'hooks', String(now.hook)], 'timeout', needed);
+          changes.push(`give sarathi's ${event} hook ${needed} s, so niyam's handler under it has its time`);
+          timed = true;
+        }
+      } catch (error) {
+        throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
+      }
+      continue;
+    }
+    try {
       const swapped = replaceValues(text, ['hooks', event, '*', 'hooks', '*', 'command'], (value) =>
         typeof value === 'string' && older.includes(value) ? command : undefined,
       );
@@ -836,7 +1004,11 @@ export function claudeSettings(before: string | undefined): { text: string; chan
         changes.push(`add ${name}`);
         hooksChanged ??= 'added';
       }
+    } catch (error) {
+      throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
     }
+  }
+  try {
     const env = (parsed() as { env?: unknown }).env;
     const current = typeof env === 'object' && env !== null ? (env as Record<string, unknown>) : {};
     const missing = Object.entries(BASE_ENV).filter(([name, value]) => current[name] !== value);
@@ -846,6 +1018,8 @@ export function claudeSettings(before: string | undefined): { text: string; chan
     const added = missing.filter(([name]) => typeof current[name] !== 'string').map(([name]) => name);
     const named = (names: string[]): string => (names.length <= 3 ? names.join(', ') : `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`);
     if (hooksChanged) labels.push(`hooks ${hooksChanged}`);
+    if (moved) labels.push('hooks moved to sarathi.json');
+    if (timed) labels.push('sarathi timeout');
     if (added.length > 0) changes.push(`set ${named(added)} in env, so GitHub is locked out until session-start gives the agent identity`);
     if (updated.length > 0) changes.push(`update ${named(updated)} in env to this release's lock`);
     if (missing.length > 0) labels.push(added.length > 0 ? 'lock' : 'lock updated');
@@ -870,6 +1044,11 @@ export function claudeSettings(before: string | undefined): { text: string; chan
     if (review || renamed.replaced > 0 || lacking.length > 0) labels.push(!(review || renamed.replaced > 0) ? 'Auto-fix rules' : lacking.length === 0 ? 'review rule' : 'allow rules');
   } catch (error) {
     throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
+  }
+  if (sarathi !== undefined && sarathi.changes.length > 0) {
+    if (handlersChanged) sarathi.labels.push(`hooks ${handlersChanged}`);
+    if (handlersTimed) sarathi.labels.push('timeout');
+    return { text, changes, labels, sarathi };
   }
   return { text, changes, labels };
 }
@@ -1218,10 +1397,14 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
 
   const existing = fileAt(HOOKS_PATH);
   // Worked out before the plan, so a file onboard cannot edit is refused before any question.
-  const claude = claudeSettings(existing);
+  const claude = claudeSettings(existing, fileAt(SARATHI_PATH));
   if (claude.changes.length > 0) {
     pull.push({ label: 'settings.json', detail: existing === undefined ? 'new' : claude.labels.join(', ') });
     change(HOOKS_PATH, claude.text, claude.changes.join('; '));
+  }
+  if (claude.sarathi) {
+    pull.push({ label: 'sarathi.json', detail: claude.sarathi.labels.join(', ') });
+    change(SARATHI_PATH, claude.sarathi.text, claude.sarathi.changes.join('; '));
   }
 
   const paths = pathsFor(sys.home, agent);

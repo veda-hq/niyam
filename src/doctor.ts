@@ -19,15 +19,15 @@ import {
   signingKeys,
   tokenInfo,
 } from './agent.ts';
-import { LOCKED, hooksHittingLock } from './as-agent.ts';
+import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
 import { FROM_SETUP, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
 import { featuresIn } from './features.ts';
 import { typesDrift } from './issue-types.ts';
 import { type Finding, closing, findingLines, heading, painter, tilde } from './layout.ts';
 import { exposure, exposureFindings, movedFindings, readDeclined, setAside } from './lockout.ts';
-import { CLOUD_SETUP_PATH, HOOKS_PATH } from './onboard-pull.ts';
+import { CLOUD_SETUP_PATH, HOOKS_PATH, SARATHI_PATH } from './onboard-pull.ts';
 import { leftoverDir, leftoverToken } from './machine.ts';
-import { missingAutoFixRules } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, missingAutoFixRules, sarathiRunner } from './onboard.ts';
 import { isOrganisation } from './owner-login.ts';
 import { leftBehind } from './owner-step.ts';
 import { repoRoot } from './session-start.ts';
@@ -203,7 +203,49 @@ function repoFindings(sys: Sys): Finding[] {
       }),
     ),
     ...autoFixFindings(sys),
+    ...twiceFindings(sys),
   ];
+}
+
+/** niyam's own hook commands, this release's and older ones, by what they do. */
+const NIYAM_HOOKS: [name: string, commands: readonly string[]][] = [
+  ["niyam's SessionStart hook", [HOOK_COMMAND, ...OLDER_HOOK_COMMANDS]],
+  ["niyam's guard hook", [GUARD_COMMAND, ...OLDER_GUARD_COMMANDS]],
+];
+
+/**
+ * Hooks that run twice: a command in both `.claude/settings.json` and the
+ * handlers `.claude/sarathi.json` lists for the same event, where the
+ * settings run sarathi for it (P-66). onboard moves niyam's own; any other
+ * is the repo's to take out of the settings.
+ */
+function twiceFindings(sys: Sys): Finding[] {
+  let hooks: ReturnType<typeof clientHooks>;
+  let settings: unknown;
+  try {
+    const root = repoRoot(sys);
+    hooks = clientHooks(sys, root);
+    settings = JSON.parse(sys.read(`${root}/${HOOKS_PATH}`)) as unknown;
+  } catch {
+    // Outside a clone, or settings doctor cannot read: no hook in them runs twice that it can tell.
+    return [];
+  }
+  const handlers = new Set(hooks.filter((hook) => hook.file === SARATHI_PATH).map((hook) => `${hook.event}\n${hook.command}`));
+  const seen = new Set<string>();
+  const found: Finding[] = [];
+  for (const { file, event, command } of hooks) {
+    const key = `${event}\n${command}`;
+    if (file !== HOOKS_PATH || !handlers.has(key) || seen.has(key) || !sarathiRunner(settings, event)) continue;
+    seen.add(key);
+    const own = NIYAM_HOOKS.find(([, commands]) => commands.includes(command))?.[0];
+    const named = own ?? `the ${event} hook ${JSON.stringify(command.length > 60 ? `${command.slice(0, 57)}...` : command)}`;
+    found.push({
+      mark: '▲',
+      text: `${named} is in both ${HOOKS_PATH} and ${SARATHI_PATH} for ${event}, so it runs twice`,
+      fix: own ? ONBOARD : `take it out of ${HOOKS_PATH}; sarathi runs it`,
+    });
+  }
+  return found;
 }
 
 /**

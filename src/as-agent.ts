@@ -14,6 +14,7 @@ import { AGENT_VAR } from './names.ts';
 import { cloudToken } from './cloud.ts';
 import { recordedAgent, reachesGitHub, refusal } from './guard.ts';
 import { GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS } from './onboard.ts';
+import { SARATHI_PATH } from './onboard-pull.ts';
 import { tokenStore, unsupported } from './token-store.ts';
 import type { Output, Sys } from './types.ts';
 
@@ -136,8 +137,8 @@ const SETTINGS_FILES = ['.claude/settings.json', '.claude/settings.local.json'];
 const OWN_COMMANDS = new Set([HOOK_COMMAND, GUARD_COMMAND, ...OLDER_HOOK_COMMANDS, ...OLDER_GUARD_COMMANDS]);
 
 /**
- * The client's hooks, in the repo around the working directory, that reach
- * GitHub outside `as-agent`, so get the lock's placeholder token: by the
+ * The client's hooks, in the repo around the working directory, sarathi's
+ * handlers among them (`clientHooks`), that reach GitHub outside `as-agent`, so get the lock's placeholder token: by the
  * hook's command, or by a script in the repo it names. Like the guard, it
  * reads text, so a script that runs another script is missed. Comments and
  * docstrings are left out, so prose that names gh or git push is not a call.
@@ -151,27 +152,59 @@ export function hooksHittingLock(sys: Sys): string[] {
   const root = top.stdout.trim();
   const cloud = sys.env.CLAUDE_CODE_REMOTE === 'true';
   const found: string[] = [];
-  for (const file of SETTINGS_FILES) {
-    let settings: { hooks?: Record<string, unknown> };
+  for (const { file, event, command, kind } of clientHooks(sys, root)) {
+    if (OWN_COMMANDS.has(command)) continue;
+    const script = scriptOf(sys, root, command);
+    // A routed script's own text is not judged; the command that runs it still is, and then names the hook.
+    const judgedScript = script && !routedByHelper(sys, root, script.text) ? script : undefined;
+    const [line, code] = [withoutComments(command), withoutComments(judgedScript?.text ?? '')];
+    const judged = cloud ? `${line}\n${code}` : `${beforeCloudOnly(line)}\n${beforeCloudOnly(code)}`;
+    if (reachesGitHub(withoutAsAgent(judged))) found.push(`${file} ${event} ${kind} ${judgedScript ? judgedScript.path : JSON.stringify(command)}`);
+  }
+  return found;
+}
+
+/** One command a client's hook runs: from a settings file's hooks, or a handler sarathi runs from its list. */
+export interface ClientHook {
+  file: string;
+  event: string;
+  command: string;
+  kind: 'hook' | 'handler';
+}
+
+/**
+ * Every command the client's hooks run, in the repo at `root`: the
+ * settings files' hooks, then the handlers `.claude/sarathi.json` lists,
+ * which sarathi runs for the settings (P-66). A file that is missing or not
+ * JSON gives none.
+ */
+export function clientHooks(sys: Sys, root: string): ClientHook[] {
+  const found: ClientHook[] = [];
+  const read = (file: string): { hooks?: Record<string, unknown> } | undefined => {
     try {
-      settings = JSON.parse(sys.read(`${root}/${file}`)) as typeof settings;
+      const parsed = JSON.parse(sys.read(`${root}/${file}`)) as unknown;
+      return typeof parsed === 'object' && parsed !== null ? (parsed as { hooks?: Record<string, unknown> }) : undefined;
     } catch {
-      continue;
+      return undefined;
     }
-    for (const [event, groups] of Object.entries(settings.hooks ?? {})) {
-      for (const group of Array.isArray(groups) ? groups : []) {
+  };
+  const events = (hooks: unknown): [string, unknown[]][] =>
+    typeof hooks === 'object' && hooks !== null ? Object.entries(hooks).map(([event, list]) => [event, Array.isArray(list) ? list : []]) : [];
+  for (const file of SETTINGS_FILES) {
+    for (const [event, groups] of events(read(file)?.hooks)) {
+      for (const group of groups) {
         const hooks = (group as { hooks?: unknown } | null)?.hooks;
         for (const hook of Array.isArray(hooks) ? hooks : []) {
           const command = (hook as { command?: unknown } | null)?.command;
-          if (typeof command !== 'string' || OWN_COMMANDS.has(command)) continue;
-          const script = scriptOf(sys, root, command);
-          // A routed script's own text is not judged; the command that runs it still is, and then names the hook.
-          const judgedScript = script && !routedByHelper(sys, root, script.text) ? script : undefined;
-          const [line, code] = [withoutComments(command), withoutComments(judgedScript?.text ?? '')];
-          const judged = cloud ? `${line}\n${code}` : `${beforeCloudOnly(line)}\n${beforeCloudOnly(code)}`;
-          if (reachesGitHub(withoutAsAgent(judged))) found.push(`${file} ${event} hook ${judgedScript ? judgedScript.path : JSON.stringify(command)}`);
+          if (typeof command === 'string') found.push({ file, event, command, kind: 'hook' });
         }
       }
+    }
+  }
+  for (const [event, entries] of events(read(SARATHI_PATH)?.hooks)) {
+    for (const entry of entries) {
+      const command = (entry as { command?: unknown } | null)?.command;
+      if (typeof command === 'string') found.push({ file: SARATHI_PATH, event, command, kind: 'handler' });
     }
   }
   return found;
