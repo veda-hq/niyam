@@ -13,6 +13,9 @@ import { prIdentity } from './identity.ts';
 import { machine, machineArgs } from './machine.ts';
 import { brief, briefArgs, handoff, handoffArgs } from './handoff.ts';
 import { cubicDismiss, dismissArgs } from './cubic-dismiss.ts';
+import { docNumber, docNumberArgs } from './doc-numbers.ts';
+import { renumberArgs, renumberDoc } from './renumber-doc.ts';
+import { workItemArgs, workItemNumber } from './work-item-number.ts';
 import { keepGoing } from './keep-going.ts';
 import { prAutocreate } from './pr-autocreate.ts';
 import { prSignals, signalArgs } from './pr-signals.ts';
@@ -93,6 +96,16 @@ Commands:
                    Claude Code's Stop hook: sends a session back while its branch has commits the base
                    lacks and its pull request has not merged, saying what is left ("1 of 5"); --stop
                    records why started work stops at this commit. The hook always exits 0
+  doc-number <kind> [--reserve] [--json] [--offline]
+                   The next free number of a numbered document kind (adr), against main, this tree, every
+                   ref, open pull requests and Work item titles; --reserve claims it for good, and refuses
+                   when GitHub could not be read. The kinds are .github/niyam.json's "docNumbers"
+  renumber-doc <kind> <from> <to> [--apply]
+                   Move a numbered document to a free number with every citation, path and relationship
+                   that names it; a dry run unless --apply
+  work-item-number [--issue <N>] [--apply]
+                   Run by a client's workflow on issue events: a Work item whose number something else
+                   holds is renumbered, with a comment; --apply writes
   help            Show this text
   version          Print the installed version
 
@@ -133,17 +146,17 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
     io.err(USAGE);
     return 2;
   }
-  if (command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss') {
+  if (command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number') {
     // Their options are checked here, so a bad one is bad usage (exit 2).
     try {
-      (command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
+      (command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
     } catch (error) {
       io.err(`niyam: ${error instanceof Error ? error.message : String(error)}`);
       io.err(USAGE);
@@ -232,7 +245,13 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
     case 'cubic-dismiss':
     case 'upgrade':
     case 'owner-step':
+    case 'doc-number':
+    case 'renumber-doc':
+    case 'work-item-number':
       try {
+        if (command === 'doc-number') return docNumber(await sys(), io, rest);
+        if (command === 'renumber-doc') return renumberDoc(await sys(), io, rest);
+        if (command === 'work-item-number') return workItemNumber(await sys(), io, rest);
         if (command === 'upgrade') return await upgrade(await sys(), io);
         if (command === 'pr-signals') return await prSignals(await sys(), io, rest);
         if (command === 'handoff') return await handoff(await sys(), io, rest);
