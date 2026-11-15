@@ -2058,3 +2058,21 @@
     printing the token itself, which would land in scrollback and runner
     logs; and per-runner integrations (Cursor rules, Codex config), many
     and changing, where one shell entry point covers them all.
+- **2026-11-15 — Record: pr-autocreate refuses a symlink out of the git
+  toplevel (P-69, Work item #366, slice #375).** The writers P-67 fixed run
+  only when someone types the command. pr-autocreate runs from git's
+  pre-push hook and Claude Code's PostToolUse and Stop hooks on every push.
+  So after `ln -s <outside> .tmp/pr-autocreate`, which kavach allows, the
+  next push wrote there. Its stale-lock cleanup could also delete a file
+  outside.
+  - `withLock` runs `Sys.confine` on the branch's lock, record and opt-out
+    paths before it makes the folder or takes the lock. A link stops the
+    decision before GitHub is asked, so no pull request opens. The Autofix
+    ack and the watcher's `watch.log` are each checked before their folder
+    is made.
+  - The hooks keep their exits. The Claude hook says why on standard error
+    and exits 0. `spawn-watchers` warns that it could not record the push
+    and starts no watcher. An opted-out push it cannot record is still
+    refused (exit 3), as with any other write failure there.
+  - Rejected: checking only `.tmp/pr-autocreate` itself. A linked record
+    file or lock inside a real folder would still pass that check.

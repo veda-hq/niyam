@@ -199,6 +199,7 @@ function loadState(sys: Sys, root: string, branch: string): Partial<State> {
 }
 
 function saveState(sys: Sys, root: string, state: State): void {
+  sys.confine(root, statePath(root, state.branch));
   sys.mkdir(stateDir(root));
   sys.write(statePath(root, state.branch), JSON.stringify(state));
 }
@@ -256,8 +257,10 @@ function recheckSeconds(sys: Sys): number {
  * hook can reach the same push. A lock older than three minutes is abandoned.
  */
 export async function withLock<T>(sys: Sys, root: string, branch: string, body: () => Promise<T> | T): Promise<T> {
-  sys.mkdir(stateDir(root));
   const path = `${statePath(root, branch)}.lock`;
+  // Every record the body may touch, checked before any is: a link out of the toplevel stops it before GitHub is asked.
+  for (const each of [path, statePath(root, branch), optoutPath(root, branch)]) sys.confine(root, each);
+  sys.mkdir(stateDir(root));
   const deadline = sys.now().getTime() + LOCK_WAIT_MS;
   while (!sys.claim(path)) {
     const changed = sys.modified(path);
@@ -578,6 +581,7 @@ async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettin
   const ack = `${stateDir(root)}/acks/${who}-${pr.number}`;
   if (sys.exists(ack)) return '';
   try {
+    sys.confine(root, ack);
     sys.mkdir(dirname(ack));
     sys.write(ack, '');
   } catch (error) {
@@ -872,6 +876,7 @@ export async function spawnWatchers(sys: Sys, io: Output, args: readonly string[
     }
     if (opted) continue;
     try {
+      sys.confine(root, `${stateDir(root)}/watch.log`);
       sys.mkdir(stateDir(root));
       // Its own session and no inherited descriptors: git, the hook's
       // supervisor and a closing terminal neither wait on it nor end it.
