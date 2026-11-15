@@ -309,6 +309,11 @@ export class FakeSys implements Sys {
     this.dirs.push(path);
   }
 
+  /** The fake has no links: a path leaves the toplevel only by its name. */
+  confine(root: string, path: string): void {
+    if (!path.startsWith(`${root}/`)) throw new Error(`refused to write ${path}: it leads outside the git toplevel ${root}`);
+  }
+
   tempDir(prefix = '/tmp/niyam-'): string {
     const dir = `${prefix}${this.temps.length + 1}`;
     this.temps.push(dir);

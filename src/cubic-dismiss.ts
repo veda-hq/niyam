@@ -230,6 +230,13 @@ export function cubicDismiss(sys: Sys, io: Output, args: readonly string[]): num
   }
   const file = settings.file;
   const path = `${root}/${file}`;
+  // A link, at the file or a folder above it, would take the write out of the repository; git status does not show it.
+  try {
+    sys.confine(root, path);
+  } catch (error) {
+    io.err(`✗ ${error instanceof Error ? error.message : String(error)}; nothing was written`);
+    return 1;
+  }
   const changed = run(['status', '--porcelain', '--', file]).trim();
   if (changed) {
     io.err(`✗ ${file} already differs from HEAD (${changed}); commit or restore it first`);

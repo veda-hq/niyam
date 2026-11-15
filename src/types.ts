@@ -45,6 +45,13 @@ export interface Sys {
   write(path: string, data: string, mode?: number): void;
   append(path: string, data: string): void;
   mkdir(path: string): void;
+  /**
+   * Throws unless `path` stays under the folder `root` once links are followed: the nearest part of `path` that is
+   * there, a link included, must have its real path under `root`'s. A link that leads nowhere is refused too. The
+   * error names `path`, where it leads and `root`'s real path. Call it before writing, appending or making a folder
+   * at `path`.
+   */
+  confine(root: string, path: string): void;
   /** The names in a folder, or none when it does not exist. */
   list(path: string): string[];
   /**
