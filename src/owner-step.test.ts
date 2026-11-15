@@ -677,7 +677,8 @@ describe('owner-step required-checks --check', () => {
       { number: 8, merged_at: '2026-11-14T10:00:00Z', head: { sha: 'eight' } },
     ],
   };
-  const run = (name: string, conclusion: string | null, app = { id: 15368, name: 'GitHub Actions' }): unknown => ({ name, conclusion, app });
+  const run = (name: string, conclusion: string | null, app = { id: 15368, name: 'GitHub Actions' }, started_at?: string): unknown => ({ name, conclusion, app, ...(started_at ? { started_at } : {}) });
+  const ACTIONS = { id: 15368, name: 'GitHub Actions' };
   const ran = (...runs: unknown[]): { status: number; json: unknown } => ({ status: 200, json: { total_count: runs.length, check_runs: runs } });
   const VEDA = 'veda-checks / Checks';
   const setUp = (rules: unknown[], extra: Record<string, Reply> = {}): ReturnType<typeof world> & { now: () => unknown[] } => {
@@ -727,6 +728,11 @@ describe('owner-step required-checks --check', () => {
       [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'failure'), run(VEDA, null)) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(failure, not finished\)/],
       [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success'), run(VEDA, 'failure')) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(success, failure\)/],
       [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success', { id: 'x', name: 'Odd' } as never)) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(success\)/],
+      // A cancelled run no later success replaced: one that started after the success, from another app, or with no start.
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success', ACTIONS, '2026-11-15T10:01:46Z'), run(VEDA, 'cancelled', ACTIONS, '2026-11-15T10:02:01Z')) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(success, cancelled\)/],
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'cancelled', ACTIONS, '2026-11-15T10:01:46Z')) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(cancelled\)/],
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success', ACTIONS, '2026-11-15T10:02:01Z'), run(VEDA, 'cancelled', { id: 99, name: 'Lookalike' }, '2026-11-15T10:01:46Z')) }, /more than one app reported veda-checks \/ Checks on veda-hq\/niyam#8, the last pull request merged into main, and a ruleset requires one app's/],
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success', ACTIONS, '2026-11-15T10:02:01Z'), run(VEDA, 'cancelled')) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(success, cancelled\)/],
       [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success'), run(VEDA, 'success', { id: 99, name: 'Lookalike' })) }, /more than one app reported veda-checks \/ Checks on veda-hq\/niyam#8, the last pull request merged into main, and a ruleset requires one app's/],
       [{ [runsAt('eight', VEDA)]: { status: 502, json: { message: 'Bad Gateway' } } }, /GitHub did not give the checks of veda-hq\/niyam#8, the last pull request merged into main \(gh: Bad Gateway \(HTTP 502\)\)/],
       [{ [PULLS]: { status: 200, json: [{ number: 9, merged_at: null, head: { sha: 'nine' } }] } }, /no pull request merged into main is among veda-hq\/niyam's 30 most recently updated/],
@@ -743,6 +749,17 @@ describe('owner-step required-checks --check', () => {
       assert.deepEqual(made.sys.chosen, []);
       cleaned(made.sys, out);
     }
+  });
+
+  it('leaves out a cancelled run a later success replaced, as a cancel-in-progress workflow leaves one (#358)', async () => {
+    // Guard on #353: the opened run was cancelled when the edited run started, which passed.
+    const made = setUp([checks('niyam / PR identity')], {
+      [runsAt('eight', 'Guard')]: ran(run('Guard', 'success', ACTIONS, '2026-11-15T10:02:01Z'), run('Guard', 'cancelled', ACTIONS, '2026-11-15T10:01:46Z')),
+    });
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, step('Guard')), 0, out.join('\n'));
+    assert.match(out.join('\n'), /Guard passed on veda-hq\/niyam#8, reported by GitHub Actions/);
+    assert.deepEqual(made.now(), [checks('niyam / PR identity', 'Guard')]);
   });
 
   it('adds the named checks that pass and refuses the others, exiting 1', async () => {
