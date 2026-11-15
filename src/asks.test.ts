@@ -260,6 +260,69 @@ describe('needsOwner', () => {
       sys.route('GET', events, { status: 403, json: null });
       await assert.rejects(needsOwner(sys, capture().io), /cannot read \/repos\/example-org\/example-app\/issues\/7\/events \(HTTP 403\)/);
     });
+
+    describe("the owner's batch answer on the Approvals issue (#357)", () => {
+      /** Settings naming #9 as the Approvals issue. */
+      const ON_9 = { owner: OWNER, agent: AGENT, approvals: 9 };
+      const batch = `${API}/repos/${SLUG}/issues/9/comments?since=${encodeURIComponent(ASKED)}&per_page=100&page=1`;
+      const says = (login: string, id: number, body: string, created_at = '2026-11-15T09:59:40Z', more: Record<string, unknown> = {}) => ({ id, body, user: { login }, created_at, ...more });
+      const run = (list: unknown[] | (() => unknown[]), event: unknown = asked()) => {
+        const sys = job('issue_comment', event, ON_9);
+        sys.route('GET', events, { status: 200, json: [] });
+        quiet(sys);
+        sys.route('GET', batch, typeof list === 'function' ? () => ({ status: 200, json: list() }) : { status: 200, json: list });
+        return sys;
+      };
+      const ANSWERED = 'needs-owner: #7 asks the owner (Needs you:), and the owner already answered with a "Decision: approve" on #9, the Approvals issue; not labelled needs-owner';
+
+      it("does not label the issue when the owner's batch answer after the ask names it", async () => {
+        const sys = run([says(OWNER, 90, 'Decision: approve #7 #12\nReasons.')]);
+        assert.deepEqual((await runJob(sys)).out, [ANSWERED]);
+        assert.deepEqual(calls(sys), []);
+      });
+
+      it('takes the label off when the batch answer lands between the read and the label', async () => {
+        let reads = 0;
+        const sys = run(() => (reads++ === 0 ? [] : [says(OWNER, 90, 'Decision: approve #7')]));
+        assert.deepEqual((await runJob(sys)).out, [
+          'needs-owner: #7 asks the owner (Needs you:), and the owner answered with a "Decision: approve" on #9, the Approvals issue as it was labelled; needs-owner taken off',
+        ]);
+        assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`, `DELETE /repos/${SLUG}/issues/7/labels/needs-owner`]);
+      });
+
+      it("counts a proposal's answer by the issue its first line names, as the sweep does", async () => {
+        const proposal = { ...asked(), comment: { ...asked().comment, body: `Proposal: add slice #12 to #7.\nPage: ${PAGE}` } };
+        const named = run([says(OWNER, 90, 'Decision: approve #12')], proposal);
+        assert.match((await runJob(named)).out[0] ?? '', /already answered with a "Decision: approve" on #9/);
+        assert.deepEqual(calls(named), []);
+        const other = run([says(OWNER, 90, 'Decision: approve #7')], proposal);
+        assert.deepEqual((await runJob(other)).out, ['needs-owner: #7 asks the owner (Proposal:); labelled needs-owner']);
+      });
+
+      it("labels it where the batch answer is someone else's, older than the ask, names other issues only, or was edited by someone else", async () => {
+        const sys = run([
+          says(AGENT, 91, 'Decision: approve #7'),
+          says(OWNER, 92, 'Decision: approve #7', '2026-11-14T08:00:00Z', { updated_at: '2026-11-15T09:59:40Z' }),
+          says(OWNER, 93, 'Decision: approve #8\nNot #7 yet.'),
+          says(OWNER, 94, 'Decision: approve #7', '2026-11-15T09:59:40Z', { node_id: 'IC_94', updated_at: '2026-11-15T09:59:45Z' }),
+        ]);
+        sys.route('POST', `${API}/graphql`, { status: 200, json: { data: { nodes: [{ id: 'IC_94', userContentEdits: { totalCount: 1, nodes: [{ editor: { login: AGENT } }] } }] } } });
+        assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+        assert.deepEqual(calls(sys), ['POST /graphql', `POST /repos/${SLUG}/issues/7/labels`, 'POST /graphql']);
+      });
+
+      it('labels it where GitHub cannot find the Approvals issue, and reads it only when the issue itself has no answer', async () => {
+        const missing = job('issue_comment', asked(), ON_9);
+        missing.route('GET', events, { status: 200, json: [] });
+        quiet(missing);
+        missing.route('GET', batch, { status: 404, json: null });
+        assert.deepEqual((await runJob(missing)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+        const approved = job('issue_comment', asked(), ON_9);
+        approved.route('GET', events, { status: 200, json: relabelled });
+        await runJob(approved);
+        assert.ok(!approved.requests.some((request) => request.url.includes('/issues/9/')));
+      });
+    });
   });
 
   it("takes the label off at the owner's Decision: comment, and at their approved label", async () => {
