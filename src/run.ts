@@ -208,6 +208,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         home = real.home;
         return env(real, io, parsed);
       } catch (error) {
+        // fail-open: only in that env carries on, printing the lock alone or running nothing, so the shell stays locked.
         return envFailed(home, io, parsed, error);
       }
     }

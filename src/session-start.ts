@@ -192,7 +192,7 @@ function start(sys: Sys): Said {
   try {
     local = localIdentity(sys);
   } catch (error) {
-    // Still locks below: a check that failed gives no identity.
+    // fail-open: only in that session-start carries on to write the lock, and a check that failed gives no identity.
     local = { owner: 'the owner', fix: 'tell the owner', reason: `the check failed (${message(error)})` };
   }
   const stop = `Do not push, fetch, or run gh in this session; tell ${local.owner}.`;
