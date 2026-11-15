@@ -1926,6 +1926,17 @@
   concurrency group on the job (GitHub keeps one pending run a group and
   cancels the rest, so an event could be dropped), and the sweep counting the
   `approved` label (new behaviour the owner sees, not this fix).
+- **2026-11-15 — Record: an ask's run counts the owner's batch answer too
+  (State #357 of P-40).** #355 left one answer out of the ask's run: the
+  owner's `Decision: approve #N` on the Approvals issue. Its own run sweeps
+  only issues already labelled, so a batch answer landing while the ask's
+  run was still going left `needs-owner` on until the hourly sweep. Now the
+  ask's run, after the issue's own answers find nothing and where the
+  settings name an Approvals issue, reads that issue's comments since the
+  ask and counts an owner's batch answer made after it whose first line
+  names the ask's issue (a `Proposal:`'s, the issue its first line names, as
+  the sweep reads it) that no one but owners edited, before labelling and
+  again after. An Approvals issue GitHub cannot find answers nothing.
 - **2026-11-15 — Record: `owner-step --check` leaves out a cancelled run a
   later success replaced (State #358 of P-58).** Guard (P-62) runs with
   `cancel-in-progress`, so a pull request opened and edited within seconds

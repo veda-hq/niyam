@@ -617,9 +617,11 @@ issues only), the owner answers with a `Decision:` comment, which takes it
 off at once, or a 👍 on the ask, which the hourly sweep counts. The owner
 may answer an ask on an issue while its own run is still going, before the
 label is on: that run reads the owner's `approved` label, a `Decision:` that
-no one but owners edited, or a 👍 on the ask, each newer than the ask,
-before it labels the issue and again after, and leaves the label off when
-one is there. The sweep
+no one but owners edited, a 👍 on the ask, or a batch answer on the
+Approvals issue whose first line names the ask's issue (for a `Proposal:`,
+the issue its first line names) that no one but owners edited, each newer
+than the ask, before it labels the issue and again after, and leaves the
+label off when one is there. The sweep
 reads an issue's or pull request's own comments, not review threads, so an
 ask in a review thread is answered with a `Decision:` reply there. Hourly
 (cron `41 * * * *`), on a run by hand, and at once when the owner posts a
