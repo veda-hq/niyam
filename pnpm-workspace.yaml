@@ -7,3 +7,6 @@ minimumReleaseAge: 1440
 # (scripts/own-provenance.mjs, the first step of `pnpm check`): veda's release
 # workflow built each one from its tag.
 minimumReleaseAgeExclude: ['@veda-hq/*']
+# lint/ holds the lint tools apart from the root (slice #298): shuddhi and the
+# TypeScript parser need TypeScript 5's compiler API, which TypeScript 7 lacks.
+packages: ['lint']

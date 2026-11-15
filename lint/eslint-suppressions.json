@@ -1,0 +1,465 @@
+{
+  "src/agent.test.ts": {
+    "shuddhi/no-collection-time-io": {
+      "count": 2
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 2
+    }
+  },
+  "src/agent.ts": {
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 2
+    }
+  },
+  "src/approvals.ts": {
+    "shuddhi/strict-scalar-parse": {
+      "count": 3
+    }
+  },
+  "src/as-agent.test.ts": {
+    "shuddhi/git-fixture-env": {
+      "count": 1
+    },
+    "shuddhi/git-spawn-env": {
+      "count": 1
+    },
+    "shuddhi/no-collection-time-io": {
+      "count": 7
+    },
+    "shuddhi/spawn-result-checked": {
+      "count": 1
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 2
+    }
+  },
+  "src/as-agent.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 5
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    }
+  },
+  "src/asks.test.ts": {
+    "shuddhi/parse-structured-config": {
+      "count": 1
+    }
+  },
+  "src/asks.ts": {
+    "shuddhi/no-hand-rolled-argv": {
+      "count": 1
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 3
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 3
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 9
+    }
+  },
+  "src/board.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 2
+    },
+    "shuddhi/no-regex-structured-parse": {
+      "count": 1
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 2
+    }
+  },
+  "src/brief.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    }
+  },
+  "src/checks.test.ts": {
+    "shuddhi/git-fixture-env": {
+      "count": 1
+    },
+    "shuddhi/git-spawn-env": {
+      "count": 2
+    },
+    "shuddhi/no-collection-time-io": {
+      "count": 5
+    },
+    "shuddhi/spawn-result-checked": {
+      "count": 1
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 6
+    }
+  },
+  "src/cloud.test.ts": {
+    "shuddhi/no-collection-time-io": {
+      "count": 2
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 5
+    }
+  },
+  "src/cloud.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 4
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 5
+    }
+  },
+  "src/cubic-dismiss.test.ts": {
+    "shuddhi/git-fixture-env": {
+      "count": 1
+    },
+    "shuddhi/git-spawn-env": {
+      "count": 1
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 1
+    }
+  },
+  "src/cubic-dismiss.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 2
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 2
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    }
+  },
+  "src/decisions.ts": {
+    "shuddhi/strict-scalar-parse": {
+      "count": 3
+    }
+  },
+  "src/design.ts": {
+    "shuddhi/no-regex-structured-parse": {
+      "count": 1
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 3
+    }
+  },
+  "src/doctor.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 3
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 7
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    }
+  },
+  "src/edits.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 1
+    }
+  },
+  "src/features.ts": {
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 4
+    }
+  },
+  "src/guard.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 2
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    }
+  },
+  "src/handoff.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 2
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 4
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 4
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 1
+    }
+  },
+  "src/identity.ts": {
+    "shuddhi/no-regex-structured-parse": {
+      "count": 1
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    }
+  },
+  "src/issue-types.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    }
+  },
+  "src/jsonedit.ts": {
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    }
+  },
+  "src/keep-going.test.ts": {
+    "shuddhi/git-fixture-env": {
+      "count": 1
+    },
+    "shuddhi/git-spawn-env": {
+      "count": 2
+    },
+    "shuddhi/owned-fixture-removal": {
+      "count": 2
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 2
+    }
+  },
+  "src/keep-going.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 4
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 4
+    }
+  },
+  "src/lockout.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 2
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 3
+    }
+  },
+  "src/machine.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    }
+  },
+  "src/onboard-pull.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 4
+    }
+  },
+  "src/onboard.test.ts": {
+    "shuddhi/guarded-marker-slice": {
+      "count": 3
+    },
+    "shuddhi/no-collection-time-io": {
+      "count": 5
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 8
+    }
+  },
+  "src/onboard.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 3
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 5
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 3
+    }
+  },
+  "src/owner-step.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 4
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 2
+    }
+  },
+  "src/pr-autocreate.test.ts": {
+    "shuddhi/git-fixture-env": {
+      "count": 1
+    },
+    "shuddhi/git-spawn-env": {
+      "count": 2
+    },
+    "shuddhi/owned-fixture-removal": {
+      "count": 1
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 2
+    }
+  },
+  "src/pr-autocreate.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 24
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 19
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 3
+    }
+  },
+  "src/pr-signals.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 1
+    }
+  },
+  "src/push-identity.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 2
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    }
+  },
+  "src/release-tag.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 2
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    }
+  },
+  "src/review-thread.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 2
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 2
+    }
+  },
+  "src/reviews.ts": {
+    "shuddhi/strict-scalar-parse": {
+      "count": 12
+    }
+  },
+  "src/run.test.ts": {
+    "shuddhi/no-collection-time-io": {
+      "count": 1
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 3
+    }
+  },
+  "src/run.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 12
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 6
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 1
+    }
+  },
+  "src/secrets.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    }
+  },
+  "src/session-start.test.ts": {
+    "shuddhi/no-collection-time-io": {
+      "count": 4
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 1
+    }
+  },
+  "src/session-start.ts": {
+    "shuddhi/no-swallowed-catch": {
+      "count": 10
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    }
+  },
+  "src/sys.test.ts": {
+    "shuddhi/no-collection-time-io": {
+      "count": 1
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 2
+    },
+    "shuddhi/teardown-in-finally": {
+      "count": 2
+    }
+  },
+  "src/sys.ts": {
+    "shuddhi/env-through-schema": {
+      "count": 2
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 3
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    }
+  },
+  "src/upgrade.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 2
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    }
+  },
+  "src/version.ts": {
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    }
+  },
+  "src/work.test.ts": {
+    "shuddhi/git-fixture-env": {
+      "count": 1
+    },
+    "shuddhi/no-collection-time-io": {
+      "count": 1
+    },
+    "shuddhi/spawn-timeout": {
+      "count": 2
+    }
+  },
+  "src/work.ts": {
+    "shuddhi/no-raw-error-string": {
+      "count": 1
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 1
+    },
+    "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 10
+    }
+  }
+}
