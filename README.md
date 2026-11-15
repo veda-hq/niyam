@@ -1333,7 +1333,11 @@ A release is the merge of its version bump: a push to `main` whose
 `package.json` version has no tag `vX.Y.Z` yet (P-61). The Release workflow
 then runs `pnpm check`, makes that annotated tag (`niyam X.Y.Z`) on the
 merged commit itself, and publishes the GitHub release, attaching the CLI
-package it built and tested. Agents push no release tags. From 0.6.16 the same
+package it built and tested. Agents push no release tags. The tag is made as
+niyam's own GitHub App, the one bypass of the `v*` tag ruleset's rule against
+creating a tag, so no one else, and no other workflow, can make one (P-64);
+the app's client id and private key are the `npm` environment's
+`RELEASE_APP_CLIENT_ID` and `RELEASE_APP_PRIVATE_KEY`. From 0.6.16 the same
 package is on npm as `@veda-hq/niyam`, with provenance, for a repository that
 pins it as an exact version; it publishes from the `npm` environment, which
 only `main` may deploy to. A tag on any other commit is not a release:
