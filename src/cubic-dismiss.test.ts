@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -345,6 +345,45 @@ describe('cubicDismiss', () => {
       assert.match(git('log', '-1', '--format=%(trailers:key=Dismissal-Basis,valueonly)'), /^evidence/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a dismiss file that a link takes out of the repository, which git reads as clean (real git)', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-dismiss-link-')));
+    try {
+      const shapes: [string, string, (dir: string, outside: string) => string[], RegExp][] = [
+        ['a committed link at the file', '.cubic-dismiss', (dir, outside) => (writeFileSync(join(outside, 'ledger'), ''), symlinkSync(join(outside, 'ledger'), join(dir, '.cubic-dismiss')), ['.cubic-dismiss']), /\.cubic-dismiss: it is a symbolic link;/],
+        ['a committed link at the file that leads nowhere', '.cubic-dismiss', (dir, outside) => (symlinkSync(join(outside, 'gone'), join(dir, '.cubic-dismiss')), ['.cubic-dismiss']), /: it is a symbolic link;/],
+        ['a committed link at its folder', 'ledger/dismissed', (dir, outside) => (symlinkSync(outside, join(dir, 'ledger')), ['ledger']), /ledger\/dismissed: it leads to .*\/outside\/dismissed, outside the repository/],
+        ['an untracked link at its folder', 'ledger/dismissed', (dir, outside) => (symlinkSync(outside, join(dir, 'ledger')), []), /it leads to .*\/outside\/dismissed, outside the repository/],
+      ];
+      for (const [index, [name, file, plant, message]] of shapes.entries()) {
+        const dir = join(base, `repo-${index}`);
+        const outside = join(base, `outside-${index}`, 'outside');
+        mkdirSync(dir, { recursive: true });
+        mkdirSync(outside, { recursive: true });
+        const git = (...args: string[]): string => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+        git('init', '-q');
+        git('config', 'user.email', 't@example.invalid');
+        git('config', 'user.name', 'T');
+        git('config', 'commit.gpgsign', 'false');
+        mkdirSync(join(dir, '.github'));
+        writeFileSync(join(dir, '.github/niyam.json'), JSON.stringify({ owner: 'o', agent: 'a', cubicDismiss: { file } }));
+        writeFileSync(join(dir, 'a.ts'), 'x\n');
+        const committed = plant(dir, outside);
+        git('add', 'a.ts', '.github/niyam.json', ...committed);
+        git('commit', '-q', '-m', 'base');
+        const head = git('rev-parse', 'HEAD');
+        // The pre-check alone would pass it: git sees nothing changed.
+        assert.equal(git('status', '--porcelain', '--', file), '', name);
+        const done = capture();
+        assert.equal(cubicDismiss({ ...realSys(), cwd: dir }, done.io, ['--evidence', 'a.ts', '--title', 'T', '--reason', 'r']), 1, name);
+        assert.match(done.err.join('\n'), message, name);
+        assert.deepEqual(readdirSync(outside).map((entry) => [entry, readFileSync(join(outside, entry), 'utf8')]), index === 0 ? [['ledger', '']] : [], name);
+        assert.equal(git('rev-parse', 'HEAD'), head, name);
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 

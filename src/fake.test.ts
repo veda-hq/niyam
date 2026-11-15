@@ -280,6 +280,15 @@ export class FakeSys implements Sys {
     return this.files.has(path);
   }
 
+  /** The fake has no links: tests of links run on real folders. */
+  isLink(_path: string): boolean {
+    return false;
+  }
+
+  realPath(path: string): string | undefined {
+    return path;
+  }
+
   read(path: string): string {
     const data = this.files.get(path);
     if (data === undefined) throw new Error(`ENOENT ${path}`);

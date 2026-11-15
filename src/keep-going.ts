@@ -3,6 +3,7 @@ import { basename, dirname } from 'node:path';
 import { githubSlug, isNoToken, SETTINGS_PATH } from './agent.ts';
 import { agentEnv } from './as-agent.ts';
 import { GITHUB_API } from './host.ts';
+import { Outside, landInside } from './inside.ts';
 import type { Output, Sys } from './types.ts';
 import { sessionToken } from './work.ts';
 
@@ -266,6 +267,7 @@ export function readStopNote(sys: Sys, root: string): StopNote | null {
 }
 
 export function writeStopNote(sys: Sys, root: string, note: StopNote): void {
+  landInside(sys, root, notePath(root));
   sys.mkdir(dirname(notePath(root)));
   sys.write(notePath(root), `${JSON.stringify(note)}\n`);
 }
@@ -366,6 +368,7 @@ export async function stopHook(sys: Sys, input: string, err?: (line: string) => 
     const previous = sys.exists(file) ? (JSON.parse(sys.read(file)) as Counter) : null;
     const facts = await gather(sys, root, settings, Boolean(data.agent_id), session, err);
     const decision = decide(facts, previous, settings);
+    landInside(sys, root, file);
     sys.mkdir(`${root}/${STORE}`);
     sys.write(file, JSON.stringify(decision.counter));
     if (!decision.stop) return JSON.stringify({ decision: 'block', reason: decision.reason });
@@ -383,7 +386,9 @@ export async function stopHook(sys: Sys, input: string, err?: (line: string) => 
       });
     }
     return '';
-  } catch {
+  } catch (error) {
+    // Still fails open: a hook that blocked with no counter saved would send the session back forever.
+    if (error instanceof Outside) err?.(`niyam keep-going: ${error.message}`);
     return '';
   }
 }

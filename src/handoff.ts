@@ -2,6 +2,7 @@ import { SETTINGS_PATH, repoAt } from './agent.ts';
 import { relative, resolve } from 'node:path';
 
 import { type BriefIssue, type BriefReason, type LintContext, type Yaml, addToProject, deletedSince, judgeBrief, lintDraft, loadYaml, openBrief, readBrief, repoPath } from './brief.ts';
+import { landInside } from './inside.ts';
 import type { Output, Sys } from './types.ts';
 import { sessionToken } from './work.ts';
 
@@ -395,6 +396,7 @@ function lintContext(h: Here, changedFiles: readonly string[]): Omit<LintContext
 }
 
 const append = (sys: Sys, root: string, entry: Entry): void => {
+  landInside(sys, root, `${root}/${RUN_LOG}`);
   sys.mkdir(`${root}/.tmp/push`);
   sys.append(`${root}/${RUN_LOG}`, `${JSON.stringify(entry)}\n`);
 };

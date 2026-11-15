@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { briefToIssue, loadYaml, type BriefIssue } from './brief.ts';
@@ -21,6 +24,8 @@ import {
   type HookRun,
   type Triggers,
 } from './handoff.ts';
+import { run as niyam } from './run.ts';
+import { realSys } from './sys.ts';
 import type { ExecResult } from './types.ts';
 
 const yaml = await loadYaml();
@@ -453,6 +458,43 @@ describe('handoff', () => {
     const { io, err } = capture();
     assert.equal(await handoff(repo([]), io, ['--record', '--disposition', 'own-work', '--reason', 'r', '--open-brief', 'b.md']), 1);
     assert.match(err[0] ?? '', /--open-brief goes with --disposition handed-off or carrying, not "own-work"/);
+  });
+
+  it('records nothing through a link that leads out of the repository, and its gate fails the push (real folders)', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-handoff-link-')));
+    try {
+      const shapes: [string, (dir: string, outside: string) => void, RegExp][] = [
+        ['a link at the log', (dir, outside) => (writeFileSync(join(outside, 'log'), ''), mkdirSync(join(dir, '.tmp/push'), { recursive: true }), symlinkSync(join(outside, 'log'), join(dir, RUN_LOG))), /handoff-log\.jsonl: it is a symbolic link;/],
+        ['a link at the log that leads nowhere', (dir, outside) => (mkdirSync(join(dir, '.tmp/push'), { recursive: true }), symlinkSync(join(outside, 'gone'), join(dir, RUN_LOG))), /handoff-log\.jsonl: it is a symbolic link;/],
+        ['a link at .tmp/push', (dir, outside) => (mkdirSync(join(dir, '.tmp')), symlinkSync(outside, join(dir, '.tmp/push'))), /it leads to .*\/outside\/handoff-log\.jsonl, outside the repository/],
+        ['a link at .tmp', (dir, outside) => symlinkSync(outside, join(dir, '.tmp')), /it leads to .*\/outside\/push\/handoff-log\.jsonl, outside the repository/],
+      ];
+      for (const [index, [name, plant, message]] of shapes.entries()) {
+        const dir = join(base, `repo-${index}`);
+        const outside = join(base, `outside-${index}`, 'outside');
+        mkdirSync(join(dir, '.github'), { recursive: true });
+        mkdirSync(outside, { recursive: true });
+        // git is the fake's; the files are real.
+        const sys = repo(['.github/workflows/ci.yml']);
+        writeFileSync(join(dir, '.github/niyam.json'), sys.files.get(`${ROOT}/.github/niyam.json`) as string);
+        const real = realSys();
+        Object.assign(sys, { cwd: dir, exists: real.exists, isLink: real.isLink, realPath: real.realPath, read: real.read, write: real.write, append: real.append, mkdir: real.mkdir });
+        const git = sys.execOverride;
+        sys.execOverride = (call) => (call.args.join(' ') === 'rev-parse --show-toplevel' ? { code: 0, stdout: `${dir}\n`, stderr: '' } : git(call));
+        plant(dir, outside);
+        const before = readdirSync(outside).sort();
+        for (const args of [['--record', '--disposition', 'own-work', '--reason', 'r'], ['--assert-fresh']]) {
+          const { io, err } = capture();
+          assert.equal(await niyam(['handoff', ...args], io, () => sys), 1, `${name}: ${args[0]}`);
+          assert.ok(err.join('\n').startsWith(`niyam handoff: refused to write ${dir}/${RUN_LOG}: `), `${name}: ${args[0]}: ${err.join('\n')}`);
+          assert.match(err.join('\n'), message, `${name}: ${args[0]}`);
+        }
+        assert.deepEqual(readdirSync(outside).sort(), before, name);
+        for (const entry of before) assert.equal(readFileSync(join(outside, entry), 'utf8'), '', name);
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve } from 'node:path';
 
 import { SETTINGS_PATH } from './agent.ts';
+import { Outside, landInside } from './inside.ts';
 import type { Output, Sys } from './types.ts';
 
 /**
@@ -230,6 +231,15 @@ export function cubicDismiss(sys: Sys, io: Output, args: readonly string[]): num
   }
   const file = settings.file;
   const path = `${root}/${file}`;
+  // Its regex keeps the path inside as written; a link on the way could still take the write out, and git's status
+  // reads such a file as clean.
+  try {
+    landInside(sys, root, path);
+  } catch (error) {
+    if (!(error instanceof Outside)) throw error;
+    io.err(`✗ ${error.message}`);
+    return 1;
+  }
   const changed = run(['status', '--porcelain', '--', file]).trim();
   if (changed) {
     io.err(`✗ ${file} already differs from HEAD (${changed}); commit or restore it first`);

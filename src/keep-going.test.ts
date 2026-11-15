@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -503,5 +503,43 @@ describe('keep-going on real git', () => {
     assert.equal(await stopHook(desktop, JSON.stringify({ cwd: work })), '');
     writeFileSync(join(work, 'b'), 'edited\n');
     assert.match(await stopHook(desktop, JSON.stringify({ cwd: work })), /PR 7 is open/);
+  });
+
+  it('writes nothing through a link that leads out of the checkout: --stop fails, the hook says why and lets go', async () => {
+    const shapes: [string, (work: string, outside: string) => void, RegExp][] = [
+      ['a link at the note', (work, outside) => (writeFileSync(join(outside, 'note'), ''), mkdirSync(join(work, STORE), { recursive: true }), symlinkSync(join(outside, 'note'), join(work, STORE, 'stop-note.json'))), /stop-note\.json: it is a symbolic link;/],
+      ['a link at the note that leads nowhere', (work, outside) => (mkdirSync(join(work, STORE), { recursive: true }), symlinkSync(join(outside, 'gone'), join(work, STORE, 'stop-note.json'))), /stop-note\.json: it is a symbolic link;/],
+      ['a link at its folder', (work, outside) => (mkdirSync(join(work, '.tmp')), symlinkSync(outside, join(work, STORE))), /it leads to .*\/outside\/stop-note\.json, outside the repository/],
+      ['a link at .tmp', (work, outside) => symlinkSync(outside, join(work, '.tmp')), /it leads to .*\/outside\/keep-going\/stop-note\.json, outside the repository/],
+    ];
+    for (const [index, [name, plant, message]] of shapes.entries()) {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-keep-going-link-')));
+      dirs.push(dir);
+      const work = join(dir, 'work');
+      const outside = join(dir, 'outside');
+      mkdirSync(work);
+      mkdirSync(outside);
+      const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+      const git = (...args: string[]): string => execFileSync('git', args, { cwd: work, encoding: 'utf8', env }).trim();
+      git('init', '-q', '-b', 'feature');
+      git('config', 'user.email', 't@example.invalid');
+      git('config', 'user.name', 'T');
+      git('config', 'commit.gpgsign', 'false');
+      writeFileSync(join(work, 'a'), 'a\n');
+      git('add', 'a');
+      git('commit', '-q', '-m', 'base');
+      plant(work, outside);
+      const before = readdirSync(outside).sort();
+      const sys = { ...realSys(), env: { PATH: process.env.PATH ?? '' }, cwd: work, home: dir };
+      const stopped = capture();
+      assert.equal(await run(['keep-going', '--stop', 'x'], stopped.io, () => sys), 1, name);
+      assert.match(stopped.err.join('\n'), message, name);
+      // The hook's own counter goes through the same check; it still lets the session go.
+      const said: string[] = [];
+      assert.equal(await stopHook(sys, JSON.stringify({ session_id: 's', cwd: work }), (line) => said.push(line)), '', name);
+      if (index >= 2) assert.match(said.join('\n'), /^niyam keep-going: refused to write .*s\.json: it leads to .*outside/, name);
+      assert.deepEqual(readdirSync(outside).sort(), before, name);
+      for (const entry of before) assert.equal(readFileSync(join(outside, entry), 'utf8'), '', name);
+    }
   });
 });

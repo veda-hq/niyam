@@ -5,6 +5,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -54,6 +55,20 @@ export function realSys(): Sys {
       };
     },
     exists: (path) => existsSync(path),
+    isLink(path) {
+      try {
+        return lstatSync(path).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    },
+    realPath(path) {
+      try {
+        return realpathSync(path);
+      } catch {
+        return undefined;
+      }
+    },
     read: (path) => readFileSync(path, 'utf8'),
     write(path, data, mode) {
       writeFileSync(path, data, { mode });

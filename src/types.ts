@@ -41,6 +41,10 @@ export interface Sys {
     },
   ): ExecResult;
   exists(path: string): boolean;
+  /** Whether `path` itself is a symbolic link, one that leads nowhere included. */
+  isLink(path: string): boolean;
+  /** `path` with every link resolved; undefined when it leads nowhere, as a missing path or a dangling link does. */
+  realPath(path: string): string | undefined;
   read(path: string): string;
   write(path: string, data: string, mode?: number): void;
   append(path: string, data: string): void;
