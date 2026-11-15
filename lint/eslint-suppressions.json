@@ -118,18 +118,18 @@
       "count": 1
     },
     "shuddhi/git-spawn-env": {
-      "count": 1
+      "count": 2
     },
     "shuddhi/spawn-timeout": {
-      "count": 1
+      "count": 2
     }
   },
   "src/cubic-dismiss.ts": {
     "shuddhi/no-raw-error-string": {
-      "count": 2
+      "count": 4
     },
     "shuddhi/no-swallowed-catch": {
-      "count": 2
+      "count": 3
     },
     "shuddhi/schema-parse-untrusted": {
       "count": 2
@@ -153,10 +153,10 @@
       "count": 3
     },
     "shuddhi/no-swallowed-catch": {
-      "count": 7
+      "count": 8
     },
     "shuddhi/schema-parse-untrusted": {
-      "count": 2
+      "count": 3
     }
   },
   "src/edits.ts": {
@@ -180,6 +180,11 @@
       "count": 2
     },
     "shuddhi/schema-parse-untrusted": {
+      "count": 2
+    }
+  },
+  "src/handoff.test.ts": {
+    "shuddhi/owned-fixture-removal": {
       "count": 2
     }
   },
@@ -215,7 +220,10 @@
   },
   "src/jsonedit.ts": {
     "shuddhi/schema-parse-untrusted": {
-      "count": 2
+      "count": 3
+    },
+    "shuddhi/strict-scalar-parse": {
+      "count": 1
     }
   },
   "src/keep-going.test.ts": {
@@ -223,18 +231,21 @@
       "count": 1
     },
     "shuddhi/git-spawn-env": {
-      "count": 2
+      "count": 3
     },
     "shuddhi/owned-fixture-removal": {
-      "count": 2
+      "count": 3
     },
     "shuddhi/spawn-timeout": {
-      "count": 2
+      "count": 3
     }
   },
   "src/keep-going.ts": {
-    "shuddhi/no-swallowed-catch": {
+    "shuddhi/no-raw-error-string": {
       "count": 4
+    },
+    "shuddhi/no-swallowed-catch": {
+      "count": 6
     },
     "shuddhi/schema-parse-untrusted": {
       "count": 4
@@ -274,13 +285,13 @@
   },
   "src/onboard.ts": {
     "shuddhi/no-raw-error-string": {
-      "count": 3
+      "count": 7
     },
     "shuddhi/no-swallowed-catch": {
-      "count": 5
+      "count": 6
     },
     "shuddhi/schema-parse-untrusted": {
-      "count": 3
+      "count": 6
     }
   },
   "src/owner-step.ts": {
@@ -404,7 +415,7 @@
   },
   "src/sys.test.ts": {
     "shuddhi/no-collection-time-io": {
-      "count": 1
+      "count": 5
     },
     "shuddhi/spawn-timeout": {
       "count": 2
@@ -417,8 +428,11 @@
     "shuddhi/env-through-schema": {
       "count": 2
     },
+    "shuddhi/no-raw-error-string": {
+      "count": 1
+    },
     "shuddhi/no-swallowed-catch": {
-      "count": 3
+      "count": 4
     },
     "shuddhi/schema-parse-untrusted": {
       "count": 1
