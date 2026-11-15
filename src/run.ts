@@ -1,9 +1,12 @@
+import { homedir } from 'node:os';
+
 import { LOCKED, asAgent, asAgentArgs } from './as-agent.ts';
 import { cloudSetup } from './cloud.ts';
 import { needsOwner } from './asks.ts';
 import { decisionsWeekly } from './decisions.ts';
 import { prDesign } from './design.ts';
 import { doctor } from './doctor.ts';
+import { env, envArgs, envFailed } from './env.ts';
 import { guard } from './guard.ts';
 import { issueType } from './issue-types.ts';
 import { prIdentity } from './identity.ts';
@@ -43,6 +46,9 @@ Commands:
                    label <owner/repo> <number> <add|remove> <approved|do-not-merge>;
                    required-checks <owner/repo> <ruleset id or name> [--check <name>]…
   cloud-setup      Print an optional Setup snippet that makes Claude cloud sessions start faster
+  env [-- <command> [args...]]
+                   For agents run from any tool: the GitHub lock, then the agent identity where this Mac
+                   has it, as shell lines for eval "$(niyam env)", or with -- the command run under them
   session-start    Run by a client's SessionStart hook: the agent identity, or GitHub locked out
   guard            Run by a client's PreToolUse hook: gh and git's remote commands only as the agent
   as-agent --session <session_id> -- <command> [args...]
@@ -127,17 +133,17 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
     io.err(USAGE);
     return 2;
   }
-  if (command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss') {
+  if (command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss') {
     // Their options are checked here, so a bad one is bad usage (exit 2).
     try {
-      (command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
+      (command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
     } catch (error) {
       io.err(`niyam: ${error instanceof Error ? error.message : String(error)}`);
       io.err(USAGE);
@@ -193,6 +199,18 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         io.err(`niyam as-agent: ran nothing, because the check failed: ${error instanceof Error ? error.message : String(error)}`);
         return LOCKED;
       }
+    case 'env': {
+      // Any failure of its own check still locks: it prints the lock alone, or runs nothing.
+      const parsed = envArgs(rest);
+      let home = homedir();
+      try {
+        const real = await sys();
+        home = real.home;
+        return env(real, io, parsed);
+      } catch (error) {
+        return envFailed(home, io, parsed, error);
+      }
+    }
     case 'machine':
     case 'doctor':
     case 'onboard':

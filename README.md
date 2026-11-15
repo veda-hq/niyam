@@ -26,12 +26,10 @@ Server and GitHub Enterprise Cloud with data residency (GHE.com) are not
 supported yet; every GitHub address in the CLI comes from one host constant,
 so a host setting can be added later.
 
-Claude Code is the only supported agent runner. The agent identity and the
-GitHub lock reach a session through Claude Code's SessionStart hook and
-`CLAUDE_ENV_FILE`, so an agent run from another tool (Codex, Cursor,
-Copilot's agent, Aider, a plain script) gets neither, and only the pull
-request's PR identity check catches its work, after the push. Other runners
-wait for adoption outside Athya (#50).
+Claude Code is one agent runner among others. Its SessionStart hook gives a
+session the agent identity and the GitHub lock; an agent run from any other
+tool on a Mac (Codex, Cursor, Copilot's agent, Aider, a plain script) gets
+the same through `niyam env` (see Agents outside Claude Code below).
 
 ## Agent identity on a Mac
 
@@ -298,6 +296,49 @@ It closes with `└  All good` or `└  N to fix`, and exits 1 when anything is
 `✗`. A token that ends within 14 days is `▲`, and still exits 0. It needs no
 terminal. In a Claude cloud session it runs the cloud checks instead (see
 Claude cloud sessions below).
+
+### Agents outside Claude Code
+
+`niyam env` gives any shell the lines session-start gives a Claude Code
+session: the GitHub lock, then, when this Mac has the session file `machine`
+wrote for the repo's agent, exactly as `machine` writes it, that file, which
+replaces the lock with the agent's identity. Run it in the repo, with the
+agent's runner started from it:
+
+```sh
+niyam env -- codex
+niyam env -- aider --model sonnet
+```
+
+`niyam env -- <command>` runs the command under those lines through
+`/bin/sh`, so a runner started this way cannot start without niyam. To give
+a shell itself the identity, as a runner's own startup script would:
+
+```sh
+eval "$(niyam env)"
+```
+
+Lead with the first form for runners: when niyam is missing from PATH,
+`eval "$(niyam env)"` evaluates nothing and leaves the shell acting as the
+owner. A script can guard it with `lines=$(niyam env) || exit` before
+`eval "$lines"`, which also stops when GitHub stays locked out.
+
+One line on standard error says which account the shell works as, or why
+GitHub stays locked out, with the fix; printing exits 0 as the agent and 77
+when locked, and every failure still prints the lock, never the owner's
+login. Run with a command, it runs the command locked when it cannot work as
+the agent, and exits with the command's code. The token is never in its
+output: the session file holds the keychain command that reads it, and the
+shell runs that command itself.
+
+The session file sets `NIYAM_AGENT`, so the pre-push hook checks every push
+from such a shell, as it does in Claude Code. What other runners lack is
+Claude Code's PreToolUse guard; the lock and the pre-push hook hold there,
+as they hold for what a script runs inside Claude Code. A runner started
+without `niyam env` acts as the owner, since nothing on the Mac tells its
+shell from the owner's (P-18), and only PR identity catches its work, after
+the push. Claude cloud sessions keep session-start's cloud path; there, and
+on any platform without a token store, `niyam env` prints the lock alone.
 
 ## Adopting
 

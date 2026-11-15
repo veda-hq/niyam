@@ -1,6 +1,5 @@
 import {
   BASE_ENV,
-  SETTINGS_PATH,
   agentHere,
   anyLogin,
   either,
@@ -189,19 +188,8 @@ async function cloudStart(sys: Sys): Promise<Said> {
 }
 
 function start(sys: Sys): Said {
-  let settings: Settings | undefined;
-  let settingsProblem = '';
-  let file: string | undefined;
-  try {
-    const root = repoRoot(sys);
-    file = SETTINGS_PATH;
-    settings = loadSettings(sys, root);
-  } catch (error) {
-    settingsProblem = message(error);
-  }
-  // Any owner can run machine here: the first is the one to tell.
-  const owner = settings?.owners[0] ?? 'the owner';
-  const stop = `Do not push, fetch, or run gh in this session; tell ${owner}.`;
+  const local = localIdentity(sys);
+  const stop = `Do not push, fetch, or run gh in this session; tell ${local.owner}.`;
 
   const envFile = sys.env.CLAUDE_ENV_FILE;
   if (!envFile) {
@@ -216,35 +204,64 @@ function start(sys: Sys): Said {
   const locked = (reason: string, fix: string): Said => ({
     line: `niyam: GitHub is locked out of this session: ${reason}. Do not work around the lock; ${fix}.`,
   });
-  if (!settings) return locked(settingsProblem, `tell ${owner}`);
+  if (local.script !== undefined) {
+    try {
+      sys.append(envFile, `\n${local.script}`);
+    } catch (error) {
+      return locked(`appending ${local.session} to CLAUDE_ENV_FILE failed (${message(error)})`, local.fix);
+    }
+  }
+  if ('reason' in local) return locked(local.reason, local.fix);
+  return { line: `niyam: this session works as ${local.agent} on GitHub. ${AUTO_FIX}`, agent: local.agent };
+}
+
+/**
+ * What a local shell gets after the lock, for session-start and `niyam env`
+ * alike: the session file `machine` wrote for the agent of the repo's
+ * settings that works here, when it is exactly what `machine` writes, so
+ * nothing else in it can run. `script` is the file to follow the lock with;
+ * a `reason` means GitHub stays locked out, with `fix` for the owner. The
+ * file is given even when the token store has no token, as before: its
+ * token is then one GitHub refuses. The file holds the store's read command,
+ * never the token, which the shell reads itself.
+ */
+export type LocalIdentity = { owner: string; fix: string; session?: string; script?: string } & ({ agent: string; script: string } | { reason: string });
+
+export function localIdentity(sys: Sys): LocalIdentity {
+  let settings: Settings | undefined;
+  let settingsProblem = '';
+  try {
+    settings = loadSettings(sys, repoRoot(sys));
+  } catch (error) {
+    settingsProblem = message(error);
+  }
+  // Any owner can run machine here: the first is the one to tell.
+  const owner = settings?.owners[0] ?? 'the owner';
+  const tell = `tell ${owner}`;
+  if (!settings) return { owner, fix: tell, reason: settingsProblem };
   const here = agentHere(sys, settings.agents);
-  if ('problem' in here) return locked(here.problem, `ask ${owner} to run niyam machine <agent> for one of them`);
+  if ('problem' in here) return { owner, fix: `ask ${owner} to run niyam machine <agent> for one of them`, reason: here.problem };
   const { agent } = here;
   const paths = pathsFor(sys.home, agent);
   const fix = `ask ${owner} to run niyam machine ${agent} (niyam doctor ${agent} names what is missing)`;
   const store = tokenStore(sys);
-  if (!store) return locked(unsupported(sys), `tell ${owner}`);
-
-  if (!sys.exists(paths.session)) return locked(`${paths.session} is missing`, fix);
+  if (!store) return { owner, fix: tell, reason: unsupported(sys) };
+  const session = paths.session;
+  if (!sys.exists(session)) return { owner, fix, reason: `${session} is missing` };
   let script: string;
   try {
-    script = sys.read(paths.session);
+    script = sys.read(session);
   } catch (error) {
-    return locked(`${paths.session} cannot be read (${message(error)})`, fix);
+    return { owner, fix, reason: `${session} cannot be read (${message(error)})` };
   }
   const names = sessionNames(script);
   if (!names || !sameLogin(names.agent, agent) || !sessionFileIs(script, names.agent, names.id, paths, store)) {
-    return locked(`${paths.session} is out of date, or not the file niyam machine writes, for ${agent}`, fix);
-  }
-  try {
-    sys.append(envFile, `\n${script}`);
-  } catch (error) {
-    return locked(`appending ${paths.session} to CLAUDE_ENV_FILE failed (${message(error)})`, fix);
+    return { owner, fix, reason: `${session} is out of date, or not the file niyam machine writes, for ${agent}` };
   }
   if (!store.read(sys, names.agent)) {
-    return locked(`${store.where} has no ${names.agent} token, so GitHub refuses gh and git`, fix);
+    return { owner, fix, session, script, reason: `${store.where} has no ${names.agent} token, so GitHub refuses gh and git` };
   }
-  return { line: `niyam: this session works as ${names.agent} on GitHub. ${AUTO_FIX}`, agent: names.agent };
+  return { owner, fix, session, script, agent: names.agent };
 }
 
 /**
