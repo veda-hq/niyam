@@ -266,6 +266,7 @@ export function readStopNote(sys: Sys, root: string): StopNote | null {
 }
 
 export function writeStopNote(sys: Sys, root: string, note: StopNote): void {
+  sys.confine(root, notePath(root));
   sys.mkdir(dirname(notePath(root)));
   sys.write(notePath(root), `${JSON.stringify(note)}\n`);
 }
@@ -363,6 +364,14 @@ export async function stopHook(sys: Sys, input: string, err?: (line: string) => 
     const settings = settingsAt(sys, root);
     const session = typeof data.session_id === 'string' && data.session_id ? data.session_id : undefined;
     const file = `${root}/${STORE}/${(session ?? 'unknown').replace(/[^\w-]/g, '_')}.json`;
+    // Both records it may write, checked before any is read or written; the hook fails open, so it says why.
+    try {
+      sys.confine(root, file);
+      sys.confine(root, notePath(root));
+    } catch (error) {
+      err?.(`niyam keep-going: ${error instanceof Error ? error.message : String(error)}`);
+      return '';
+    }
     const previous = sys.exists(file) ? (JSON.parse(sys.read(file)) as Counter) : null;
     const facts = await gather(sys, root, settings, Boolean(data.agent_id), session, err);
     const decision = decide(facts, previous, settings);
@@ -401,7 +410,11 @@ export function recordStop(sys: Sys, reason: string): { ok: boolean; message: st
   } catch {
     // The note matters more than the name it is told to.
   }
-  writeStopNote(sys, root, { branch, head, reason: reason.trim(), at: sys.now().toISOString() });
+  try {
+    writeStopNote(sys, root, { branch, head, reason: reason.trim(), at: sys.now().toISOString() });
+  } catch (error) {
+    return { ok: false, message: `No stop note written: ${error instanceof Error ? error.message : String(error)}` };
+  }
   return { ok: true, message: `Stop note written for ${branch} at ${head.slice(0, 9)}; a new commit voids it. Tell ${owner} what happened, why, and the options; then stop.` };
 }
 

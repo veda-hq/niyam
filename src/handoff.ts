@@ -395,6 +395,7 @@ function lintContext(h: Here, changedFiles: readonly string[]): Omit<LintContext
 }
 
 const append = (sys: Sys, root: string, entry: Entry): void => {
+  sys.confine(root, `${root}/${RUN_LOG}`);
   sys.mkdir(`${root}/.tmp/push`);
   sys.append(`${root}/${RUN_LOG}`, `${JSON.stringify(entry)}\n`);
 };
@@ -404,6 +405,8 @@ export async function gate(sys: Sys, io: Output, base: string | undefined, callS
   // A repository that names no shared plumbing has turned the gate off.
   if (!settingsHere(sys, base).settings) return 0;
   const h = here(sys, base);
+  // Refused before any work, so a push is not judged only to fail at its record.
+  sys.confine(h.root, `${h.root}/${RUN_LOG}`);
   const ref = h.base;
   const { branch, changedFiles, triggers, baseSha, headSha } = collect(sys, h, ref);
   const log = sys.exists(`${h.root}/${RUN_LOG}`) ? parseRunLog(sys.read(`${h.root}/${RUN_LOG}`)).entries : [];
@@ -568,6 +571,8 @@ export async function handoff(sys: Sys, io: Output, args: readonly string[]): Pr
     io.out(JSON.stringify({ branch, baseRef: base, changedFiles: changedFiles.length, triggers, fired: fired(triggers), runLog: RUN_LOG }, null, 2));
     return 0;
   }
+  // Refused before --open-brief opens an issue that no record would then name.
+  sys.confine(h.root, `${h.root}/${RUN_LOG}`);
   const disposition = parsed.disposition as (typeof DECLARED)[number];
   const briefs = [...parsed.briefs];
   if (parsed.openBrief !== undefined) {

@@ -309,6 +309,13 @@ export class FakeSys implements Sys {
     this.dirs.push(path);
   }
 
+  /** Paths a test says lead out of the toplevel, as a symlink would; anything outside `root` by name does too. */
+  outside = new Set<string>();
+  confine(root: string, path: string): void {
+    const leaves = [...this.outside].some((link) => path === link || path.startsWith(`${link}/`));
+    if (leaves || !path.startsWith(`${root}/`)) throw new Error(`refused to write ${path}: it leads outside the git toplevel ${root}`);
+  }
+
   tempDir(prefix = '/tmp/niyam-'): string {
     const dir = `${prefix}${this.temps.length + 1}`;
     this.temps.push(dir);

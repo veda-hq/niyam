@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -503,5 +503,35 @@ describe('keep-going on real git', () => {
     assert.equal(await stopHook(desktop, JSON.stringify({ cwd: work })), '');
     writeFileSync(join(work, 'b'), 'edited\n');
     assert.match(await stopHook(desktop, JSON.stringify({ cwd: work })), /PR 7 is open/);
+  });
+
+  it('writes no stop note or counter where a link takes .tmp/keep-going or .tmp out of the toplevel', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-keep-going-link-')));
+    dirs.push(dir);
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const work = join(dir, 'work');
+    const away = join(dir, 'away');
+    mkdirSync(work);
+    mkdirSync(away);
+    const git = (...args: string[]): string => execFileSync('git', args, { cwd: work, encoding: 'utf8', env }).trim();
+    git('init', '-q', '-b', 'feature');
+    git('config', 'user.email', 't@example.invalid');
+    git('config', 'user.name', 'T');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(work, 'a'), 'a\n');
+    git('add', 'a');
+    git('commit', '-q', '-m', 'work');
+    const sys = { ...realSys(), env: { PATH: process.env.PATH ?? '' }, cwd: work, home: dir };
+    mkdirSync(join(work, '.tmp'));
+    symlinkSync(away, join(work, STORE));
+    const seen = capture();
+    assert.equal(await keepGoing(sys, seen.io, ['--stop', 'stuck']), 1);
+    assert.deepEqual(seen.out, [`No stop note written: refused to write ${join(work, STORE, 'stop-note.json')}: it leads to ${away}, outside the git toplevel ${work}`]);
+    rmSync(join(work, '.tmp'), { recursive: true, force: true });
+    symlinkSync(away, join(work, '.tmp'));
+    const said: string[] = [];
+    assert.equal(await stopHook(sys, JSON.stringify({ cwd: work, session_id: 's1' }), (line) => said.push(line)), '');
+    assert.deepEqual(said, [`niyam keep-going: refused to write ${join(work, STORE, 's1.json')}: it leads to ${away}, outside the git toplevel ${work}`]);
+    assert.deepEqual(readdirSync(away), []);
   });
 });

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { briefToIssue, loadYaml, type BriefIssue } from './brief.ts';
@@ -21,7 +24,8 @@ import {
   type HookRun,
   type Triggers,
 } from './handoff.ts';
-import type { ExecResult } from './types.ts';
+import { realSys } from './sys.ts';
+import type { ExecResult, Sys } from './types.ts';
 
 const yaml = await loadYaml();
 const REPO = '/repos/example-org/example-app';
@@ -471,3 +475,47 @@ describe('brief', () => {
     assert.match(err.at(-1) ?? '', /no brief draft in the repository at gone.md/);
   });
 });
+
+describe('handoff behind a link', () => {
+  it('refuses to record or gate where .tmp/push, .tmp or the log leads out of the toplevel, and writes nothing outside', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-handoff-link-')));
+    try {
+      const work = join(dir, 'work');
+      const away = join(dir, 'away');
+      mkdirSync(join(work, '.github'), { recursive: true });
+      mkdirSync(away);
+      // The fake answers git, as on a branch of example-app; the files are real, so a link is followed.
+      const fake = repo(['.github/workflows/ci.yml']);
+      writeFileSync(join(work, '.github/niyam.json'), fake.read(`${ROOT}/.github/niyam.json`));
+      const sys: Sys = {
+        ...realSys(),
+        cwd: work,
+        env: {},
+        exec: (command, args, options) =>
+          command === 'git' && args.join(' ') === 'rev-parse --show-toplevel' ? { code: 0, stdout: `${work}\n`, stderr: '' } : fake.exec(command, args, options),
+      };
+      const record = ['--record', '--disposition', 'own-work', '--reason', 'the workflow is this slice'];
+      const links: [string, string, string][] = [
+        ['.tmp/push', away, `${join(work, RUN_LOG)}: it leads to ${away}`],
+        ['.tmp', away, `${join(work, RUN_LOG)}: it leads to ${away}`],
+        [RUN_LOG, join(away, 'log'), `${join(work, RUN_LOG)}: ${join(work, RUN_LOG)} is a link that cannot be followed (ENOENT)`],
+      ];
+      for (const [at, to, said] of links) {
+        rmSync(join(work, '.tmp'), { recursive: true, force: true });
+        mkdirSync(join(work, '.tmp/push'), { recursive: true });
+        rmSync(join(work, at), { recursive: true, force: true });
+        symlinkSync(to, join(work, at));
+        for (const args of [record, ['--assert-fresh']]) {
+          await assert.rejects(handoff(sys, capture().io, args), { message: new RegExp(`^refused to write ${escape(said)}`) }, `${at} ${args[0]}`);
+        }
+      }
+      assert.deepEqual(readdirSync(away), []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+function escape(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

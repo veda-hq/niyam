@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -273,5 +273,47 @@ describe('realSys', () => {
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, 'q? got yes\n');
+  });
+});
+
+describe('realSys confine', () => {
+  const sys = realSys();
+  // tmpdir() is itself a link on macOS (/var to /private/var): the toplevel is named through it, as a caller may.
+  const dir = mkdtempSync(join(tmpdir(), 'niyam-confine-'));
+  const real = realpathSync(dir);
+  const top = join(dir, 'repo');
+  const away = join(dir, 'away');
+  mkdirSync(join(top, 'inner'), { recursive: true });
+  mkdirSync(away);
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('passes a path under the toplevel, there or not yet, and a link that stays inside', () => {
+    sys.confine(top, join(top, 'inner'));
+    sys.confine(top, join(top, '.tmp/push/handoff-log.jsonl'));
+    sys.confine(top, top);
+    symlinkSync(join(top, 'inner'), join(top, 'to-inner'));
+    sys.confine(top, join(top, 'to-inner/new/file'));
+  });
+
+  it('refuses a linked file, a linked folder above it, and a folder that only starts with the toplevel\'s name', () => {
+    writeFileSync(join(away, 'ledger'), 'outside\n');
+    symlinkSync(join(away, 'ledger'), join(top, 'linked-file'));
+    symlinkSync(away, join(top, 'linked-dir'));
+    mkdirSync(join(dir, 'repo-evil'));
+    symlinkSync(join(dir, 'repo-evil'), join(top, 'sibling'));
+    assert.throws(() => sys.confine(top, join(top, 'linked-file')), {
+      message: `refused to write ${join(top, 'linked-file')}: it leads to ${join(real, 'away/ledger')}, outside the git toplevel ${join(real, 'repo')}`,
+    });
+    assert.throws(() => sys.confine(top, join(top, 'linked-dir/new/file')), { message: new RegExp(`it leads to ${join(real, 'away')}, outside the git toplevel ${join(real, 'repo')}$`) });
+    assert.throws(() => sys.confine(top, join(top, 'sibling/file')), { message: new RegExp(`it leads to ${join(real, 'repo-evil')}, outside`) });
+    assert.throws(() => sys.confine(top, join(dir, 'elsewhere/file')), { message: /outside the git toplevel/ });
+  });
+
+  it('refuses a link that leads nowhere, which a write would create outside', () => {
+    symlinkSync(join(away, 'not-yet'), join(top, 'dangling'));
+    assert.throws(() => sys.confine(top, join(top, 'dangling')), {
+      message: `refused to write ${join(top, 'dangling')}: ${join(top, 'dangling')} is a link that cannot be followed (ENOENT), so it may lead outside ${join(real, 'repo')}`,
+    });
+    assert.deepEqual(readdirSync(away).sort(), ['ledger']);
   });
 });
