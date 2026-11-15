@@ -1489,10 +1489,20 @@ pnpm install
 pnpm check
 ```
 
-`pnpm check` typechecks, runs the tests with a coverage floor (95% lines and
+`pnpm check` typechecks, lints, runs the tests with a coverage floor (95% lines and
 functions, 90% branches), builds `dist/` and runs it. `pnpm scan:secrets` runs
 Gitleaks and TruffleHog over the working tree; CI runs both over the whole
 history.
+
+`pnpm lint` lints `src/` with veda's released ESLint rules,
+`@veda-hq/eslint-plugin-shuddhi`: its error-handling, input-parsing and
+test-lint families, the type-aware `strict-scalar-parse` among them. The lint
+tools live in the `lint/` workspace package, pinned exactly, with TypeScript
+5.9 for the parser, since shuddhi needs TypeScript 5's compiler API; the root
+builds with TypeScript 7. Findings older than the lint are held in
+`lint/eslint-suppressions.json`, ESLint's bulk suppressions, so new code is
+checked from the start. A fix that clears one leaves a suppression unused,
+which fails the lint until `pnpm lint --prune-suppressions` drops it.
 
 ### Guard
 
