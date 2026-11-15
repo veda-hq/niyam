@@ -183,6 +183,85 @@ describe('needsOwner', () => {
     assert.deepEqual(calls(again), []);
   });
 
+  describe("an ask whose run ends after the owner answered it (#355, seen on #303)", () => {
+    const ASKED = '2026-11-15T09:59:27Z';
+    const events = `${API}/repos/${SLUG}/issues/7/events?per_page=100&page=1`;
+    const since = `${API}/repos/${SLUG}/issues/7/comments?since=${encodeURIComponent(ASKED)}&per_page=100&page=1`;
+    const thumbs = `${API}/repos/${SLUG}/issues/comments/70/reactions?content=%2B1&per_page=100&page=1`;
+    const asked = () => ({ action: 'created', comment: { id: 70, body: `Needs you: approve? ${PAGE}`, user: { login: AGENT }, created_at: ASKED }, issue: { number: 7, labels: [] } });
+    const label = (event: string, login: string, created_at: string, name = 'approved') => ({ event, created_at, actor: { login }, label: { name } });
+    // #303's own events: the owner took approved off and put it back after the ask.
+    const relabelled = [label('labeled', OWNER, '2026-11-14T08:00:00Z'), label('unlabeled', OWNER, '2026-11-15T09:59:36Z'), label('labeled', OWNER, '2026-11-15T09:59:38Z')];
+    const quiet = (sys: FakeSys) => {
+      sys.route('GET', since, { status: 200, json: [] });
+      sys.route('GET', thumbs, { status: 200, json: [] });
+    };
+
+    it("does not label the issue when the owner put approved on it after the ask, as on #303", async () => {
+      const sys = job('issue_comment', asked());
+      sys.route('GET', events, { status: 200, json: relabelled });
+      assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:), and the owner already answered with their approved label; not labelled needs-owner']);
+      assert.deepEqual(calls(sys), []);
+    });
+
+    it('does not label it when the owner decided or 👍d the ask after it; a Decision: someone else edited, or an older answer, counts for nothing', async () => {
+      const decided = job('issue_comment', asked());
+      decided.route('GET', events, { status: 200, json: [] });
+      decided.route('GET', since, { status: 200, json: [{ id: 71, body: 'Decision: yes', user: { login: OWNER }, created_at: '2026-11-15T09:59:40Z' }] });
+      assert.deepEqual((await runJob(decided)).out, ['needs-owner: #7 asks the owner (Needs you:), and the owner already answered with a Decision: comment; not labelled needs-owner']);
+      assert.deepEqual(calls(decided), []);
+
+      const liked = job('issue_comment', asked());
+      liked.route('GET', events, { status: 200, json: [label('labeled', OWNER, '2026-11-15T09:59:40Z', 'bug'), label('labeled', AGENT, '2026-11-15T09:59:40Z')] });
+      liked.route('GET', since, { status: 200, json: [{ id: 72, body: 'Decision: no', user: { login: AGENT }, created_at: '2026-11-15T09:59:40Z' }] });
+      liked.route('GET', thumbs, { status: 200, json: [{ user: { login: OWNER }, created_at: '2026-11-15T09:59:41Z' }] });
+      assert.deepEqual((await runJob(liked)).out, ['needs-owner: #7 asks the owner (Needs you:), and the owner already answered with a 👍 on the ask; not labelled needs-owner']);
+      assert.deepEqual(calls(liked), []);
+
+      const edited = job('issue_comment', asked());
+      edited.route('GET', events, { status: 200, json: [label('labeled', OWNER, '2026-11-14T08:00:00Z'), { event: 'labeled', created_at: '2026-11-15T09:59:40Z', actor: null, label: null }, { event: 'closed' }] });
+      edited.route('GET', since, {
+        status: 200,
+        json: [
+          { id: 60, body: 'Decision: old', user: { login: OWNER }, created_at: '2026-11-14T08:00:00Z', updated_at: '2026-11-15T09:59:40Z' },
+          { id: 73, node_id: 'IC_73', body: 'Decision: yes', user: { login: OWNER }, created_at: '2026-11-15T09:59:40Z', updated_at: '2026-11-15T09:59:45Z' },
+          { id: 74, body: null, user: null, created_at: '2026-11-15T09:59:41Z' },
+        ],
+      });
+      edited.route('GET', thumbs, { status: 200, json: [{ user: { login: 'someone' }, created_at: '2026-11-15T09:59:41Z' }, { user: null, created_at: '2026-11-15T09:59:41Z' }, { user: { login: OWNER }, created_at: ASKED }] });
+      edited.route('POST', `${API}/graphql`, { status: 200, json: { data: { nodes: [{ id: 'IC_73', userContentEdits: { totalCount: 1, nodes: [{ editor: { login: AGENT } }] } }] } } });
+      assert.deepEqual((await runJob(edited)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+      // Read before and again after labelling: the GraphQL reads are the edits of the one Decision: after the ask.
+      assert.deepEqual(calls(edited), ['POST /graphql', `POST /repos/${SLUG}/issues/7/labels`, 'POST /graphql']);
+    });
+
+    it('takes the label off when the owner approved between the read and the label', async () => {
+      const sys = job('issue_comment', asked());
+      let reads = 0;
+      sys.route('GET', events, () => ({ status: 200, json: reads++ === 0 ? relabelled.slice(0, 1) : relabelled }));
+      quiet(sys);
+      assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:), and the owner answered with their approved label as it was labelled; needs-owner taken off']);
+      assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`, `DELETE /repos/${SLUG}/issues/7/labels/needs-owner`]);
+    });
+
+    it('labels it where nothing the owner did is newer than the ask, and reads nothing where the event gives no id or time, or the label is on', async () => {
+      const sys = job('issue_comment', asked());
+      sys.route('GET', events, { status: 200, json: relabelled.slice(0, 1) });
+      quiet(sys);
+      assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+      assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`]);
+      const on = job('issue_comment', { ...asked(), issue: { number: 7, labels: [{ name: 'needs-owner' }] } });
+      assert.deepEqual((await runJob(on)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+      assert.deepEqual(on.requests, []);
+    });
+
+    it('fails when GitHub refuses the read', async () => {
+      const sys = job('issue_comment', asked());
+      sys.route('GET', events, { status: 403, json: null });
+      await assert.rejects(needsOwner(sys, capture().io), /cannot read \/repos\/example-org\/example-app\/issues\/7\/events \(HTTP 403\)/);
+    });
+  });
+
   it("takes the label off at the owner's Decision: comment, and at their approved label", async () => {
     const decided = job('issue_comment', comment(OWNER, 'Decision: go', ['needs-owner']));
     assert.deepEqual((await runJob(decided)).out, ['needs-owner: the owner decided on #7; needs-owner taken off']);

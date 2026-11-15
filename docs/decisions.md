@@ -1908,3 +1908,21 @@
   - Cost: a leaked key could make a `v*` tag. The environment keeps it from
     branch workflows, and P-61's compare check still refuses a tag off
     `main` in `upgrade` and `onboard`.
+- **2026-11-15 — Record: an ask's run leaves needs-owner off where the
+  owner already answered it (State #355 of P-40).** On #303 the owner took
+  `approved` off and put it back nine and eleven seconds after an agent's
+  `Needs you:`. The approval's run found no `needs-owner` in its event and
+  took nothing off; the ask's run, still going, then labelled the issue, and
+  the label stayed until it was taken off by hand. The hourly sweep does not
+  count the `approved` label, so it never would have. Now the ask's run, for
+  a comment on an issue whose event gives its id and time, reads the issue's
+  events, its comments since the ask and the ask's 👍s before it labels the
+  issue, and leaves the label off when the owner put `approved` on it, wrote
+  a `Decision:` no one but owners edited, or 👍'd the ask after it. It reads
+  them again after labelling and takes the label off when an answer landed
+  between the read and the label, where the approval's run, whose event
+  predates the label, could not. A review comment's ask, already labelled
+  issue, or event with no id or time labels as before. Rejected: a
+  concurrency group on the job (GitHub keeps one pending run a group and
+  cancels the rest, so an event could be dropped), and the sweep counting the
+  `approved` label (new behaviour the owner sees, not this fix).
