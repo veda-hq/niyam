@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -356,5 +356,46 @@ describe('cubicDismiss', () => {
     unread.world.fail.add('show');
     const done = run(unread.sys, evidence);
     assert.deepEqual([done.code, done.err], [0, ['! committed, but .cubic-dismiss could not be read back from HEAD to check it: check git show HEAD']]);
+  });
+
+  it('refuses a ledger a link takes out of the repository, committed or untracked, and writes nothing outside (real git)', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-dismiss-link-')));
+    try {
+      const work = join(dir, 'work');
+      const away = join(dir, 'away');
+      mkdirSync(work);
+      mkdirSync(away);
+      writeFileSync(join(away, 'ledger'), 'outside\n');
+      const git = (...args: string[]): string => execFileSync('git', args, { cwd: work, encoding: 'utf8' });
+      git('init', '-q');
+      git('config', 'user.email', 't@example.invalid');
+      git('config', 'user.name', 'T');
+      git('config', 'commit.gpgsign', 'false');
+      writeFileSync(join(work, 'a.ts'), 'x\n');
+      symlinkSync(join(away, 'ledger'), join(work, '.cubic-dismiss'));
+      symlinkSync(away, join(work, 'committed'));
+      git('add', 'a.ts', '.cubic-dismiss', 'committed');
+      git('commit', '-q', '-m', 'base');
+      symlinkSync(away, join(work, 'untracked'));
+      const sys = { ...realSys(), cwd: work };
+      const args = ['--evidence', 'a.ts', '--title', 'T', '--reason', 'r'];
+      const head = git('rev-parse', 'HEAD');
+      for (const [file, leads] of [
+        ['.cubic-dismiss', join(away, 'ledger')],
+        ['committed/ledger', join(away, 'ledger')],
+        ['untracked/new/ledger', away],
+      ] as const) {
+        mkdirSync(join(work, '.github'), { recursive: true });
+        writeFileSync(join(work, '.github/niyam.json'), JSON.stringify({ cubicDismiss: { file } }));
+        const seen = capture();
+        assert.equal(cubicDismiss(sys, seen.io, args), 1, file);
+        assert.deepEqual(seen.err, [`✗ refused to write ${join(work, file)}: it leads to ${leads}, outside the git toplevel ${work}; nothing was written`]);
+      }
+      assert.equal(git('rev-parse', 'HEAD'), head);
+      assert.deepEqual(readdirSync(away), ['ledger']);
+      assert.equal(readFileSync(join(away, 'ledger'), 'utf8'), 'outside\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

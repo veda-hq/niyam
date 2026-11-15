@@ -4,6 +4,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   fsyncSync,
   mkdirSync,
   mkdtempSync,
@@ -19,7 +20,7 @@ import {
 } from 'node:fs';
 import * as http from 'node:http';
 import { constants, homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { createInterface as askFrom } from 'node:readline/promises';
 import { createInterface } from 'node:readline';
 import { isatty } from 'node:tty';
@@ -61,6 +62,7 @@ export function realSys(): Sys {
     },
     append: (path, data) => appendFileSync(path, data),
     mkdir: (path) => mkdirSync(path, { recursive: true, mode: 0o700 }),
+    confine: (root, path) => confine(root, path),
     list: (path) => (existsSync(path) ? readdirSync(path) : []),
     tempDir: (prefix) => mkdtempSync(prefix ?? join(tmpdir(), `${CLI}-`)),
     remove: (path) => rmSync(path, { recursive: true, force: true }),
@@ -239,6 +241,32 @@ function reason(error: unknown): string {
   const message = typeof inner?.message === 'string' ? inner.message : '';
   if (code && message && !message.includes(code)) return `${code} (${message})`;
   return message || code || String(error);
+}
+
+/** Sys.confine on the real machine. */
+export function confine(root: string, path: string): void {
+  const top = realpathSync(root);
+  // The nearest part that is there, by lstat: existsSync follows a link, so one that leads nowhere would read as absent.
+  let at = resolve(path);
+  while (!present(at) && dirname(at) !== at) at = dirname(at);
+  let real: string;
+  try {
+    real = realpathSync(at);
+  } catch (error) {
+    throw new Error(`refused to write ${path}: ${at} is a link that cannot be followed (${(error as NodeJS.ErrnoException).code ?? String(error)}), so it may lead outside ${top}`);
+  }
+  if (real !== top && !real.startsWith(top.endsWith(sep) ? top : `${top}${sep}`)) {
+    throw new Error(`refused to write ${path}: it leads to ${real}, outside the git toplevel ${top}`);
+  }
+}
+
+function present(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** A path with its links resolved, or as given when it cannot be. */

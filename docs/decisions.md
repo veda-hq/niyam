@@ -1993,3 +1993,33 @@
     event (that is the project's choice of hooks, not niyam's), and moving
     niyam's hook where sarathi's matcher would hide it (a SessionStart entry
     for `startup` alone would skip session-start on resume).
+- **2026-11-15 — Record: niyam's writers refuse a symlink out of the git
+  toplevel (P-67, Work item #366, slice #360).** kavach 0.6.9
+  (veda-hq/veda#95) lets `cubic-dismiss`, `handoff --record` /
+  `--assert-fresh` and `keep-going --stop` run from an owned worktree, on the
+  audit's claim that niyam writes only under the git toplevel. A link broke
+  that claim. Examples are a committed `.cubic-dismiss` link, a ledger under
+  a linked folder, or `ln -s <outside> .tmp/push`, which kavach allows
+  because the link itself is inside.
+  - `Sys.confine(root, path)` finds the nearest part of `path` that is
+    there, by `lstat`, so a link that leads nowhere counts. It follows its
+    links and throws unless the real path is the toplevel's real path or
+    lies under it, compared by whole segments. The error names the path,
+    where it leads and the toplevel. A link that cannot be followed is
+    refused, since a write through it would create its target wherever it
+    points.
+  - `cubic-dismiss` checks its ledger before reading or writing it and
+    refuses with exit 1. `handoff` checks the run log before it judges a
+    push or opens a `--open-brief` issue, and again at the append.
+    `keep-going --stop` says no note was written. The Stop hook checks its
+    counter and the stop note before either is read. It still fails open,
+    but says why.
+  - The check and the write are separate calls, so a link made between them
+    is not seen. The gap it closes is a link made before niyam runs, as
+    kavach allows; a process racing niyam inside the worktree is out of
+    scope.
+  - Rejected: checking after `mkdir` (a linked `.tmp` would already have a
+    folder made outside), and `existsSync` to find the nearest part (it
+    follows a link, so a dangling one would pass). `pr-autocreate` writes
+    under `.tmp/pr-autocreate` the same way but is not a command kavach
+    lists; it is left for its own slice.
