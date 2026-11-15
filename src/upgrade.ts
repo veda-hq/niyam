@@ -4,6 +4,7 @@ import { CLI, PRODUCT, tarballName } from './names.ts';
 import { CLOUD_SETUP_PATH } from './onboard-pull.ts';
 import type { Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
+import { tagOnMain } from './release-tag.ts';
 import { isNewer, packageVersion } from './version.ts';
 
 /** The command that updates this machine's CLI, as messages name it. */
@@ -129,6 +130,12 @@ export async function upgrade(sys: Sys, io: Output, running: string = packageVer
   }
   if (!newest.packaged) {
     io.err(`upgrade: the v${version} release has no ${tarballName(version)} yet; run ${UPGRADE} again once the Release workflow attaches it`);
+    return 1;
+  }
+  // A tag off main is not a release, whatever GitHub's releases list says (P-61).
+  const onMain = await tagOnMain(sys, version);
+  if ('problem' in onMain) {
+    io.err(`upgrade: ${onMain.problem}; nothing installed`);
     return 1;
   }
   io.out(`upgrade: ${CLI} ${running} → ${version}`);

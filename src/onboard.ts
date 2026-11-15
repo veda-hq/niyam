@@ -39,6 +39,7 @@ import {
   remoteFile,
 } from './onboard-pull.ts';
 import { cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
+import { tagOnMain } from './release-tag.ts';
 import { setSecret } from './secrets.ts';
 import { UPGRADE } from './upgrade.ts';
 import { isNewer, packageVersion } from './version.ts';
@@ -1038,6 +1039,12 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   // Before anything is asked or planned: a checkout a newer release onboarded is never moved back.
   const aheadHere = newerPinHere(fileAt, version);
   if (aheadHere !== undefined) return refuseOlder(io, slug, aheadHere, version);
+  // The workflow and cloud-setup.sh pin this release: a tag off main is not one (P-61).
+  const onMain = await tagOnMain(sys, version);
+  if ('problem' in onMain) {
+    io.err(`onboard: ${onMain.problem}; nothing changed`);
+    return 1;
+  }
   // The plan, by group, and the steps that carry it out after the yes.
   const pull: Item[] = [];
   const github: Item[] = [];

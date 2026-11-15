@@ -1771,3 +1771,52 @@
   - A cloud session is held as on a laptop (athya_mono's W-44), and is told
     by `CLAUDE_CODE_REMOTE=true` without `cloud-check.sh`, which only chose
     gh's REST over GraphQL there.
+- **2026-11-15 — Record: a niyam release comes only from main (P-61, Work
+  item #303, slice #308).** A `v*` tag could be pushed on any commit, and
+  the Release workflow's "tag is on main" test ran from the tagged commit's
+  own file, so a tag off `main` skipped it. That tag's release could reach
+  clients through `niyam upgrade`, and npm.
+  - The Release workflow runs on a push to `main` whose `package.json`
+    version has no tag yet. It runs `pnpm check`, makes the annotated tag
+    (`niyam X.Y.Z`) on that commit through the API as github-actions[bot],
+    publishes to npm and makes the GitHub release. A release is the merge of
+    its version bump; agents push no release tags. A first job with no
+    environment decides, so a push that bumps nothing never waits at the
+    `npm` environment. Each step skips what is done, so a re-run finishes a
+    release that stopped; a tag already on another commit fails it.
+  - npm stays trusted publishing (OIDC) from `release.yml` in environment
+    `npm`, with no token. Its provenance now records `refs/heads/main`, not
+    `refs/tags/vX.Y.Z`. By hand, Alok: the `npm` environment's deployment
+    rule moves from `v*` tags to `main`, before the next version bump merges,
+    or that run fails at the gate (a re-run then finishes it).
+  - `niyam upgrade`, before it installs, and `niyam onboard`, before it pins
+    a release into the workflow and writes `.github/niyam/cloud-setup.sh` at
+    it, ask `GET /repos/veda-hq/niyam/compare/refs/tags/vX.Y.Z...refs/heads/main`
+    with no token, both refs in full so a branch named like the tag, or a
+    tag named `main`, is never the one compared.
+    The tag's commit is the comparison's base, and it is on `main` exactly
+    when the status is `ahead` or `identical`. Otherwise each refuses,
+    naming the tag and the commit; no such tag, and no answer from GitHub,
+    are refusals too, with their own words, and nothing is installed or
+    changed. The cloud session installs only the tarball whose sha256
+    onboard pinned after that check, so it asks nothing itself. `doctor`
+    does not ask.
+  - The workflow's tag is annotated, not signed, unlike the tags AthyaBot
+    pushed: what vouches for a release is that its commit is on `main`.
+  - Tag creation stays open: not checked by hand, since AthyaBot is not an
+    admin and changes no ruleset. The "release tags" ruleset holds `v*`
+    against deletion, update and force-push, not creation; its bypass list
+    reads as empty, which GitHub may only show admins. The rulesets REST API
+    takes a bypass actor as a type and an id (an app, a role, a team,
+    organisation admins, deploy keys), with no way to name one workflow or
+    branch. GitHub Actions (app 15368) can be written as an
+    `Integration` actor, but GitHub's docs never name it as a bypass, and
+    reports from November 2026 say GitHub refuses it with a 422 on repos a
+    user owns; on an organisation's repo, as this one is, it is unconfirmed.
+    Even where it is taken, it lets every workflow with `contents: write`,
+    on any branch, make a `v*` tag, not this workflow alone. The one way to
+    name a single workflow is a GitHub App of our own as the only bypass,
+    whose key only `release.yml` reads from the `npm` environment. That is
+    a new secret and an owner step, left for a slice of its own. Until
+    then the two points above hold: npm takes only `main`'s runs, and
+    clients refuse a tag off `main`.

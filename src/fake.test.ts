@@ -27,6 +27,8 @@ export const NODE = '/opt/node/bin/node';
 export const CLI = '/opt/process-rules/dist/cli.js';
 /** The sha256 every release's archive has, unless a test routes its release. */
 export const RELEASE_SHA256 = 'ab'.repeat(32);
+/** The commit the fake's release tags name, on main unless a test says otherwise. */
+export const TAG_SHA = '5a'.repeat(20);
 export const SETTINGS = JSON.stringify({ owner: 'example-owner', agent: AGENT });
 /** The pull request GitHub opens for onboard's changes. */
 export const PULL_URL = 'https://github.com/example-org/example-app/pull/7';
@@ -383,6 +385,8 @@ export class FakeSys implements Sys {
       const version = packageVersion();
       return { status: 200, json: { tag_name: `v${version}`, assets: [{ name: tarballName(version) }] } };
     }
+    // Every release tag is on main, unless a test routes its comparison.
+    if (/^https:\/\/api\.github\.com\/repos\/veda-hq\/niyam\/compare\/refs\/tags\/v[^/]+\.\.\.refs\/heads\/main\?per_page=1$/.test(url)) return { status: 200, json: { status: 'ahead', base_commit: { sha: TAG_SHA } } };
     if (release) return { status: 200, json: { assets: [{ name: tarballName(release[1] as string), digest: `sha256:${RELEASE_SHA256}` }] } };
     if (url === 'https://api.github.com/repos/example-org/example-app') return { status: 200, json: { owner: { login: 'example-org', type: this.ownerType } } };
     if (url === 'https://api.github.com/users/example-org') return { status: 200, json: { login: 'example-org', type: this.ownerType } };
