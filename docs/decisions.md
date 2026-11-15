@@ -2014,6 +2014,10 @@
     `keep-going --stop` says no note was written. The Stop hook checks its
     counter and the stop note before either is read. It still fails open,
     but says why.
+  - The check and the write are separate calls, so a link made between them
+    is not seen. The gap it closes is a link made before niyam runs, as
+    kavach allows; a process racing niyam inside the worktree is out of
+    scope.
   - Rejected: checking after `mkdir` (a linked `.tmp` would already have a
     folder made outside), and `existsSync` to find the nearest part (it
     follows a link, so a dangling one would pass). `pr-autocreate` writes

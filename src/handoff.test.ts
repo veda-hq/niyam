@@ -24,6 +24,7 @@ import {
   type HookRun,
   type Triggers,
 } from './handoff.ts';
+import { run as cli } from './run.ts';
 import { realSys } from './sys.ts';
 import type { ExecResult, Sys } from './types.ts';
 
@@ -509,6 +510,10 @@ describe('handoff behind a link', () => {
           await assert.rejects(handoff(sys, capture().io, args), { message: new RegExp(`^refused to write ${escape(said)}`) }, `${at} ${args[0]}`);
         }
       }
+      // From the command line, as the pre-push hook runs it: the reason is shown and the push refused.
+      const seen = capture();
+      assert.equal(await cli(['handoff', '--assert-fresh'], seen.io, () => sys), 1);
+      assert.match(seen.err.join('\n'), new RegExp(`refused to write ${escape(join(work, RUN_LOG))}`));
       assert.deepEqual(readdirSync(away), []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
