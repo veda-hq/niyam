@@ -1,6 +1,7 @@
 {
   "kavach": {
-    "python": "python3"
+    "python": "python3",
+    "config": ".claude/kavach.json"
   },
   "hooks": {
     "SessionStart": [
@@ -10,6 +11,10 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "guard": "worktree"
+      },
       {
         "matcher": "Bash",
         "guard": "command"
