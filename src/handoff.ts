@@ -406,6 +406,8 @@ export async function gate(sys: Sys, io: Output, base: string | undefined, callS
   // A repository that names no shared plumbing has turned the gate off.
   if (!settingsHere(sys, base).settings) return 0;
   const h = here(sys, base);
+  // Before the log is read or anything asked of GitHub: the verdict is recorded there.
+  landInside(sys, h.root, `${h.root}/${RUN_LOG}`);
   const ref = h.base;
   const { branch, changedFiles, triggers, baseSha, headSha } = collect(sys, h, ref);
   const log = sys.exists(`${h.root}/${RUN_LOG}`) ? parseRunLog(sys.read(`${h.root}/${RUN_LOG}`)).entries : [];
@@ -570,6 +572,8 @@ export async function handoff(sys: Sys, io: Output, args: readonly string[]): Pr
     io.out(JSON.stringify({ branch, baseRef: base, changedFiles: changedFiles.length, triggers, fired: fired(triggers), runLog: RUN_LOG }, null, 2));
     return 0;
   }
+  // Before --open-brief opens an issue: a declaration that cannot be recorded would open another at each rerun.
+  landInside(sys, h.root, `${h.root}/${RUN_LOG}`);
   const disposition = parsed.disposition as (typeof DECLARED)[number];
   const briefs = [...parsed.briefs];
   if (parsed.openBrief !== undefined) {

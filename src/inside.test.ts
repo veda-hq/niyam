@@ -50,7 +50,9 @@ describe('landInside, on real folders', () => {
     symlinkSync(join(outside, 'f'), join(root, 'a/out.json'));
     symlinkSync(join(outside, 'missing'), join(root, 'a/dangling.json'));
     symlinkSync(join(root, 'inside.json'), join(root, 'a/in.json'));
-    for (const name of ['out.json', 'dangling.json', 'in.json']) refuses(root, join(root, 'a', name), /: it is a symbolic link;/);
+    refuses(root, join(root, 'a/out.json'), /: it is a symbolic link, to .*outside-\d+\/f;/);
+    refuses(root, join(root, 'a/dangling.json'), /: it is a symbolic link, to nothing;/);
+    refuses(root, join(root, 'a/in.json'), /: it is a symbolic link, to .*repo-\d+\/inside\.json;/);
   });
 
   it('refuses a parent folder or a grandparent that leads outside', () => {

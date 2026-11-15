@@ -352,8 +352,8 @@ describe('cubicDismiss', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-dismiss-link-')));
     try {
       const shapes: [string, string, (dir: string, outside: string) => string[], RegExp][] = [
-        ['a committed link at the file', '.cubic-dismiss', (dir, outside) => (writeFileSync(join(outside, 'ledger'), ''), symlinkSync(join(outside, 'ledger'), join(dir, '.cubic-dismiss')), ['.cubic-dismiss']), /\.cubic-dismiss: it is a symbolic link;/],
-        ['a committed link at the file that leads nowhere', '.cubic-dismiss', (dir, outside) => (symlinkSync(join(outside, 'gone'), join(dir, '.cubic-dismiss')), ['.cubic-dismiss']), /: it is a symbolic link;/],
+        ['a committed link at the file', '.cubic-dismiss', (dir, outside) => (writeFileSync(join(outside, 'ledger'), ''), symlinkSync(join(outside, 'ledger'), join(dir, '.cubic-dismiss')), ['.cubic-dismiss']), /\.cubic-dismiss: it is a symbolic link, to .*\/outside\/ledger;/],
+        ['a committed link at the file that leads nowhere', '.cubic-dismiss', (dir, outside) => (symlinkSync(join(outside, 'gone'), join(dir, '.cubic-dismiss')), ['.cubic-dismiss']), /: it is a symbolic link, to nothing;/],
         ['a committed link at its folder', 'ledger/dismissed', (dir, outside) => (symlinkSync(outside, join(dir, 'ledger')), ['ledger']), /ledger\/dismissed: it leads to .*\/outside\/dismissed, outside the repository/],
         ['an untracked link at its folder', 'ledger/dismissed', (dir, outside) => (symlinkSync(outside, join(dir, 'ledger')), []), /it leads to .*\/outside\/dismissed, outside the repository/],
       ];

@@ -365,10 +365,11 @@ export async function stopHook(sys: Sys, input: string, err?: (line: string) => 
     const settings = settingsAt(sys, root);
     const session = typeof data.session_id === 'string' && data.session_id ? data.session_id : undefined;
     const file = `${root}/${STORE}/${(session ?? 'unknown').replace(/[^\w-]/g, '_')}.json`;
+    // Before the counter is read: it is written back below.
+    landInside(sys, root, file);
     const previous = sys.exists(file) ? (JSON.parse(sys.read(file)) as Counter) : null;
     const facts = await gather(sys, root, settings, Boolean(data.agent_id), session, err);
     const decision = decide(facts, previous, settings);
-    landInside(sys, root, file);
     sys.mkdir(`${root}/${STORE}`);
     sys.write(file, JSON.stringify(decision.counter));
     if (!decision.stop) return JSON.stringify({ decision: 'block', reason: decision.reason });
@@ -387,9 +388,11 @@ export async function stopHook(sys: Sys, input: string, err?: (line: string) => 
     }
     return '';
   } catch (error) {
-    // Still fails open: a hook that blocked with no counter saved would send the session back forever.
-    if (error instanceof Outside) err?.(`niyam keep-going: ${error.message}`);
-    return '';
+    // Still fails open: a hook that blocked with no counter saved would send the session back forever. A refused
+    // write is shown, since it turns the hook off in this checkout.
+    if (!(error instanceof Outside)) return '';
+    err?.(`niyam keep-going: ${error.message}`);
+    return JSON.stringify({ systemMessage: `niyam keep-going is off here: ${error.message}` });
   }
 }
 

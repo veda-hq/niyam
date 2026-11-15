@@ -506,13 +506,15 @@ describe('keep-going on real git', () => {
   });
 
   it('writes nothing through a link that leads out of the checkout: --stop fails, the hook says why and lets go', async () => {
-    const shapes: [string, (work: string, outside: string) => void, RegExp][] = [
-      ['a link at the note', (work, outside) => (writeFileSync(join(outside, 'note'), ''), mkdirSync(join(work, STORE), { recursive: true }), symlinkSync(join(outside, 'note'), join(work, STORE, 'stop-note.json'))), /stop-note\.json: it is a symbolic link;/],
-      ['a link at the note that leads nowhere', (work, outside) => (mkdirSync(join(work, STORE), { recursive: true }), symlinkSync(join(outside, 'gone'), join(work, STORE, 'stop-note.json'))), /stop-note\.json: it is a symbolic link;/],
-      ['a link at its folder', (work, outside) => (mkdirSync(join(work, '.tmp')), symlinkSync(outside, join(work, STORE))), /it leads to .*\/outside\/stop-note\.json, outside the repository/],
-      ['a link at .tmp', (work, outside) => symlinkSync(outside, join(work, '.tmp')), /it leads to .*\/outside\/keep-going\/stop-note\.json, outside the repository/],
+    // Each shape: what it plants, then what --stop and the hook say (undefined: that write is not on the link's path).
+    const shapes: [string, (work: string, outside: string) => void, RegExp | undefined, RegExp | undefined][] = [
+      ['a link at the note', (work, outside) => (writeFileSync(join(outside, 'note'), ''), mkdirSync(join(work, STORE), { recursive: true }), symlinkSync(join(outside, 'note'), join(work, STORE, 'stop-note.json'))), /stop-note\.json: it is a symbolic link, to .*\/outside\/note;/, undefined],
+      ['a link at the note that leads nowhere', (work, outside) => (mkdirSync(join(work, STORE), { recursive: true }), symlinkSync(join(outside, 'gone'), join(work, STORE, 'stop-note.json'))), /stop-note\.json: it is a symbolic link, to nothing;/, undefined],
+      ['a link at the counter', (work, outside) => (writeFileSync(join(outside, 'counter'), ''), mkdirSync(join(work, STORE), { recursive: true }), symlinkSync(join(outside, 'counter'), join(work, STORE, 's.json'))), undefined, /s\.json: it is a symbolic link, to .*\/outside\/counter;/],
+      ['a link at its folder', (work, outside) => (mkdirSync(join(work, '.tmp')), symlinkSync(outside, join(work, STORE))), /it leads to .*\/outside\/stop-note\.json, outside the repository/, /s\.json: it leads to .*\/outside\/s\.json, outside/],
+      ['a link at .tmp', (work, outside) => symlinkSync(outside, join(work, '.tmp')), /it leads to .*\/outside\/keep-going\/stop-note\.json, outside the repository/, /s\.json: it leads to .*\/outside\/keep-going\/s\.json, outside/],
     ];
-    for (const [index, [name, plant, message]] of shapes.entries()) {
+    for (const [name, plant, stop, hook] of shapes) {
       const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-keep-going-link-')));
       dirs.push(dir);
       const work = join(dir, 'work');
@@ -531,13 +533,20 @@ describe('keep-going on real git', () => {
       plant(work, outside);
       const before = readdirSync(outside).sort();
       const sys = { ...realSys(), env: { PATH: process.env.PATH ?? '' }, cwd: work, home: dir };
-      const stopped = capture();
-      assert.equal(await run(['keep-going', '--stop', 'x'], stopped.io, () => sys), 1, name);
-      assert.match(stopped.err.join('\n'), message, name);
-      // The hook's own counter goes through the same check; it still lets the session go.
-      const said: string[] = [];
-      assert.equal(await stopHook(sys, JSON.stringify({ session_id: 's', cwd: work }), (line) => said.push(line)), '', name);
-      if (index >= 2) assert.match(said.join('\n'), /^niyam keep-going: refused to write .*s\.json: it leads to .*outside/, name);
+      if (stop) {
+        const stopped = capture();
+        assert.equal(await run(['keep-going', '--stop', 'x'], stopped.io, () => sys), 1, name);
+        assert.match(stopped.err.join('\n'), stop, name);
+      }
+      // The hook's own counter goes through the same check; it still lets the session go, and says the hook is off.
+      if (hook) {
+        const said: string[] = [];
+        const shown = JSON.parse(await stopHook(sys, JSON.stringify({ session_id: 's', cwd: work }), (line) => said.push(line))) as Record<string, string>;
+        assert.deepEqual(Object.keys(shown), ['systemMessage'], name);
+        assert.match(shown.systemMessage as string, /^niyam keep-going is off here: refused to write /, name);
+        assert.match(shown.systemMessage as string, hook, name);
+        assert.match(said.join('\n'), hook, name);
+      }
       assert.deepEqual(readdirSync(outside).sort(), before, name);
       for (const entry of before) assert.equal(readFileSync(join(outside, entry), 'utf8'), '', name);
     }

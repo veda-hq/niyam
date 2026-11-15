@@ -17,7 +17,10 @@ export class Outside extends Error {
  */
 export function landInside(sys: Sys, root: string, target: string): void {
   const top = sys.realPath(root) ?? root;
-  if (sys.isLink(target)) throw new Outside(`refused to write ${target}: it is a symbolic link; nothing was written`);
+  if (sys.isLink(target)) {
+    const leads = sys.realPath(target);
+    throw new Outside(`refused to write ${target}: it is a symbolic link, to ${leads ?? 'nothing'}; nothing was written`);
+  }
   const rest: string[] = [];
   let at = target;
   while (!sys.exists(at) && !sys.isLink(at) && dirname(at) !== at) {

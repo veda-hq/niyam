@@ -464,8 +464,8 @@ describe('handoff', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-handoff-link-')));
     try {
       const shapes: [string, (dir: string, outside: string) => void, RegExp][] = [
-        ['a link at the log', (dir, outside) => (writeFileSync(join(outside, 'log'), ''), mkdirSync(join(dir, '.tmp/push'), { recursive: true }), symlinkSync(join(outside, 'log'), join(dir, RUN_LOG))), /handoff-log\.jsonl: it is a symbolic link;/],
-        ['a link at the log that leads nowhere', (dir, outside) => (mkdirSync(join(dir, '.tmp/push'), { recursive: true }), symlinkSync(join(outside, 'gone'), join(dir, RUN_LOG))), /handoff-log\.jsonl: it is a symbolic link;/],
+        ['a link at the log', (dir, outside) => (writeFileSync(join(outside, 'log'), ''), mkdirSync(join(dir, '.tmp/push'), { recursive: true }), symlinkSync(join(outside, 'log'), join(dir, RUN_LOG))), /handoff-log\.jsonl: it is a symbolic link, to .*\/outside\/log;/],
+        ['a link at the log that leads nowhere', (dir, outside) => (mkdirSync(join(dir, '.tmp/push'), { recursive: true }), symlinkSync(join(outside, 'gone'), join(dir, RUN_LOG))), /handoff-log\.jsonl: it is a symbolic link, to nothing;/],
         ['a link at .tmp/push', (dir, outside) => (mkdirSync(join(dir, '.tmp')), symlinkSync(outside, join(dir, '.tmp/push'))), /it leads to .*\/outside\/handoff-log\.jsonl, outside the repository/],
         ['a link at .tmp', (dir, outside) => symlinkSync(outside, join(dir, '.tmp')), /it leads to .*\/outside\/push\/handoff-log\.jsonl, outside the repository/],
       ];
@@ -483,12 +483,17 @@ describe('handoff', () => {
         sys.execOverride = (call) => (call.args.join(' ') === 'rev-parse --show-toplevel' ? { code: 0, stdout: `${dir}\n`, stderr: '' } : git(call));
         plant(dir, outside);
         const before = readdirSync(outside).sort();
-        for (const args of [['--record', '--disposition', 'own-work', '--reason', 'r'], ['--assert-fresh']]) {
+        // Refused before GitHub is asked anything: --open-brief would otherwise open a Brief at every rerun.
+        writeFileSync(join(dir, 'b.md'), draft());
+        const asked: string[] = [];
+        sys.http = (url) => (asked.push(url), Promise.resolve({ status: 500, json: null }));
+        for (const args of [['--record', '--disposition', 'own-work', '--reason', 'r'], ['--record', '--disposition', 'handed-off', '--reason', 'r', '--open-brief', 'b.md'], ['--assert-fresh']]) {
           const { io, err } = capture();
           assert.equal(await niyam(['handoff', ...args], io, () => sys), 1, `${name}: ${args[0]}`);
           assert.ok(err.join('\n').startsWith(`niyam handoff: refused to write ${dir}/${RUN_LOG}: `), `${name}: ${args[0]}: ${err.join('\n')}`);
           assert.match(err.join('\n'), message, `${name}: ${args[0]}`);
         }
+        assert.deepEqual(asked, [], name);
         assert.deepEqual(readdirSync(outside).sort(), before, name);
         for (const entry of before) assert.equal(readFileSync(join(outside, entry), 'utf8'), '', name);
       }
