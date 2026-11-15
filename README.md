@@ -321,7 +321,9 @@ eval "$(niyam env)"
 Lead with the first form for runners: when niyam is missing from PATH,
 `eval "$(niyam env)"` evaluates nothing and leaves the shell acting as the
 owner. A script can guard it with `lines=$(niyam env) || exit` before
-`eval "$lines"`, which also stops when GitHub stays locked out.
+`eval "$lines"`, which also stops when GitHub stays locked out. A shell
+tracing its commands (`set -x`) prints the token as `eval` exports it, so
+turn tracing off around it, or use the wrapper, whose shell traces nothing.
 
 One line on standard error says which account the shell works as, or why
 GitHub stays locked out, with the fix; printing exits 0 as the agent and 77

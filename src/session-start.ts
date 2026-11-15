@@ -188,7 +188,13 @@ async function cloudStart(sys: Sys): Promise<Said> {
 }
 
 function start(sys: Sys): Said {
-  const local = localIdentity(sys);
+  let local: LocalIdentity;
+  try {
+    local = localIdentity(sys);
+  } catch (error) {
+    // Still locks below: a check that failed gives no identity.
+    local = { owner: 'the owner', fix: 'tell the owner', reason: `the check failed (${message(error)})` };
+  }
   const stop = `Do not push, fetch, or run gh in this session; tell ${local.owner}.`;
 
   const envFile = sys.env.CLAUDE_ENV_FILE;

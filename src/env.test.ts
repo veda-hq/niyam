@@ -1,16 +1,18 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { describe, it } from 'node:test';
 
 import { lockScript, pathsFor, sessionScript } from './agent.ts';
 import { LOCKED } from './as-agent.ts';
-import { RUN_UNDER, env, envArgs, envFailed } from './env.ts';
+import { RUN_UNDER, env, envArgs, envFailed, forEval } from './env.ts';
 import { AGENT, AGENT_ID, FakeSys, HOME, TOKEN, capture, type Call } from './fake.test.ts';
 import { run } from './run.ts';
 
 const SESSION = pathsFor(HOME, AGENT).session;
 const SCRIPT = sessionScript(AGENT, AGENT_ID, pathsFor(HOME, AGENT));
-const LOCK = lockScript(HOME).trimEnd();
+const LOCK = forEval(lockScript(HOME));
+const BOTH = forEval(`${lockScript(HOME)}\n${SCRIPT}`);
 const FIX = 'ask example-owner to run niyam machine ExampleBot (niyam doctor ExampleBot names what is missing)';
 
 /** A Mac `machine` has set up, with a shell outside Claude Code: no CLAUDE_ENV_FILE, no CLAUDECODE. */
@@ -26,6 +28,7 @@ function envIn(sys: FakeSys, args: string[] = []): { code: number; out: string[]
   const { io, out, err } = capture();
   const before = sys.calls.length;
   const code = env(sys, io, envArgs(args));
+  noToken({ out, err });
   return { code, out, err, ran: sys.calls.slice(before).filter((call) => call.interactive) };
 }
 
@@ -38,7 +41,7 @@ describe('env', () => {
   it('prints the lock, then the session file machine wrote, and says the shell works as the agent', () => {
     const result = envIn(ready());
     assert.equal(result.code, 0);
-    assert.deepEqual(result.out, [`${lockScript(HOME)}\n${SCRIPT}`.trimEnd()]);
+    assert.deepEqual(result.out, [BOTH]);
     assert.deepEqual(result.err, ['niyam: this shell works as ExampleBot on GitHub.']);
     noToken(result);
   });
@@ -62,7 +65,7 @@ describe('env', () => {
     sys.keychain.clear();
     const result = envIn(sys);
     assert.equal(result.code, LOCKED);
-    assert.deepEqual(result.out, [`${lockScript(HOME)}\n${SCRIPT}`.trimEnd()]);
+    assert.deepEqual(result.out, [BOTH]);
     assert.match(result.err[0] ?? '', /has no ExampleBot token, so GitHub refuses gh and git/);
   });
 
@@ -131,10 +134,10 @@ describe('env', () => {
     assert.equal(await run(['env', 'extra'], io, () => ready()), 2);
     assert.match(err[0] ?? '', /put -- before the command/);
     assert.equal(await run(['env'], io, () => ready()), 0);
-    assert.equal(out.at(-1), `${lockScript(HOME)}\n${SCRIPT}`.trimEnd());
+    assert.equal(out.at(-1), BOTH);
     assert.equal(await run(['env', '--', 'codex'], io, () => ready()), 3);
     assert.equal(await run(['env'], io, () => { throw new Error('boom'); }), LOCKED);
-    assert.match(out.at(-1) ?? '', /^# Written by niyam session-start\. GitHub is locked out/);
+    assert.equal(out.at(-1), forEval(lockScript(homedir())));
     const broken = ready();
     broken.read = () => {
       throw new Error('disk gone');
@@ -145,6 +148,21 @@ describe('env', () => {
 });
 
 describe('env, run by a real shell', () => {
+  const vars = 'printf "%s|%s|%s|%s" "$NIYAM_AGENT" "$GIT_CONFIG_VALUE_5" "$GIT_SSH_COMMAND" "${GITHUB_TOKEN-unset}"';
+
+  it('gives the same variables whether its output is evaluated quoted or not, with no comment swallowing the rest', () => {
+    const printed = forEval(`${lockScript(HOME)}\n${SCRIPT}`);
+    assert.ok(!printed.includes('#'), printed);
+    const seen = ['eval "$1"', 'eval $1'].map((evaluate) => {
+      const ran = spawnSync('/bin/sh', ['-c', `${evaluate}; ${vars}`, 'sh', printed], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', GITHUB_TOKEN: 'inherited' } });
+      assert.equal(ran.status, 0, ran.stderr);
+      return ran.stdout;
+    });
+    assert.equal(seen[1], seen[0]);
+    assert.match(seen[0] ?? '', /^ExampleBot\|!f\(\) \{ test "\$1" = get && printf 'username=%s\\npassword=%s\\n' ExampleBot "\$GH_TOKEN"; \}; f\|echo 'niyam: SSH is off/);
+    assert.match(seen[0] ?? '', /\|unset$/);
+  });
+
   it('runs the lines, then the command in their place, with its arguments', () => {
     const ran = spawnSync('/bin/sh', ['-c', RUN_UNDER, 'niyam env', "export NIYAM_AGENT='ExampleBot'\nunset OTHER\n", 'sh', '-c', 'printf "%s %s %s" "$NIYAM_AGENT" "${OTHER-unset}" "$0"', 'arg zero'], {
       encoding: 'utf8',

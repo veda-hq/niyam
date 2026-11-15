@@ -2010,7 +2010,12 @@
   - `niyam env -- <command>` runs the command under them through `/bin/sh`,
     so a runner started that way cannot start without niyam;
     `eval "$(niyam env)"` with niyam missing evaluates nothing, so the
-    README leads with the wrapper. Every failure of env's own check still
+    README leads with the wrapper. Printed, the lines carry no comments and
+    each ends in `;`: unquoted, `eval $(niyam env)` had evaluated nothing
+    after the lock's opening comment, which swallowed the rest once the
+    shell turned newlines into spaces. Under `set -x` the eval form traces
+    the token as it is exported; the wrapper's shell traces nothing. Every
+    failure of env's own check still
     prints the lock, or runs nothing. Printing exits 0 as the agent and 77
     (P-43's locked code) otherwise; running exits with the command's code,
     and runs it locked when it cannot work as the agent, as a Claude Code

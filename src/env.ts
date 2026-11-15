@@ -43,13 +43,28 @@ export function env(sys: Sys, io: Output, parsed: ReturnType<typeof envArgs>): n
     io.err(`niyam: this shell works as ${local.agent} on GitHub.`);
   }
   if (parsed.command === undefined) {
-    io.out(lines.trimEnd());
+    io.out(forEval(lines));
     return 'reason' in local ? LOCKED : 0;
   }
   const result = sys.exec('/bin/sh', ['-c', RUN_UNDER, 'niyam env', lines, parsed.command, ...parsed.args], { interactive: true });
   // With standard error passed through, what is left is why the shell could not start.
   if (result.stderr) io.err(`niyam env: ${parsed.command}: ${result.stderr.trim()}`);
   return result.code;
+}
+
+/**
+ * The lines as `env` prints them: without comments or blank lines, each
+ * ended by `;`, so an unquoted `eval $(niyam env)`, whose newlines the shell
+ * turns into spaces, runs every one rather than one comment swallowing the
+ * rest. Unquoted, a value holding two spaces in a row or a glob character
+ * would still change, so the README quotes it; niyam's own values hold none.
+ */
+export function forEval(lines: string): string {
+  return lines
+    .split('\n')
+    .filter((line) => line.trim() !== '' && !line.startsWith('#'))
+    .map((line) => `${line};`)
+    .join('\n');
 }
 
 /** What `env` prints when its own check fails: the lock alone, so `eval` still locks the shell. */
@@ -60,6 +75,6 @@ export function envFailed(home: string, io: Output, parsed: ReturnType<typeof en
     return LOCKED;
   }
   io.err(`niyam: GitHub is locked out of this shell, because the check failed: ${why}`);
-  io.out(lockScript(home).trimEnd());
+  io.out(forEval(lockScript(home)));
   return LOCKED;
 }
