@@ -107,7 +107,13 @@ describe('doctor', () => {
     sys.files.set(
       `${ROOT}/.claude/settings.json`,
       JSON.stringify({
-        hooks: { SessionStart: [entry('sarathi hook SessionStart'), entry(HOOK_COMMAND)], PreToolUse: [entry('sarathi hook PreToolUse'), entry(OLDER_GUARD_COMMANDS[0] as string)], Stop: [entry('echo done'), entry('echo done')] },
+        hooks: {
+          SessionStart: [entry('sarathi hook SessionStart'), entry(HOOK_COMMAND)],
+          PreToolUse: [entry('sarathi hook PreToolUse'), entry(OLDER_GUARD_COMMANDS[0] as string)],
+          Stop: [entry('"$CLAUDE_PROJECT_DIR"/.claude/hooks/sarathi.sh Stop'), entry('echo done'), entry('echo done')],
+          // sarathi does not run this event here, so its handler there never runs.
+          Notification: [entry('echo note')],
+        },
         permissions: { allow: [...AUTO_FIX_RULES] },
       }),
     );

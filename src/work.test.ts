@@ -847,6 +847,15 @@ describe('prWorkRules', () => {
       assert.equal(sys.requests[0]?.token, 'ghs_run');
     });
 
+    it("passes one that also changes sarathi's hook list, where onboard writes niyam's handlers (P-66)", async () => {
+      const sys = actions(onboardPull());
+      files(sys, [{ filename: '.claude/settings.json', status: 'modified' }, { filename: '.claude/sarathi.json', status: 'modified' }]);
+      assert.deepEqual((await check(sys)).out, ["✓ pr-work-rules: #42 is onboard's, changing only the files onboard writes, so it names no slice"]);
+      const removed = actions(onboardPull());
+      files(removed, [{ filename: '.claude/sarathi.json', status: 'removed' }]);
+      assert.equal((await check(removed)).code, 1, 'deleting it is not onboard\'s');
+    });
+
     for (const [name, list] of [
       ['changes another file', [{ filename: '.github/niyam.json' }, { filename: 'src/app.ts' }]],
       // onboard leaves CODEOWNERS to the client, so a change to it is the work rules' to judge.
