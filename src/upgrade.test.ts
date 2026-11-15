@@ -230,6 +230,28 @@ describe('upgrade', () => {
     assert.deepEqual(installs(sys), []);
   });
 
+  it('refuses a release whose tag is not on main, naming the tag and its commit (P-61)', async () => {
+    const sys = machine();
+    const compare = `/repos/veda-hq/niyam/compare/v${NEW}...main?per_page=1`;
+    sys.route('GET', compare, { status: 200, json: { status: 'diverged', base_commit: { sha: '7c'.repeat(20) } } });
+    assert.deepEqual(await upgraded(sys), {
+      code: 1,
+      out: [],
+      err: [
+        `upgrade: the v${NEW} tag is on commit ${'7c'.repeat(6)}, which is not on veda-hq/niyam's main (GitHub's comparison: "diverged"); a release comes only from main, so this tag is not one; nothing installed`,
+      ],
+    });
+    sys.route('GET', compare, () => {
+      throw new Error('GET api.github.com/repos could not be made: ENOTFOUND');
+    });
+    assert.deepEqual((await upgraded(sys)).err, [
+      `upgrade: GitHub could not be asked whether the v${NEW} tag is on main (GET api.github.com/repos could not be made: ENOTFOUND); nothing installed`,
+    ]);
+    assert.deepEqual(installs(sys), []);
+    const asked = sys.requests.find((request) => request.url.endsWith(compare));
+    assert.equal(asked?.token, undefined, 'with no token');
+  });
+
   it('waits for a release whose package is not attached yet', async () => {
     const sys = machine();
     sys.route('GET', LATEST, { status: 200, json: { tag_name: `v${NEW}` } });

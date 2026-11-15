@@ -1319,12 +1319,18 @@ is a slice the owner approves.
 
 ### Releases and upgrading
 
-Each release is a tag `vX.Y.Z` on `main`, matching `package.json`; the
-Release workflow checks both, runs `pnpm check` and publishes the GitHub
-release, attaching the CLI package it built and tested. From 0.6.16 the same
+A release is the merge of its version bump: a push to `main` whose
+`package.json` version has no tag `vX.Y.Z` yet (P-61). The Release workflow
+then runs `pnpm check`, makes that annotated tag (`niyam X.Y.Z`) on the
+merged commit itself, and publishes the GitHub release, attaching the CLI
+package it built and tested. Agents push no release tags. From 0.6.16 the same
 package is on npm as `@veda-hq/niyam`, with provenance, for a repository that
-pins it as an exact version. Install the attached package on each machine with
-pnpm, once; nothing is built on install:
+pins it as an exact version; it publishes from the `npm` environment, which
+only `main` may deploy to. A tag on any other commit is not a release:
+`niyam upgrade` and `niyam onboard` ask GitHub's compare API, with no token,
+whether the tag's commit is on `main`, and refuse one that is not, naming the
+tag and the commit. Install the attached package on each machine with pnpm,
+once; nothing is built on install:
 
 ```bash
 pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.17/veda-hq-niyam-0.6.17.tgz
@@ -1343,11 +1349,11 @@ niyam upgrade
 ```
 
 `upgrade` asks GitHub's public releases API for the newest release, with no
-token and no sign-in, and when it is newer than the CLI running, installs it
-with the same `pnpm add -g`, printing old → new and the version the shell then
+token and no sign-in, and when it is newer than the CLI running and its tag's
+commit is on `main`, installs it with the same `pnpm add -g`, printing old → new and the version the shell then
 runs. On the newest release it says so and installs nothing; it never moves
 back to an older one. When GitHub cannot be reached, or a newer release has no
-package attached yet, or pnpm fails, it says which and exits 1, checking
+package attached yet, or its tag is not on `main`, or pnpm fails, it says which and exits 1, checking
 nothing more. After an install, or when there was nothing to install, it walks
 `PATH`, as `type -a niyam` does, reading an empty or relative entry
 against the current folder as the shell does. It exits 0 when exactly one
@@ -1362,7 +1368,10 @@ newest release with the line above. `onboard`, when the repo pins a newer releas
 CLI running, refuses and says to run `niyam upgrade` first.
 
 `onboard` pins the client's workflow to one version, the release of the CLI
-that ran it. Each job writes the pin twice, `checks.yml@vX.Y.Z` and, two lines
+that ran it, and writes `.github/niyam/cloud-setup.sh` at the same one. First
+it asks GitHub's compare API, with no token, whether that release's tag is on
+`main`; when it is not, or GitHub cannot say, it refuses and changes nothing.
+Each job writes the pin twice, `checks.yml@vX.Y.Z` and, two lines
 below it under `with:`, `niyam-ref: vX.Y.Z`, the one input `checks.yml`
 declares; GitHub refuses a caller that passes an input the called workflow
 does not declare, `process-rules-ref` too since P-57. Every job of

@@ -1094,6 +1094,26 @@ describe('onboard', () => {
     assert.equal(repo(sys).get(WORKFLOW), own);
   });
 
+  it("refuses to pin a release whose tag is not on main, or when GitHub cannot say, changing nothing (P-61)", async () => {
+    const compare = `/repos/veda-hq/niyam/compare/v${packageVersion()}...main?per_page=1`;
+    for (const [answer, message] of [
+      [
+        { status: 200, json: { status: 'diverged', base_commit: { sha: '7c'.repeat(20) } } },
+        `onboard: the v${packageVersion()} tag is on commit ${'7c'.repeat(6)}, which is not on veda-hq/niyam's main (GitHub's comparison: "diverged"); a release comes only from main, so this tag is not one; nothing changed`,
+      ],
+      [{ status: 502, json: null }, `onboard: GitHub answered HTTP 502 when asked whether the v${packageVersion()} tag is on main; nothing changed`],
+    ] as const) {
+      const sys = fresh();
+      sys.route('GET', compare, answer);
+      const before = new Map(sys.files);
+      const { code, err } = await run(sys);
+      assert.deepEqual({ code, err }, { code: 1, err: [message] });
+      assert.deepEqual(sys.files, before, 'writes nothing');
+      assert.equal(sys.requests.find((request) => request.url.endsWith(compare))?.token, undefined, 'asks with no token');
+      assert.equal(sys.requests.some((request) => request.method !== 'GET'), false, 'changes nothing on GitHub');
+    }
+  });
+
   it('refuses inside an agent session, named by NIYAM_AGENT', async () => {
     for (const env of [{ NIYAM_AGENT: AGENT }]) {
       const sys = fresh();
@@ -1174,7 +1194,9 @@ describe('onboard', () => {
       assert.deepEqual((await run(sys, [])).err, ['onboard: name the owner and the agent account: niyam onboard <owner> <agent>']);
       assert.equal(sys.asked[0], 'The owner, who approves: ');
       const down = setUp([AGENT]);
-      down.http = () => Promise.reject(new Error('offline'));
+      // GitHub answers whether the release is on main, then nothing more.
+      const answers = down.http.bind(down);
+      down.http = (url, options) => (url.includes('/compare/') ? answers(url, options) : Promise.reject(new Error('offline')));
       down.answers = ['', ''];
       assert.deepEqual((await run(down, [])).err, ['onboard: name the owner and the agent account: niyam onboard <owner> <agent>']);
       assert.equal(down.asked[0], 'The owner, who approves: ');
