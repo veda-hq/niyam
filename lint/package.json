@@ -4,7 +4,7 @@
   "description": "The lint tools for niyam's sources, kept apart: shuddhi and the parser need the TypeScript 5 compiler API, and the root builds with TypeScript 7.",
   "type": "module",
   "devDependencies": {
-    "@typescript-eslint/parser": "8.48.0",
+    "@typescript-eslint/parser": "8.72.2",
     "@veda-hq/eslint-plugin-shuddhi": "0.6.4",
     "eslint": "9.39.5",
     "typescript": "5.9.3"
