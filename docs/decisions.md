@@ -1882,3 +1882,29 @@
     ruleset's pull request rule (Settings, Rules, ruleset `main`). No
     `niyam owner-step` does this. Until then CODEOWNERS only requests his
     review; it does not hold the merge.
+- **2026-11-15 — Record: only niyam's own GitHub App creates a release tag
+  (P-64, Work item #303, slice #351).** P-61 left tag creation open: a
+  ruleset cannot name one workflow as its bypass, and GitHub Actions as a
+  bypass would let every workflow on any branch make a `v*` tag. So
+  Dependabot or Renovate could still move a client's `checks.yml@` pin to a
+  tag off `main`, which only `upgrade` and `onboard` refuse.
+  - A GitHub App of veda-hq's, installed on this repository alone with
+    Contents: write, is the one bypass of the "release tags" ruleset's
+    `creation` rule. Its client id and private key are the `npm`
+    environment's variable `RELEASE_APP_CLIENT_ID` and secret
+    `RELEASE_APP_PRIVATE_KEY`, which only `main`'s Release run can read.
+  - `release.yml` mints the app's token with
+    `actions/create-github-app-token` (v3.3.0, by sha), scoped to
+    `contents: write`, and makes the tag with it alone; npm and the GitHub
+    release keep `GITHUB_TOKEN` and OIDC. With no id or key the release
+    stops before the tag, naming which is missing: there is no fallback to
+    `GITHUB_TOKEN`, which the ruleset refuses once the rule is on.
+  - Alok, by hand, since AthyaBot is not an admin: the app, its install and
+    the two values before this merges; the `creation` rule, with the app
+    as its only bypass, after one release has tagged with the app's token,
+    since a rule added first would stop that release at the tag. AthyaBot
+    then reads the ruleset: `creation` in its rules, and
+    `current_user_can_bypass: never` for itself.
+  - Cost: a leaked key could make a `v*` tag. The environment keeps it from
+    branch workflows, and P-61's compare check still refuses a tag off
+    `main` in `upgrade` and `onboard`.

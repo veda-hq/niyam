@@ -13,9 +13,10 @@ name: Release
 #
 # npm auth: trusted publishing (OIDC) only, set up on npmjs.com for
 # @veda-hq/niyam with this repository, this workflow and the `npm`
-# environment, which only main may deploy to (once the owner moves its rule
-# from v* tags to main, P-61). There is no npm token, so a
-# leaked secret cannot publish. Keep this file's name and the environment's.
+# environment, which only main may deploy to (P-61). There is no npm token,
+# so a leaked secret cannot publish. Keep this file's name and the environment's.
+# The tag itself is made with niyam's own GitHub App, the one bypass of the
+# `v*` tag ruleset's creation rule (#351), whose key is in that environment.
 on:
   push:
     branches: [main]
@@ -92,11 +93,31 @@ jobs:
       - run: pnpm check
       - name: Pack the CLI
         run: pnpm pack --pack-destination "$RUNNER_TEMP"
-      # An annotated tag, made through the API as github-actions[bot], so no
-      # git credential is kept. A tag that is here already must be on this commit.
+      # The `v*` tag ruleset lets only niyam's own GitHub App create a release
+      # tag (#351). Its client id and private key are in the `npm`
+      # environment, which only main deploys to, so no branch workflow can
+      # read them. There is no fallback to GITHUB_TOKEN: without the app the
+      # release stops here.
+      - name: The release app's id and key are set
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$CLIENT_ID" ] || { echo "::error::the npm environment has no variable RELEASE_APP_CLIENT_ID, the release app's client id"; exit 1; }
+          [ -n "$KEY" ] || { echo "::error::the npm environment has no secret RELEASE_APP_PRIVATE_KEY, the release app's private key"; exit 1; }
+      - name: The release app's token, for the tag alone
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      # An annotated tag, made through the API as the release app, so no git
+      # credential is kept. A tag that is here already must be on this commit.
       - name: Tag this commit
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
           refs=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
