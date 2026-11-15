@@ -1450,6 +1450,13 @@ ruleset requires, or `Guard`. It fails closed: a truncated file list, or any
 read GitHub does not answer, refuses. Each refusal names the file and how to
 pass. A slice edit does not run Guard again: edit or push the pull request.
 
+Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
+`@AlokBansal8` for the guard's files alone: `.github/workflows/guard.yml`,
+`scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
+itself. With "Require review from Code Owners" on in the `main` ruleset, a
+pull request that changes one of them waits for his approval. Every other
+pull request, including one under `.github/` that Guard passed, does not.
+
 ## License
 
 MIT
