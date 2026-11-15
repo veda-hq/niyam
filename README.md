@@ -1407,6 +1407,39 @@ functions, 90% branches), builds `dist/` and runs it. `pnpm scan:secrets` runs
 Gitleaks and TruffleHog over the working tree; CI runs both over the whole
 history.
 
+### Guard
+
+The `guard` workflow (`.github/workflows/guard.yml`) runs on
+`pull_request_target`, so GitHub runs it from `main`'s copy, never the pull
+request's. Its job, `Guard`, checks out `main` alone, reads the pull
+request's changed files from GitHub's API as data, and runs
+`scripts/guard.mjs` (tested in `scripts/guard.test.mjs`). A change to a guard
+file passes only when the pull request's slice names it in a `**Guards:**`
+section, one already in the slice when the owner put `approved` on its Work
+item (for a slice added later, when the owner's `Decision:` settled it):
+
+```markdown
+**Guards:** `.github/workflows/ci.yml`, `scripts/*.mjs`, `.githooks/`
+```
+
+A name is a path, a folder ending in `/`, or a pattern where `*` matches
+within one folder and `**` across them. The guard files are everything under
+`.github/`, `.githooks/`, `.dvara.json`, `.dvara/records-baseline.json`,
+`.gitleaks.toml`, `.trufflehog-exclude`, the `scripts` of `package.json`,
+and `scripts/*.mjs`. A test file needs naming too when a pull request
+deletes it, leaves it fewer `test(`/`it(` calls than the merge base, or adds
+`.skip`, `.only` or `todo`.
+
+Two changes pass unnamed: an onboard pull request
+(`chore(niyam): onboard at vX.Y.Z`) whose every changed line only moves the
+niyam version, and a sha256 with it, to that release, tagged on `main`; and a
+Dependabot pull request whose every changed line only moves a `uses:` to
+another full commit sha with its version comment. Whatever the slice says,
+Guard refuses a pull request that adds a job reporting a check the `main`
+ruleset requires, or `Guard`. It fails closed: a truncated file list, or any
+read GitHub does not answer, refuses. Each refusal names the file and how to
+pass. A slice edit does not run Guard again: edit or push the pull request.
+
 ## License
 
 MIT
