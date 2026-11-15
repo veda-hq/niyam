@@ -377,12 +377,35 @@ const RECENT_PULLS = 30;
 /** A named check's proof that it runs on pull requests and passes: the app that reported it there, or why there is none. */
 type Passed = { app: number; appName: string; pull: number } | { problem: string };
 
+/** A check run as GitHub's check-runs API gives it, with only what passedOnPull reads. */
+interface CheckRun {
+  name?: unknown;
+  conclusion?: unknown;
+  started_at?: unknown;
+  app?: { id?: unknown; name?: unknown };
+}
+
+/**
+ * `runs` without the cancelled ones a later run replaced: a `cancelled`
+ * run is left out when a run from the same app started after it and
+ * concluded `success`. A workflow with `cancel-in-progress` cancels the
+ * run an edit or a push replaced, in another check suite, so both are
+ * latest runs of the name (#358). A cancelled run nothing replaced stays.
+ */
+function superseded(runs: CheckRun[]): CheckRun[] {
+  const at = (one: CheckRun): string => (typeof one.started_at === 'string' ? one.started_at : '');
+  return runs.filter(
+    (one) => one.conclusion !== 'cancelled' || !runs.some((other) => other.conclusion === 'success' && other.app?.id === one.app?.id && at(other) > at(one) && at(one) !== ''),
+  );
+}
+
 /**
  * Whether each named check reported `success` on the head commit of the
  * last pull request merged into the default branch, and from which app.
  * A check that does is one pull requests run, so a ruleset requiring it
  * holds none; one that does not might never report on a pull request. Two
  * apps reporting the same name is refused: the ruleset requires one app's.
+ * A cancelled run a later success replaced does not count (`superseded`).
  */
 function passedOnPull(gh: Gh, repo: string, names: string[]): Map<string, Passed> {
   const found = new Map<string, Passed>();
@@ -404,8 +427,8 @@ function passedOnPull(gh: Gh, repo: string, names: string[]): Map<string, Passed
       found.set(name, { problem: `GitHub did not give the checks of ${where} (${answer.problem})` });
       continue;
     }
-    const runs = ((answer.json as { check_runs?: unknown } | null)?.check_runs ?? []) as { name?: unknown; conclusion?: unknown; app?: { id?: unknown; name?: unknown } }[];
-    const named = runs.filter((one) => one.name === name);
+    const runs = ((answer.json as { check_runs?: unknown } | null)?.check_runs ?? []) as CheckRun[];
+    const named = superseded(runs.filter((one) => one.name === name));
     // Every latest run of that name passed, all from one app.
     const apps = [...new Set(named.map((one) => one.app?.id))];
     const app = apps[0];

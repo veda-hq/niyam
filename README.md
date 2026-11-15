@@ -1298,7 +1298,10 @@ niyam owner-step required-checks <owner/repo> <ruleset id or name> [--check <nam
   when it reported `success` on the head commit of the last pull request
   merged into the default branch, from one app alone, and requires it from
   that app. That shows pull requests run it and it passes. One that never
-  ran there, did not pass, or that two apps reported is a `✗`. A check a
+  ran there, did not pass, or that two apps reported is a `✗`. A
+  `cancelled` run counts for nothing when a run from the same app started
+  after it and passed, as a workflow with `cancel-in-progress` leaves
+  one when a pull request is edited or pushed again. A check a
   workflow runs only for some paths can pass there and then never report
   on a pull request that skips them, holding it: name only checks that run
   on every pull request.
