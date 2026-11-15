@@ -1926,3 +1926,15 @@
   concurrency group on the job (GitHub keeps one pending run a group and
   cancels the rest, so an event could be dropped), and the sweep counting the
   `approved` label (new behaviour the owner sees, not this fix).
+- **2026-11-15 — Record: `owner-step --check` leaves out a cancelled run a
+  later success replaced (State #358 of P-58).** Guard (P-62) runs with
+  `cancel-in-progress`, so a pull request opened and edited within seconds
+  has two latest Guard runs, each in its own check suite: the first
+  `cancelled`, the second `success`. `--check` wanted every latest run to
+  pass, so it refused Guard on #353, where it had passed. Now a `cancelled`
+  run is left out when a run from the same app started after it and
+  concluded `success`. A cancelled run nothing later replaced, any other
+  conclusion, and a second app still refuse. Rejected: dropping
+  `cancel-in-progress` from `guard.yml` (a guard file, and a stale run
+  could then finish last and show an old verdict), and ignoring every
+  cancelled run (one that nothing replaced proves nothing).
