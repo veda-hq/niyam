@@ -1820,3 +1820,47 @@
     a new secret and an owner step, left for a slice of its own. Until
     then the two points above hold: npm takes only `main`'s runs, and
     clients refuse a tag off `main`.
+- **2026-11-15 — Record: the Guard check (P-62, Work item #303, slice
+  #304).** Alok, 2026-11-14: "I believe in enforcing the checks and
+  balances in automated fashion via tests, hooks, etc." A pull request ran
+  its own copy of the checks that judge it, so turning `run: pnpm check`
+  into `run: true` or emptying a test went green and auto-merged. The
+  `guard` workflow runs on `pull_request_target`, from `main`'s copy, and
+  its job `Guard` runs `scripts/guard.mjs`: a change to a guard file
+  (`.github/`, `.githooks/`, `.dvara.json`, `.dvara/records-baseline.json`,
+  `.gitleaks.toml`, `.trufflehog-exclude`, `package.json`'s `scripts`,
+  `scripts/*.mjs`), or one that deletes a test file, leaves it fewer
+  `test(`/`it(` calls or adds `.skip`, `.only` or `todo`, passes only when
+  the slice names the file in a `**Guards:**` section.
+  - The section counts as it stood when Alok last put `approved` on the
+    Work item, read from the slice's GraphQL revisions, whose `diff` holds
+    the whole body at each. A slice added after that counts from Alok's
+    first unedited `Decision:` since, on the slice or on the Work item
+    naming it. Revisions GitHub cuts short, or GraphQL not answering,
+    refuse.
+  - It reads the pull request from the API and checks out `main` alone, so
+    the base repository's token never meets the pull request's code. Its
+    permissions are `contents`, `pull-requests` and `issues: read`. It
+    installs `main`'s lockfile with `--ignore-scripts` for `yaml`, since a
+    line scan for job names is easy to evade.
+  - Patches and `package.json` are compared with the merge base, not
+    `main`'s tip, so a branch behind `main` is not refused for what `main`
+    changed since.
+  - It fails closed: a file list shorter than `changed_files`, any read
+    that fails, a workflow that does not parse, or a `main` ruleset it
+    cannot read.
+  - It refuses any added job that reports a check `main`'s ruleset
+    requires, or `Guard` itself, by its name, a matrix leg or a reusable
+    workflow's job under it, or by a name that is an expression.
+  - Two changes pass unnamed. Dependabot's (`dependabot[bot]`) when every
+    changed line only moves a `uses:` to another full sha of the same
+    action, with its version comment. Onboard's
+    (`chore(niyam): onboard at vX.Y.Z`) when every changed line only moves
+    older versions to that release, and any sha256 with them, and the tag
+    `vX.Y.Z` is on `main`. The sha256 is not checked against the release:
+    the tarball URL can only move to that release, and a wrong sha256 fails
+    the install.
+  - Guard first reports on the pull request after this one. Once it passes
+    on the first one merged after it, Alok runs
+    `niyam owner-step required-checks veda-hq/niyam main --check "Guard"`
+    (or uses the ruleset page until #314 is released).

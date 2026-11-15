@@ -1,0 +1,503 @@
+#!/usr/bin/env node
+// The Guard check (slice #304 of Work item #303). GitHub runs it on
+// pull_request_target, so from main's copy of this file, never the pull
+// request's. It reads the pull request's changed files from GitHub's API as
+// data and passes a change to a guard file (the checks, the hooks and their
+// scripts) only when the pull request's slice names that file in a
+// **Guards:** section the slice already had when the owner approved it.
+//
+//   guard.mjs        GH_TOKEN, REPO (owner/name) and PR (its number) in the environment
+//
+// Self-contained on purpose: it imports nothing from src/, which is no guard
+// file, so a pull request cannot change what the guard does without naming a
+// guard file. The owner comes from main's .github/niyam.json, read from the
+// working directory. Exit 0: it passes; 1: refused, each refusal naming the
+// file and how to pass; 2: a usage error.
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+import { parse as parseYaml } from 'yaml';
+
+/** The branch whose copy runs the guard and whose ruleset names the required checks. */
+const MAIN = 'main';
+
+/** The check this workflow reports: no pull request may add a job by its name, even before the ruleset requires it. */
+const OWN_CHECK = 'Guard';
+
+/** GitHub lists at most 3,000 of a pull request's files, 100 a page. */
+const FILES_MOST = 3000;
+
+/** The files that hold niyam's checks, hooks and their scripts: a change to one needs the slice to name it. */
+const GUARD_FILES = [/^\.github\//, /^\.githooks\//, /^\.dvara\.json$/, /^\.dvara\/records-baseline\.json$/, /^\.gitleaks\.toml$/, /^\.trufflehog-exclude$/, /^scripts\/[^/]+\.mjs$/];
+
+/** A test file: `x.test.ts`, `x.spec.mjs` and the like. */
+const TEST_FILE = /(?:^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
+/** A test: `test(`, `it(`, `t.test(`, `test.skip(`. */
+const TEST_CALL = /\b(?:test|it)(?:\.\w+)?\s*\(/g;
+
+/** A test skipped, run alone or left to do: `.skip(`, `test.only`, `{ todo: true }`, `t.todo(`. */
+const SKIP_MARK = /\.(?:skip|only|todo)\b|\b(?:skip|only|todo)\s*:/g;
+
+/** How a pull request names the slice it builds, as Work rules reads it. */
+const SLICE_LINE = /^Slice:\s*(?:#|https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/)(\d+)\s*$/im;
+
+/** An onboard pull request's title, gitmoji or not, and the release it moves to. */
+const ONBOARD_TITLE = /^(?:\S+\s+)?chore\(niyam\): onboard at v(\d+\.\d+\.\d+)\b/;
+
+/** A release version, as onboard writes it in pins, URLs and file names. */
+const VERSION = /\d+\.\d+\.\d+/g;
+
+/** A sha256, as onboard pins a release tarball. */
+const SHA256 = /\b[0-9a-f]{64}\b/g;
+
+/** A `uses:` line pinned to a full commit sha, with its version comment or not. */
+const USES = /^(\s*(?:-\s*)?uses:\s*)([^@\s]+)@([0-9a-f]{40})(?:(\s+#\s*)(\S.*))?$/;
+
+const DEPENDABOT = 'dependabot[bot]';
+
+/** Whether `path` is a guard file; package.json counts only for its `scripts`, which the caller compares. */
+export function isGuardFile(path) {
+  return path === 'package.json' || GUARD_FILES.some((pattern) => pattern.test(path));
+}
+
+/** Whether `path` is a test file. */
+export function isTestFile(path) {
+  return TEST_FILE.test(path);
+}
+
+/**
+ * The text of `body`'s section `**name:**`, up to the next line that starts
+ * a section, or undefined when it has none or it is empty. The same reading
+ * as Work rules' `section()`, kept here so the guard depends on no src/ file.
+ * @param {string} body @param {string} name @returns {string | undefined}
+ */
+export function section(body, name) {
+  const lines = body.split(/\r?\n/);
+  const head = new RegExp(`^\\s*\\*\\*${name}:\\*\\*`, 'i');
+  const from = lines.findIndex((line) => head.test(line));
+  if (from < 0) return undefined;
+  const rest = lines.slice(from + 1);
+  const to = rest.findIndex((line) => /^\s*\*\*[^*\n]+:\*\*/.test(line));
+  const text = [lines[from].replace(head, ''), ...(to < 0 ? rest : rest.slice(0, to))].join('\n').trim();
+  return text || undefined;
+}
+
+/**
+ * The paths and patterns a **Guards:** section names: each word with a `.`
+ * or a `/` in it, backticks, list marks and commas aside. `dir/` names
+ * everything under it; `*` matches within one folder and `**` across them.
+ * @param {string | undefined} text @returns {string[]}
+ */
+export function guardsNamed(text) {
+  if (!text) return [];
+  return [
+    ...new Set(
+      text
+        .split(/[\s,;`]+/)
+        .map((word) => word.replace(/^[-*(]+|[).:]+$/g, ''))
+        .filter((word) => /[./]/.test(word)),
+    ),
+  ];
+}
+
+/** Whether one of `names` names `path`. @param {string[]} names @param {string} path */
+export function named(names, path) {
+  return names.some((name) => {
+    if (name === path) return true;
+    if (name.endsWith('/')) return path.startsWith(name);
+    if (!name.includes('*')) return false;
+    const glob = name
+      .split(/(\*\*\/?|\*)/)
+      .map((part) => (part.startsWith('**') ? '.*' : part === '*' ? '[^/]*' : part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')))
+      .join('');
+    return new RegExp(`^${glob}$`).test(path);
+  });
+}
+
+/** The slice a pull request body names first, or undefined. @param {string} body */
+export function sliceOf(body) {
+  const match = SLICE_LINE.exec(body ?? '');
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * The runs of a unified-diff patch: each removed block with the added block
+ * right after it. A patch GitHub left out (too large, binary) is undefined.
+ * @param {string | undefined} patch @returns {{ removed: string[], added: string[] }[] | undefined}
+ */
+export function changeRuns(patch) {
+  if (patch === undefined) return undefined;
+  const runs = [];
+  let run;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('-')) {
+      if (!run || run.added.length > 0) runs.push((run = { removed: [], added: [] }));
+      run.removed.push(line.slice(1));
+    } else if (line.startsWith('+')) {
+      if (!run) runs.push((run = { removed: [], added: [] }));
+      run.added.push(line.slice(1));
+    } else {
+      run = undefined;
+    }
+  }
+  return runs;
+}
+
+/** How many times `pattern` matches across `lines`. */
+const count = (lines, pattern) => lines.reduce((total, line) => total + (line.match(pattern)?.length ?? 0), 0);
+
+/**
+ * What a test file's change does to its tests, from its patch, which GitHub
+ * diffs against the merge base: lines that did not change cancel out.
+ * @param {{ removed: string[], added: string[] }[]} runs
+ */
+export function testChange(runs) {
+  const removed = runs.flatMap((run) => run.removed);
+  const added = runs.flatMap((run) => run.added);
+  return { fewer: count(added, TEST_CALL) < count(removed, TEST_CALL), skipped: count(added, SKIP_MARK) > count(removed, SKIP_MARK) };
+}
+
+/** Whether release `a` is newer than `b`, both X.Y.Z. */
+export function newer(a, b) {
+  const [x, y] = [a, b].map((v) => v.split('.').map(Number));
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+
+/**
+ * Whether every run only moves `uses:` lines to another full commit sha of
+ * the same action, each with its version comment: Dependabot's change.
+ * @param {{ removed: string[], added: string[] }[]} runs
+ */
+export function onlyShaMoves(runs) {
+  return runs.every(
+    (run) =>
+      run.removed.length === run.added.length &&
+      run.removed.every((line, i) => {
+        const before = USES.exec(line);
+        const after = USES.exec(run.added[i]);
+        return Boolean(before && after && after[5] && before[1] === after[1] && before[2] === after[2]);
+      }),
+  );
+}
+
+/**
+ * Whether every run only moves the niyam version to `to` and a sha256 with
+ * it: onboard's change. Each removed line must name versions older than
+ * `to`, and become, with every version `to` and any sha256 another, the
+ * added line paired with it.
+ * @param {{ removed: string[], added: string[] }[]} runs @param {string} to
+ */
+export function onlyVersionMoves(runs, to) {
+  return runs.every(
+    (run) =>
+      run.removed.length === run.added.length &&
+      run.removed.every((line, i) => {
+        const added = run.added[i];
+        const from = line.match(VERSION) ?? [];
+        if (from.length === 0 || !from.every((version) => newer(to, version))) return false;
+        if ((added.match(VERSION) ?? []).some((version) => version !== to)) return false;
+        const same = (text) => text.replace(VERSION, 'V').replace(SHA256, 'H');
+        return same(line) === same(added);
+      }),
+  );
+}
+
+/**
+ * The names of the checks the jobs in workflow `text` report: a job's `name`,
+ * else its id. Undefined when it does not parse as a workflow.
+ * @param {string} text @returns {string[] | undefined}
+ */
+export function jobNames(text) {
+  let doc;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    return undefined;
+  }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return undefined;
+  const jobs = doc.jobs ?? {};
+  if (typeof jobs !== 'object' || Array.isArray(jobs) || jobs === null) return undefined;
+  return Object.entries(jobs).map(([id, job]) => (job && typeof job === 'object' && job.name !== undefined ? String(job.name) : id));
+}
+
+/** Whether a job named `name` could report the required check `check`: itself, a matrix leg of it, or a reusable workflow's job under it. */
+export function reports(name, check) {
+  return name.includes('${{') || check === name || check.startsWith(`${name} / `) || check.startsWith(`${name} (`);
+}
+
+/** A workflow file, whose jobs report checks. */
+const isWorkflow = (path) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path);
+
+/** `logins`' first entry that is `login`, case aside. */
+const sameLogin = (logins, login) => typeof login === 'string' && logins.some((one) => one.toLowerCase() === login.toLowerCase());
+
+/** The owners main's `.github/niyam.json` names. @param {string} text */
+export function ownersIn(text) {
+  const owner = JSON.parse(text).owner;
+  const list = Array.isArray(owner) ? owner : [owner];
+  if (list.length === 0 || !list.every((one) => typeof one === 'string' && one !== '')) throw new Error('.github/niyam.json names no owner');
+  return list;
+}
+
+/**
+ * The slice's body as it stood at `at`, from its GraphQL revisions, which
+ * hold the whole text, newest first, the body as written last. Undefined
+ * when the slice did not exist yet or its history cannot be read in full.
+ */
+export function bodyAt(issue, at) {
+  if (issue.createdAt > at) return undefined;
+  if (!issue.lastEditedAt || issue.lastEditedAt <= at) return issue.body;
+  const edits = issue.userContentEdits;
+  if (!edits || edits.totalCount > edits.nodes.length) return undefined;
+  const then = edits.nodes.find((edit) => edit && edit.editedAt <= at);
+  if (!then || then.deletedAt || typeof then.diff !== 'string') return undefined;
+  return then.diff;
+}
+
+const ISSUE_QUERY =
+  'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { body createdAt lastEditedAt userContentEdits(first: 100) { totalCount nodes { editedAt deletedAt diff } } } } }';
+
+/**
+ * A GitHub client over `fetch`: `get` and `post` give the status and the
+ * JSON or text answered.
+ * @param {string} token @param {string} [api]
+ */
+export function client(token, api = 'https://api.github.com', doFetch = fetch) {
+  const call = async (path, { method = 'GET', body, raw = false } = {}) => {
+    const response = await doFetch(`${api}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: raw ? 'application/vnd.github.raw' : 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'niyam-guard',
+        ...(body ? { 'content-type': 'application/json' } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const text = await response.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = undefined;
+    }
+    return { status: response.status, json, text };
+  };
+  return { get: (path, options) => call(path, options), post: (path, body) => call(path, { method: 'POST', body }) };
+}
+
+/** A read that failed: the guard fails closed. */
+class Unread extends Error {}
+
+/** `path`'s JSON, or a failed read. */
+async function read(gh, path) {
+  const { status, json } = await gh.get(path);
+  if (status !== 200 || json === undefined) throw new Unread(`GitHub did not answer ${path.split('?')[0]} (HTTP ${status}${json?.message ? `: ${json.message}` : ''})`);
+  return json;
+}
+
+/** Every item of a REST list, 100 a page, up to `most`. */
+async function every(gh, path, most = 3000) {
+  const items = [];
+  for (let page = 1; items.length < most; page++) {
+    const json = await read(gh, `${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
+    if (!Array.isArray(json)) throw new Unread(`GitHub did not answer a list for ${path}`);
+    items.push(...json);
+    if (json.length < 100) break;
+  }
+  return items;
+}
+
+/** A file's text at commit `ref`, or undefined where it does not exist. */
+async function textAt(gh, repo, path, ref) {
+  const { status, text } = await gh.get(`/repos/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${ref}`, { raw: true });
+  if (status === 404) return undefined;
+  if (status !== 200) throw new Unread(`GitHub did not answer ${path} at ${ref.slice(0, 7)} (HTTP ${status})`);
+  return text;
+}
+
+/** package.json's `scripts`, as one comparable string; a file that is not JSON compares as itself. */
+function scriptsOf(text) {
+  if (text === undefined) return 'none';
+  try {
+    return JSON.stringify(JSON.parse(text).scripts ?? null);
+  } catch {
+    return `unparsed:${text}`;
+  }
+}
+
+/** Whether a sha is an ancestor of main, or main itself. */
+async function onMain(gh, repo, ref) {
+  const { status, json } = await gh.get(`/repos/${repo}/compare/${MAIN}...${encodeURIComponent(ref)}`);
+  return status === 200 && (json?.status === 'behind' || json?.status === 'identical');
+}
+
+/**
+ * When the slice's **Guards:** counts from: the owner's last approval of its
+ * Work item, or, for a slice added to it after that, the first `Decision:`
+ * the owner wrote since, unedited, on the slice or on the Work item naming
+ * it. With what it is, for the refusals, or why there is none.
+ */
+async function approvedAt(gh, repo, slice, owners) {
+  const parent = await gh.get(`/repos/${repo}/issues/${slice}/parent`);
+  if (parent.status !== 200) return { problem: `slice #${slice} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})` };
+  const item = parent.json.number;
+  const events = await every(gh, `/repos/${repo}/issues/${item}/timeline`);
+  const approval = events.filter((event) => (event.event === 'labeled' || event.event === 'unlabeled') && event.label?.name === 'approved').at(-1);
+  if (approval?.event !== 'labeled' || !sameLogin(owners, approval.actor?.login)) {
+    return { problem: `Work item #${item} is not approved by ${owners.join(' or ')}, so slice #${slice}'s **Guards:** names nothing yet` };
+  }
+  const joined = (await every(gh, `/repos/${repo}/issues/${slice}/timeline`)).filter((event) => event.event === 'parent_issue_added').map((event) => event.created_at).sort().at(-1);
+  if (!joined || joined <= approval.created_at) return { at: approval.created_at, item, what: `Work item #${item} got the approved label` };
+  const decision = (comment, mention) =>
+    sameLogin(owners, comment.user?.login) &&
+    /^\s*Decision:/i.test(comment.body ?? '') &&
+    comment.created_at > joined &&
+    comment.updated_at <= comment.created_at &&
+    (!mention || new RegExp(`#${slice}\\b`).test(comment.body));
+  const decisions = [
+    ...(await every(gh, `/repos/${repo}/issues/${slice}/comments`)).filter((comment) => decision(comment, false)),
+    ...events.filter((event) => event.event === 'commented' && decision(event, true)),
+  ].sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+  const first = decisions[0];
+  if (!first) return { problem: `slice #${slice} joined Work item #${item} after its approval, and ${owners.join(' or ')} has written no unedited Decision: settling it since` };
+  return { at: first.created_at, item, what: `${owners.join(' or ')}'s Decision: settled slice #${slice}` };
+}
+
+/**
+ * Judges pull request `pr` of `repo`: the refusals, each naming its file and
+ * how to pass, empty when it passes.
+ * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners
+ * @returns {Promise<{ file?: string, message: string }[]>}
+ */
+export async function judge(gh, repo, pr, owners) {
+  const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
+  const files = await every(gh, `/repos/${repo}/pulls/${pr}/files`, FILES_MOST);
+  if (files.length !== pull.changed_files) {
+    return [{ message: `GitHub listed ${files.length} of this pull request's ${pull.changed_files} changed files, so the guard cannot see every change. Split it into pull requests of fewer files.` }];
+  }
+  const runsOf = new Map(files.map((file) => [file, changeRuns(file.patch)]));
+  const mechanical = (test) => files.every((file) => file.status === 'modified' && runsOf.get(file) && test(runsOf.get(file)));
+  const onboard = ONBOARD_TITLE.exec(pull.title ?? '')?.[1];
+  let exempt;
+  if (pull.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = 'Dependabot moving uses: shas';
+  else if (onboard && mechanical((runs) => onlyVersionMoves(runs, onboard)) && (await onMain(gh, repo, `v${onboard}`))) exempt = `onboard moving niyam to v${onboard}`;
+
+  /** Each file that needs naming, with why. */
+  const needs = [];
+  /** Refusals no **Guards:** line passes. */
+  const refusals = [];
+  let mergeBase;
+  const base = async () => (mergeBase ??= (await read(gh, `/repos/${repo}/compare/${pull.base.sha}...${pull.head.sha}`)).merge_base_commit.sha);
+  let required;
+  const requiredChecks = async () => {
+    if (required) return required;
+    const rules = await read(gh, `/repos/${repo}/rules/branches/${MAIN}`);
+    if (!Array.isArray(rules)) throw new Unread(`GitHub did not answer ${MAIN}'s rules as a list`);
+    const contexts = rules.filter((rule) => rule.type === 'required_status_checks').flatMap((rule) => rule.parameters?.required_status_checks ?? []).map((check) => check.context);
+    return (required = [...new Set([OWN_CHECK, ...contexts])]);
+  };
+
+  for (const file of files) {
+    const paths = [...new Set([file.previous_filename, file.filename].filter(Boolean))];
+    // A guard file: package.json for its scripts alone.
+    for (const path of paths) {
+      if (!isGuardFile(path) || exempt) continue;
+      if (path === 'package.json') {
+        const after = file.status === 'removed' || path !== file.filename ? undefined : await textAt(gh, repo, path, pull.head.sha);
+        if (scriptsOf(await textAt(gh, repo, path, await base())) === scriptsOf(after)) continue;
+        needs.push({ path, why: 'changes the scripts of package.json, a guard file' });
+      } else {
+        needs.push({ path, why: 'changes a guard file' });
+      }
+    }
+    // A test file: deleted, renamed away from a test, or with fewer tests or more skipped.
+    const was = file.previous_filename ?? file.filename;
+    if (isTestFile(was) || isTestFile(file.filename)) {
+      const runs = runsOf.get(file);
+      if (file.status === 'removed' || (isTestFile(was) && !isTestFile(file.filename))) needs.push({ path: was, why: 'deletes a test file' });
+      else if (!runs) needs.push({ path: file.filename, why: 'changes a test file whose diff GitHub does not show, so the guard cannot count its tests' });
+      else {
+        const { fewer, skipped } = testChange(runs);
+        if (fewer) needs.push({ path: file.filename, why: 'leaves a test file with fewer test( or it( calls than main' });
+        if (skipped) needs.push({ path: file.filename, why: 'adds .skip, .only or todo to a test file' });
+      }
+    }
+    // A workflow job named after a required check.
+    if (isWorkflow(file.filename) && file.status !== 'removed') {
+      const now = jobNames((await textAt(gh, repo, file.filename, pull.head.sha)) ?? '');
+      const before = isWorkflow(was) && file.status !== 'added' ? jobNames((await textAt(gh, repo, was, await base())) ?? '') ?? [] : [];
+      if (!now) {
+        refusals.push({ file: file.filename, message: `${file.filename} does not parse as a workflow, so the guard cannot tell which checks its jobs report. Make it valid YAML with a jobs: map.` });
+        continue;
+      }
+      const checks = await requiredChecks();
+      for (const name of now.filter((one) => !before.includes(one))) {
+        const check = checks.find((one) => reports(name, one));
+        if (check === undefined) continue;
+        refusals.push({
+          file: file.filename,
+          message: name.includes('${{')
+            ? `${file.filename} adds the job "${name}", whose name is an expression that could report a check ${MAIN}'s ruleset requires. Give it a fixed name.`
+            : `${file.filename} adds the job "${name}", which reports "${check}", a check ${MAIN}'s ruleset requires: a pull request would report it from its own copy. Rename the job.`,
+        });
+      }
+    }
+  }
+  if (needs.length === 0) return refusals;
+
+  const slice = sliceOf(pull.body ?? '');
+  const how = (path) => `name \`${path}\` in the slice's **Guards:** section, and have ${owners.join(' or ')} approve the slice again; then edit or push this pull request so Guard runs again`;
+  if (slice === undefined) {
+    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${how(path)}.` }))];
+  }
+  const approval = await approvedAt(gh, repo, slice, owners);
+  if (approval.problem) {
+    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${how(path)}.` }))];
+  }
+  const [owner, name] = repo.split('/');
+  const answer = await gh.post('/graphql', { query: ISSUE_QUERY, variables: { owner, name, number: slice } });
+  const issue = answer.status === 200 ? answer.json?.data?.repository?.issue : undefined;
+  const then = issue ? bodyAt(issue, approval.at) : undefined;
+  if (then === undefined) {
+    const why = issue ? `GitHub does not show every revision of slice #${slice}'s body back to when ${approval.what}` : `GitHub's GraphQL API did not give slice #${slice}'s body revisions (HTTP ${answer.status})`;
+    return [...refusals, ...needs.map(({ path, why: what }) => ({ file: path, message: `This pull request ${what}, ${path}, and ${why}, so the guard cannot read its **Guards:** section as approved. To pass, ${how(path)}.` }))];
+  }
+  const names = guardsNamed(section(then, 'Guards'));
+  for (const { path, why } of needs) {
+    if (named(names, path)) continue;
+    refusals.push({
+      file: path,
+      message: `This pull request ${why}, ${path}, and slice #${slice}'s **Guards:** section, as it stood when ${approval.what} (${approval.at}), does not name it. To pass, ${how(path)}.`,
+    });
+  }
+  return refusals;
+}
+
+/** Runs the guard from the environment GitHub Actions gives it. */
+export async function main(env = process.env, out = console, gh = undefined, root = '.') {
+  const repo = env.REPO;
+  const pr = Number(env.PR);
+  if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(pr) || pr <= 0 || (!gh && !env.GH_TOKEN)) {
+    out.error('usage: GH_TOKEN=… REPO=owner/name PR=<number> guard.mjs');
+    return 2;
+  }
+  let refusals;
+  try {
+    const owners = ownersIn(readFileSync(`${root}/.github/niyam.json`, 'utf8'));
+    refusals = await judge(gh ?? client(env.GH_TOKEN, env.GITHUB_API_URL || undefined), repo, pr, owners);
+  } catch (error) {
+    // Anything it could not read refuses: the guard fails closed.
+    out.error(`::error::Guard could not judge this pull request: ${error.message}. Run Guard again once GitHub answers.`);
+    return 1;
+  }
+  for (const { file, message } of refusals) out.error(`::error${file ? ` file=${file}` : ''}::${message}`);
+  if (refusals.length > 0) return 1;
+  out.log('Guard: no change to a guard file needs naming, or the approved slice names each.');
+  return 0;
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) process.exit(await main());
