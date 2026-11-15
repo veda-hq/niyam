@@ -5,6 +5,8 @@ import { GITHUB_WEB } from './host.ts';
 /** The branch onboard's pull request comes from: a run again updates the same one. */
 export const ONBOARD_BRANCH = 'niyam/onboard';
 export const HOOKS_PATH = '.claude/settings.json';
+/** sarathi's hook list, where a project runs its hooks through sarathi: niyam's hooks go there as handlers (P-66). */
+export const SARATHI_PATH = '.claude/sarathi.json';
 /** The client's workflow. */
 export const WORKFLOW_PATH = '.github/workflows/niyam.yml';
 /** The repo's cloud setup file, which installs the pinned CLI in Claude cloud sessions. */
@@ -15,7 +17,7 @@ export const CLOUD_SETUP_PATH = '.github/niyam/cloud-setup.sh';
  */
 export const LEFTOVER_CLOUD_SETUP_PATH = '.github/process-rules/cloud-setup.sh';
 /** Every file onboard's pull request may change. */
-export const ONBOARD_FILES = [SETTINGS_PATH, HOOKS_PATH, WORKFLOW_PATH, CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH];
+export const ONBOARD_FILES = [SETTINGS_PATH, HOOKS_PATH, SARATHI_PATH, WORKFLOW_PATH, CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH];
 /** The files onboard's pull request may delete, each moved to its new name, which the pull request must write or its base hold (P-56, P-57). */
 export const MOVED_FILES: Readonly<Record<string, string>> = { [LEFTOVER_CLOUD_SETUP_PATH]: CLOUD_SETUP_PATH };
 

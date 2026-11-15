@@ -361,7 +361,8 @@ Claude cloud sessions below).
    the lock in `env`, a SessionStart hook running `niyam session-start`, a
    PreToolUse hook running `niyam guard` (each through the launcher `machine`
    writes, else `niyam` on PATH; hooks an older release wrote are replaced
-   in place, 0.6.10's too), and `permissions.allow` rules
+   in place, 0.6.10's too; where sarathi runs the hooks, both go to
+   `.claude/sarathi.json`, below), and `permissions.allow` rules
    for `niyam review-thread` (replacing the rule under the old command) and for
    the app's `mcp__ccd_pr__bind_pr`, `mcp__ccd_pr__get_status` and
    `mcp__ccd_pr__set_monitor`, which turn Auto-fix on (a rerun adds only
@@ -459,7 +460,26 @@ Claude cloud sessions below).
    requests that change the files it matches, and the repo's own rules
    decide whether that review is required. An existing `.claude/settings.json`
    keeps its layout: `onboard` adds only its entries, and replaces the hook
-   entries an older release wrote where they stand. The repository needs at
+   entries an older release wrote where they stand.
+
+   **Under sarathi.** A project that runs its hooks through sarathi, as veda
+   does, keeps one settings entry per event, sarathi's, and lists the
+   handlers in `.claude/sarathi.json`. For each event where that file exists
+   and `.claude/settings.json` runs `sarathi hook <Event>` or
+   `.claude/hooks/sarathi.sh <Event>`, with a matcher that lets niyam's hook
+   fire, `onboard` writes the hook into `.claude/sarathi.json` instead:
+   `SessionStart` as `{ "command": …, "timeout": 600 }` (the time Claude Code
+   gives it in the settings, for session-start's installs), and `PreToolUse`
+   as `{ "matcher": "Bash", "command": …, "failClosed": true }`. It replaces
+   an older release's command there in place, takes niyam's hooks out of
+   `.claude/settings.json`, and raises sarathi's own entry's timeout to the
+   handler's when it is shorter, as `sarathi check --settings` asks. The lock
+   and the `permissions` rules stay in `.claude/settings.json`. The work
+   rules count `.claude/sarathi.json` as one of the files `onboard` writes.
+   `niyam doctor` warns under "This repo" (`▲`) about a hook in both files
+   for the same event, which then runs twice: `onboard` again moves
+   niyam's own; any other is the repo's to take out of
+   `.claude/settings.json`. The repository needs at
    least one commit. The pull request checks read the settings from the base
    branch, so a pull request cannot rename the agent it is checked against.
    The pull request that first commits them, `onboard`'s, passes PR identity, Work rules
@@ -1139,7 +1159,7 @@ or in a file, and it never falls back to the owner's `gh` logins, git
 password or SSH. Use the launcher line above, as the hooks `onboard` writes do:
 the app's hooks may have no node on their `PATH`. `niyam doctor`,
 run in the client repo, warns under "This repo" about each hook in `.claude/settings.json` or
-`.claude/settings.local.json` whose command, or the repo script it runs,
+`.claude/settings.local.json`, and each handler in `.claude/sarathi.json`, whose command, or the repo script it runs,
 calls `gh` or git's remote commands outside `as-agent`. A script that
 imports a Python module tracked in the repo whose code runs `as-agent` (a
 helper wrapping each `gh` call) counts as routed through it; the hook's

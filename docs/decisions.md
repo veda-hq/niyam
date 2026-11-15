@@ -1963,3 +1963,33 @@
     vendored third-party code, or a major release.
   - The section no longer says a merge publishes nothing: since P-61,
     merging a version bump releases it.
+- **2026-11-15 — Record: where sarathi runs the hooks, onboard writes
+  niyam's into `.claude/sarathi.json` (P-66, Work item #368, slice #318).**
+  Onboarding veda (veda-hq/veda#73) put niyam's SessionStart and Bash
+  PreToolUse hooks beside sarathi's entries in `.claude/settings.json`,
+  where veda's rule is one hook per event, sarathi, running the handlers
+  `.claude/sarathi.json` lists; a move by hand came back at the next onboard.
+  - sarathi runs an event where `.claude/sarathi.json` exists and the
+    settings run `sarathi hook <Event>` or `.claude/hooks/sarathi.sh
+    <Event>` for it, read as `sarathi check` reads it, with a matcher that
+    lets niyam's hook fire. There, `claudeSettings` writes the hook as a
+    handler, swaps an older command in place from the same older lists,
+    takes niyam's hooks out of the settings, and raises sarathi's own
+    entry's timeout to the handler's when shorter. The lock and the
+    permission rules stay in the settings.
+  - The SessionStart handler has `"timeout": 600`, the time Claude Code
+    gives the hook in the settings: sarathi's 60 s default is short of
+    session-start's 180 s drift install and a cloud session's install. The
+    guard handler keeps 60 s, as it reads only local state, and has
+    `failClosed`.
+  - Checked first against sarathi 0.6.9, veda's pin: a handler gets
+    `CLAUDE_ENV_FILE` (sarathi passes its environment on); a SessionStart
+    handler's plain stdout reaches the session (or `additionalContext`);
+    exit 2 with stderr is a refusal; and `timeout` has no cap.
+  - `doctor` reads both files: its check for hooks reaching GitHub outside
+    `as-agent` reads sarathi's handlers too, and it warns about a hook in
+    both files for one event, which runs twice.
+  - Rejected: adding a sarathi entry to the settings where none runs an
+    event (that is the project's choice of hooks, not niyam's), and moving
+    niyam's hook where sarathi's matcher would hide it (a SessionStart entry
+    for `startup` alone would skip session-start on resume).

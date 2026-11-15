@@ -138,21 +138,40 @@ function addMember(text: string, objectStart: number, name: string, value: unkno
     : `${text.slice(0, objectStart)}{${eol}${member}${eol}${outer}}${text.slice(close + 1)}`;
 }
 
+/** An array index in a path: digits alone. */
+const INDEX = /^\d+$/;
+
+/** The span of `name` in the value starting at `start`: a member of an object, or an element of an array by its index. */
+function childSpan(text: string, start: number, name: string): Span | undefined {
+  if (text[start] === '{') return memberSpan(text, start, name);
+  return text[start] === '[' && INDEX.test(name) ? elementSpans(text, start)[Number(name)] : undefined;
+}
+
 /**
- * The text with each value at `path` that `replace` maps to something new
- * swapped for it where it stands, and how many were swapped. `*` in `path`
- * stands for every element of an array; a value of another shape on the way
- * is passed over.
+ * The spans of the values at `path`: `*` stands for every element of an
+ * array, digits for one element; a value of another shape on the way is
+ * passed over.
  */
-export function replaceValues(text: string, path: string[], replace: (value: unknown) => unknown): { text: string; replaced: number } {
+function spansAt(text: string, path: string[]): Span[] {
   let spans: Span[] = [{ start: skipSpace(text, 0), end: text.length }];
   for (const name of path) {
     spans = spans.flatMap(({ start }) => {
       if (name === '*') return text[start] === '[' ? elementSpans(text, start) : [];
-      const span = text[start] === '{' ? memberSpan(text, start, name) : undefined;
+      const span = childSpan(text, start, name);
       return span ? [span] : [];
     });
   }
+  return spans;
+}
+
+/**
+ * The text with each value at `path` that `replace` maps to something new
+ * swapped for it where it stands, and how many were swapped. `*` in `path`
+ * stands for every element of an array, digits for one element; a value of
+ * another shape on the way is passed over.
+ */
+export function replaceValues(text: string, path: string[], replace: (value: unknown) => unknown): { text: string; replaced: number } {
+  const spans = spansAt(text, path);
   let out = text;
   let replaced = 0;
   // Last first, so each swap leaves the spans before it where they were.
@@ -166,8 +185,37 @@ export function replaceValues(text: string, path: string[], replace: (value: unk
 }
 
 /**
+ * The text without the elements of each array at `path` that `drop` takes,
+ * and how many went. The elements kept stay as written, with the array's
+ * own separators between them; an array left with none becomes `[]`. `path`
+ * reads as in replaceValues.
+ */
+export function removeElements(text: string, path: string[], drop: (value: unknown) => boolean): { text: string; removed: number } {
+  let out = text;
+  let removed = 0;
+  // Last first, so each edit leaves the spans before it where they were.
+  for (const array of spansAt(text, path).reverse()) {
+    if (text[array.start] !== '[') continue;
+    const elements = elementSpans(text, array.start);
+    const kept = elements.filter((span) => !drop(JSON.parse(text.slice(span.start, span.end))));
+    if (kept.length === elements.length) continue;
+    removed += elements.length - kept.length;
+    const first = elements[0] as Span;
+    const last = elements.at(-1) as Span;
+    const between = elements.length > 1 ? text.slice(first.end, (elements[1] as Span).start) : '';
+    const inside =
+      kept.length === 0
+        ? '[]'
+        : `${text.slice(array.start, first.start)}${kept.map((span) => text.slice(span.start, span.end)).join(between)}${text.slice(last.end, array.end)}`;
+    out = `${out.slice(0, array.start)}${inside}${out.slice(array.end)}`;
+  }
+  return { text: out, removed };
+}
+
+/**
  * The text with `object.key` set to `value`: swapped where it stands when
  * the key is there, else added last, creating the objects on the way.
+ * Digits in `path` walk into an array's element, which must be there.
  * Refuses, changing nothing, when a value on the way is not an object.
  */
 export function setMember(text: string, path: string[], key: string, value: unknown): string {
@@ -175,9 +223,14 @@ export function setMember(text: string, path: string[], key: string, value: unkn
   const layout = layoutOf(text);
   let objectStart = skipSpace(text, 0);
   for (const [i, name] of path.entries()) {
-    const span = memberSpan(text, objectStart, name);
-    if (!span) return addMember(text, objectStart, name, nest([...path.slice(i + 1), key], value), layout);
-    if (text[span.start] !== '{') throw new Error(`${path.slice(0, i + 1).join('.')} is not an object`);
+    const span = childSpan(text, objectStart, name);
+    if (!span) {
+      if (text[objectStart] !== '{') throw new Error(`${path.slice(0, i + 1).join('.')} is not there`);
+      return addMember(text, objectStart, name, nest([...path.slice(i + 1), key], value), layout);
+    }
+    // An array is walked into only by an index.
+    const into = text[span.start] === '[' && INDEX.test(path[i + 1] ?? '');
+    if (text[span.start] !== '{' && !into) throw new Error(`${path.slice(0, i + 1).join('.')} is not an object`);
     objectStart = span.start;
   }
   const member = memberSpan(text, objectStart, key);

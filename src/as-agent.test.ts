@@ -263,6 +263,15 @@ describe('hooksHittingLock', () => {
     assert.deepEqual(hooksHittingLock(withHooks({ SessionStart: [HOOK_COMMAND_069], PreToolUse: [GUARD_COMMAND_069] })), []);
   });
 
+  it("reads sarathi.json's handlers too, taking niyam's own as its own (P-66)", () => {
+    const sys = withHooks({ PreToolUse: ['"$CLAUDE_PROJECT_DIR"/.claude/hooks/sarathi.sh PreToolUse'] });
+    const list = { hooks: { SessionStart: [{ command: HOOK_COMMAND, timeout: 600 }], PreToolUse: [{ matcher: 'Bash', command: GUARD_COMMAND }, { guard: 'command' }, { command: 'gh pr view' }], Stop: 'none' } };
+    sys.files.set(`${ROOT}/.claude/sarathi.json`, JSON.stringify(list));
+    assert.deepEqual(hooksHittingLock(sys), ['.claude/sarathi.json PreToolUse handler "gh pr view"']);
+    sys.files.set(`${ROOT}/.claude/sarathi.json`, '{ not json');
+    assert.deepEqual(hooksHittingLock(sys), []);
+  });
+
   it('names the client hooks that reach GitHub outside as-agent, by command or by the script they run', () => {
     const sys = withHooks(
       {

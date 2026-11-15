@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { appendToArray, replaceValues, setMember } from './jsonedit.ts';
+import { appendToArray, removeElements, replaceValues, setMember } from './jsonedit.ts';
 
 const entry = { hooks: [{ type: 'command', command: 'run "it"' }] };
 
@@ -72,6 +72,38 @@ describe('replaceValues', () => {
     assert.deepEqual(replaceValues('{ "hooks": [] }', path, swap), { text: '{ "hooks": [] }', replaced: 0 });
     assert.deepEqual(replaceValues('[1]', ['*'], () => 2), { text: '[2]', replaced: 1 });
   });
+
+  it('walks into one element by its index', () => {
+    const text = '{"hooks":{"Stop":[{"timeout":1},{"timeout":1}]}}';
+    assert.deepEqual(replaceValues(text, ['hooks', 'Stop', '1', 'timeout'], () => 9), { text: '{"hooks":{"Stop":[{"timeout":1},{"timeout":9}]}}', replaced: 1 });
+    assert.deepEqual(replaceValues(text, ['hooks', 'Stop', '2', 'timeout'], () => 9), { text, replaced: 0 }, 'past the end');
+    assert.deepEqual(replaceValues(text, ['hooks', '0'], () => 9), { text, replaced: 0 }, 'an index into an object');
+  });
+});
+
+describe('removeElements', () => {
+  const own = (value: unknown) => (value as { command?: unknown } | null)?.command === 'niyam';
+
+  it('drops the elements taken, keeping the rest and its layout', () => {
+    const text = '{\n  "hooks": {\n    "Stop": [\n      { "command": "a" },\n      { "command": "niyam" },\n      { "command": "b" }\n    ]\n  }\n}\n';
+    const { text: out, removed } = removeElements(text, ['hooks', 'Stop'], own);
+    assert.equal(removed, 1);
+    assert.equal(out, '{\n  "hooks": {\n    "Stop": [\n      { "command": "a" },\n      { "command": "b" }\n    ]\n  }\n}\n');
+  });
+
+  it('drops the first and the last element alike, and every array the path reaches', () => {
+    const text = '{"hooks":[{"hooks":[{"command":"niyam"},{"command":"a"}]},{"hooks":[{"command":"a"},{"command":"niyam"}]},{"hooks":[{"command":"niyam"}]}]}';
+    const { text: out, removed } = removeElements(text, ['hooks', '*', 'hooks'], own);
+    assert.equal(removed, 3);
+    assert.equal(out, '{"hooks":[{"hooks":[{"command":"a"}]},{"hooks":[{"command":"a"}]},{"hooks":[]}]}');
+  });
+
+  it('leaves a text with nothing to drop, or no array at the path, as it is', () => {
+    const text = '{ "hooks": { "Stop": [ { "command": "a" } ], "x": { "command": "niyam" } } }';
+    assert.deepEqual(removeElements(text, ['hooks', 'Stop'], own), { text, removed: 0 });
+    assert.deepEqual(removeElements(text, ['hooks', 'x'], own), { text, removed: 0 });
+    assert.deepEqual(removeElements(text, ['nothing'], own), { text, removed: 0 });
+  });
 });
 
 describe('setMember', () => {
@@ -87,6 +119,14 @@ describe('setMember', () => {
   it('creates the objects on the way', () => {
     assert.deepEqual(JSON.parse(setMember('{}', ['env'], 'A', '1')), { env: { A: '1' } });
     assert.deepEqual(JSON.parse(setMember('{ "x": 1 }', ['a', 'b'], 'c', 2)), { x: 1, a: { b: { c: 2 } } });
+  });
+
+  it('walks into an array element by its index, which must be there', () => {
+    const text = '{\n  "hooks": [\n    { "command": "a" },\n    { "command": "b", "timeout": 1 }\n  ]\n}\n';
+    assert.equal(setMember(text, ['hooks', '1'], 'timeout', 9), text.replace('"timeout": 1', '"timeout": 9'));
+    assert.deepEqual(JSON.parse(setMember(text, ['hooks', '0'], 'timeout', 9)).hooks, [{ command: 'a', timeout: 9 }, { command: 'b', timeout: 1 }]);
+    assert.throws(() => setMember(text, ['hooks', '2'], 'timeout', 9), /^Error: hooks\.2 is not there$/);
+    assert.throws(() => setMember(text, ['hooks'], 'timeout', 9), /^Error: hooks is not an object$/);
   });
 
   it('refuses a value on the way that is not an object, and undefined', () => {

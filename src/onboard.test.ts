@@ -15,7 +15,7 @@ import type { HttpResult } from './types.ts';
 import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SETUP_FIRST, WORKFLOW_PATH, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
@@ -1333,6 +1333,145 @@ describe('onboard', () => {
       const sys = personal();
       await run(sys);
       assert.equal(sys.requests.filter((r) => r.url.endsWith('/users/example-org')).length, 1);
+    });
+  });
+
+  describe('where sarathi runs the hooks (P-66)', () => {
+    const SARATHI = `${ROOT}/${SARATHI_PATH}`;
+    const runner = (event: string, timeout: number, matcher?: string) => ({
+      ...(matcher === undefined ? {} : { matcher }),
+      hooks: [{ type: 'command', command: `"$CLAUDE_PROJECT_DIR"/.claude/hooks/sarathi.sh ${event}`, timeout }],
+    });
+    /** veda's settings as onboarding left them: sarathi's entry per event, and niyam's two hooks beside them. */
+    const VEDA = {
+      permissions: { allow: ALLOW },
+      hooks: {
+        SessionStart: [runner('SessionStart', 120), SESSION_ENTRY],
+        PreToolUse: [runner('PreToolUse', 70, 'Bash|Edit|Write|MultiEdit|NotebookEdit'), GUARD_ENTRY],
+        Stop: [runner('Stop', 15)],
+      },
+      env: BASE_ENV,
+    };
+    const LIST = { kavach: { python: 'python3' }, hooks: { PreToolUse: [{ matcher: 'Bash', guard: 'command' }], Stop: [{ command: 'echo stop', timeout: 10 }] } };
+    const UNDER_SARATHI = {
+      ...VEDA,
+      hooks: { SessionStart: [runner('SessionStart', 600)], PreToolUse: [runner('PreToolUse', 70, 'Bash|Edit|Write|MultiEdit|NotebookEdit')], Stop: [runner('Stop', 15)] },
+    };
+    const HANDLERS = { ...LIST, hooks: { ...LIST.hooks, PreToolUse: [...LIST.hooks.PreToolUse, SARATHI_HANDLERS.PreToolUse], SessionStart: [SARATHI_HANDLERS.SessionStart] } };
+
+    it('writes the handlers sarathi needs, the command each hook runs today', () => {
+      assert.deepEqual(SARATHI_HANDLERS, {
+        SessionStart: { command: HOOK_COMMAND, timeout: 600 },
+        PreToolUse: { matcher: 'Bash', command: GUARD_COMMAND, failClosed: true },
+      });
+    });
+
+    it("moves niyam's hooks out of settings.json into sarathi.json, and gives sarathi's SessionStart entry their time", () => {
+      const before = `${JSON.stringify(VEDA, null, 2)}\n`;
+      const { text, changes, labels, sarathi } = claudeSettings(before, `${JSON.stringify(LIST, null, 2)}\n`);
+      assert.deepEqual(JSON.parse(text), UNDER_SARATHI);
+      assert.deepEqual(changes, [
+        `take out the SessionStart hook that runs niyam session-start, which ${SARATHI_PATH} now runs under sarathi`,
+        "give sarathi's SessionStart hook 600 s, so niyam's handler under it has its time",
+        `take out the PreToolUse hook that refuses gh and git's remote commands outside the agent identity, which ${SARATHI_PATH} now runs under sarathi`,
+      ]);
+      assert.deepEqual(labels, ['hooks moved to sarathi.json', 'sarathi timeout']);
+      assert.deepEqual(JSON.parse(sarathi?.text ?? ''), HANDLERS);
+      assert.deepEqual(sarathi?.changes, [
+        'add the SessionStart hook that runs niyam session-start, as a handler sarathi runs',
+        "add the PreToolUse hook that refuses gh and git's remote commands outside the agent identity, as a handler sarathi runs",
+      ]);
+      assert.deepEqual(sarathi?.labels, ['hooks added']);
+      assert.ok((sarathi?.text ?? '').startsWith('{\n  "kavach": {\n    "python": "python3"\n  },'), 'in the file\'s layout');
+      // Run again: nothing more in either file.
+      assert.deepEqual(claudeSettings(text, sarathi?.text), { text, changes: [], labels: [] });
+    });
+
+    it('swaps an older command in sarathi.json in place, and adds nothing to settings.json', () => {
+      const list = { hooks: { SessionStart: [{ command: OLDER_HOOK_COMMANDS[0], timeout: 600 }], PreToolUse: [{ matcher: 'Bash', command: OLDER_GUARD_COMMANDS[0], failClosed: true }] } };
+      const before = JSON.stringify(UNDER_SARATHI);
+      const { text, changes, sarathi } = claudeSettings(before, JSON.stringify(list));
+      assert.equal(text, before);
+      assert.deepEqual(changes, []);
+      assert.deepEqual(JSON.parse(sarathi?.text ?? ''), { hooks: { SessionStart: [SARATHI_HANDLERS.SessionStart], PreToolUse: [SARATHI_HANDLERS.PreToolUse] } });
+      assert.deepEqual(sarathi?.changes, [
+        "replace the older SessionStart hook that runs niyam session-start with this release's",
+        "replace the older PreToolUse hook that refuses gh and git's remote commands outside the agent identity with this release's",
+      ]);
+      assert.deepEqual(sarathi?.labels, ['hooks updated']);
+    });
+
+    it("takes an older release's hook out of settings.json, and niyam's hook alone out of a group it shares", () => {
+      const settings = {
+        ...UNDER_SARATHI,
+        hooks: { ...UNDER_SARATHI.hooks, SessionStart: [{ hooks: [{ type: 'command', command: 'echo hi' }, { type: 'command', command: OLDER_HOOK_COMMANDS[1] }] }, runner('SessionStart', 600)] },
+      };
+      const { text, changes } = claudeSettings(JSON.stringify(settings), JSON.stringify(HANDLERS));
+      assert.deepEqual(JSON.parse(text).hooks.SessionStart, [{ hooks: [{ type: 'command', command: 'echo hi' }] }, runner('SessionStart', 600)]);
+      assert.deepEqual(changes, [`take out the SessionStart hook that runs niyam session-start, which ${SARATHI_PATH} now runs under sarathi`]);
+    });
+
+    it("gives a handler moved there by hand session-start's 600 s, and sarathi's PreToolUse entry the guard's 60 s", () => {
+      const settings = { ...UNDER_SARATHI, hooks: { ...UNDER_SARATHI.hooks, PreToolUse: [runner('PreToolUse', 30, 'Bash')] } };
+      const list = { hooks: { SessionStart: [{ command: HOOK_COMMAND }], PreToolUse: [SARATHI_HANDLERS.PreToolUse] } };
+      const { text, changes, labels, sarathi } = claudeSettings(JSON.stringify(settings), JSON.stringify(list));
+      assert.deepEqual(JSON.parse(text).hooks.PreToolUse, [runner('PreToolUse', 60, 'Bash')]);
+      assert.deepEqual(changes, ["give sarathi's PreToolUse hook 60 s, so niyam's handler under it has its time"]);
+      assert.deepEqual(labels, ['sarathi timeout']);
+      assert.deepEqual(JSON.parse(sarathi?.text ?? '').hooks.SessionStart, [SARATHI_HANDLERS.SessionStart]);
+      assert.deepEqual(sarathi?.changes, ['give the SessionStart hook that runs niyam session-start 600 s, as long as Claude Code gives it in the settings']);
+      assert.deepEqual(sarathi?.labels, ['timeout']);
+    });
+
+    it("keeps a hook in settings.json for an event sarathi doesn't run, or runs with a matcher that hides it", () => {
+      // sarathi runs PreToolUse for Edit alone, and no SessionStart.
+      const settings = { hooks: { PreToolUse: [runner('PreToolUse', 70, 'Edit|Write')], Stop: [runner('Stop', 15)] }, env: BASE_ENV, permissions: { allow: ALLOW } };
+      const { text, changes, sarathi } = claudeSettings(JSON.stringify(settings), JSON.stringify(LIST));
+      assert.deepEqual(JSON.parse(text).hooks, { ...settings.hooks, PreToolUse: [runner('PreToolUse', 70, 'Edit|Write'), GUARD_ENTRY], SessionStart: [SESSION_ENTRY] });
+      assert.equal(changes.length, 2);
+      assert.equal(sarathi, undefined);
+      // An entry with no matcher, or a regular expression that takes Bash, lets the guard fire.
+      for (const matcher of [undefined, '*', 'Ba.*']) {
+        const all = { hooks: { PreToolUse: [runner('PreToolUse', 70, matcher)] } };
+        assert.deepEqual(JSON.parse(claudeSettings(JSON.stringify(all), '{ "hooks": {} }').sarathi?.text ?? '').hooks.PreToolUse, [SARATHI_HANDLERS.PreToolUse], String(matcher));
+      }
+      // A SessionStart entry for one source alone would hide session-start on resume.
+      const startup = { hooks: { SessionStart: [runner('SessionStart', 600, 'startup')] } };
+      assert.deepEqual(JSON.parse(claudeSettings(JSON.stringify(startup), '{ "hooks": {} }').text).hooks.SessionStart, [runner('SessionStart', 600, 'startup'), SESSION_ENTRY]);
+    });
+
+    it("leaves settings.json alone where there is no sarathi.json, even when it runs sarathi", () => {
+      const { text, sarathi } = claudeSettings(JSON.stringify(VEDA));
+      assert.deepEqual(JSON.parse(text), VEDA);
+      assert.equal(sarathi, undefined);
+    });
+
+    it('refuses a sarathi.json it cannot edit', () => {
+      const settings = JSON.stringify(UNDER_SARATHI);
+      assert.throws(() => claudeSettings(settings, '{'), /^Error: \.claude\/sarathi\.json is not JSON \(/);
+      assert.throws(() => claudeSettings(settings, '[]'), /^Error: \.claude\/sarathi\.json is not a JSON object$/);
+      assert.throws(() => claudeSettings(settings, '{ "hooks": [] }'), /^Error: \.claude\/sarathi\.json: hooks is not an object$/);
+    });
+
+    it("opens a pull request that changes both files, and runs again changing nothing", async () => {
+      const sys = fresh();
+      sys.files.set(HOOKS, `${JSON.stringify(VEDA, null, 2)}\n`);
+      sys.files.set(SARATHI, `${JSON.stringify(LIST, null, 2)}\n`);
+      const { code, out } = await run(sys);
+      assert.equal(code, 0, out.join('\n'));
+      const pull = planned(out, 'Pull request');
+      assert.ok(pull.includes('settings.json: hooks moved to sarathi.json, sarathi timeout'), pull.join('\n'));
+      assert.ok(pull.includes('sarathi.json: hooks added'), pull.join('\n'));
+      assert.deepEqual(JSON.parse(repo(sys).get(HOOKS) ?? ''), UNDER_SARATHI);
+      assert.deepEqual(JSON.parse(repo(sys).get(SARATHI) ?? ''), HANDLERS);
+      assert.ok(opened(sys)?.body.includes(`\n- \`${SARATHI_PATH}\`: add the SessionStart hook that runs niyam session-start, as a handler sarathi runs; `), opened(sys)?.body);
+      merge(sys);
+      const again = fresh();
+      again.files = sys.files;
+      const second = await run(again);
+      assert.equal(second.code, 0, second.err.join('\n'));
+      assert.ok(second.out.some((line) => line.startsWith('◇  ')), 'it planned');
+      assert.ok(!planned(second.out, 'Pull request').some((item) => /^s(ettings|arathi)\.json/.test(item)), second.out.join('\n'));
     });
   });
 

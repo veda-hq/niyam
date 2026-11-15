@@ -8,7 +8,7 @@ import { KEYCHAIN } from './token-store.ts';
 import { ISSUE_TYPES, RERUN } from './issue-types.ts';
 import { declinedPath, movedPath, ownerFixes } from './lockout.ts';
 import { CLOUD_SETUP_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
-import { AUTO_FIX_RULES, workflow } from './onboard.ts';
+import { AUTO_FIX_RULES, HOOK_COMMAND, OLDER_GUARD_COMMANDS, workflow } from './onboard.ts';
 import { AGENT, AGENT_ID, CLASSIC, FakeSys, HOME, KEY, NOW, ROOT, TOKEN, capture } from './fake.test.ts';
 import { packageVersion } from './version.ts';
 import { SESSION_0610, SESSION_069 } from './older-texts.test.ts';
@@ -99,6 +99,32 @@ describe('doctor', () => {
       '│',
       '└  1 to fix',
     ]);
+  });
+
+  it('warns of a hook in both settings.json and sarathi.json for one event, which runs twice (P-66)', async () => {
+    const sys = healthy();
+    const entry = (command: string) => ({ hooks: [{ type: 'command', command }] });
+    sys.files.set(
+      `${ROOT}/.claude/settings.json`,
+      JSON.stringify({
+        hooks: { SessionStart: [entry('sarathi hook SessionStart'), entry(HOOK_COMMAND)], PreToolUse: [entry('sarathi hook PreToolUse'), entry(OLDER_GUARD_COMMANDS[0] as string)], Stop: [entry('echo done'), entry('echo done')] },
+        permissions: { allow: [...AUTO_FIX_RULES] },
+      }),
+    );
+    sys.files.set(
+      `${ROOT}/.claude/sarathi.json`,
+      JSON.stringify({ hooks: { SessionStart: [{ command: HOOK_COMMAND, timeout: 600 }], PreToolUse: [{ matcher: 'Bash', command: OLDER_GUARD_COMMANDS[0] }], Stop: [{ command: 'echo done' }], Notification: [{ command: 'echo note' }] } }),
+    );
+    const { code, out } = await check(sys);
+    assert.equal(code, 0, 'still passes');
+    assert.deepEqual(marked(out, '▲'), [
+      "▲  niyam's SessionStart hook is in both .claude/settings.json and .claude/sarathi.json for SessionStart, so it runs twice → niyam onboard again",
+      "▲  niyam's guard hook is in both .claude/settings.json and .claude/sarathi.json for PreToolUse, so it runs twice → niyam onboard again",
+      '▲  the Stop hook "echo done" is in both .claude/settings.json and .claude/sarathi.json for Stop, so it runs twice → take it out of .claude/settings.json; sarathi runs it',
+    ]);
+    // The same command under another event, or a handler alone, runs once.
+    sys.files.set(`${ROOT}/.claude/sarathi.json`, JSON.stringify({ hooks: { Stop: [{ command: HOOK_COMMAND }], Notification: [{ command: 'echo done' }] } }));
+    assert.equal((await check(sys)).out.at(-1), '└  All good');
   });
 
   it("names the Auto-fix rules the repo's Claude Code settings lack, and still passes", async () => {
