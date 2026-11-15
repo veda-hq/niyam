@@ -45,9 +45,6 @@ const SLICE_LINE = /^Slice:\s*(?:#|https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issu
 /** An onboard pull request's title, gitmoji or not, and the release it moves to. */
 const ONBOARD_TITLE = /^(?:\S+\s+)?chore\(niyam\): onboard at v(\d+\.\d+\.\d+)\b/;
 
-/** A release version, as onboard writes it in pins, URLs and file names. */
-const VERSION = /\d+\.\d+\.\d+/g;
-
 /** A sha256, as onboard pins a release tarball. */
 const SHA256 = /\b[0-9a-f]{64}\b/g;
 
@@ -183,25 +180,32 @@ export function onlyShaMoves(runs) {
 }
 
 /**
- * Whether every run only moves the niyam version to `to` and a sha256 with
- * it: onboard's change. Each removed line must name versions older than
- * `to`, and become, with every version `to` and any sha256 another, the
- * added line paired with it.
- * @param {{ removed: string[], added: string[] }[]} runs @param {string} to
+ * How many versions the runs move to `to`, onboard's change, or -1 when a
+ * line changes more. Each removed line and the added line paired with it
+ * must match but for versions and sha256s: a version is the same in both,
+ * or moves from an older one to `to`; a sha256 may be any other.
+ * @param {{ removed: string[], added: string[] }[]} runs @param {string} to @returns {number}
  */
-export function onlyVersionMoves(runs, to) {
-  return runs.every(
-    (run) =>
-      run.removed.length === run.added.length &&
-      run.removed.every((line, i) => {
-        const added = run.added[i];
-        const from = line.match(VERSION) ?? [];
-        if (from.length === 0 || !from.every((version) => newer(to, version))) return false;
-        if ((added.match(VERSION) ?? []).some((version) => version !== to)) return false;
-        const same = (text) => text.replace(VERSION, 'V').replace(SHA256, 'H');
-        return same(line) === same(added);
-      }),
-  );
+export function versionMoves(runs, to) {
+  let moved = 0;
+  for (const run of runs) {
+    if (run.removed.length !== run.added.length) return -1;
+    for (const [i, line] of run.removed.entries()) {
+      const before = line.split(/(\d+\.\d+\.\d+)/);
+      const after = run.added[i].split(/(\d+\.\d+\.\d+)/);
+      if (before.length !== after.length) return -1;
+      for (const [at, part] of before.entries()) {
+        const other = after[at];
+        if (at % 2 === 0) {
+          if (part.replace(SHA256, 'H') !== other.replace(SHA256, 'H')) return -1;
+        } else if (part !== other) {
+          if (other !== to || !newer(to, part)) return -1;
+          moved++;
+        }
+      }
+    }
+  }
+  return moved;
 }
 
 /**
@@ -329,9 +333,20 @@ function scriptsOf(text) {
   }
 }
 
-/** Whether a sha is an ancestor of main, or main itself. */
-async function onMain(gh, repo, ref) {
-  const { status, json } = await gh.get(`/repos/${repo}/compare/${MAIN}...${encodeURIComponent(ref)}`);
+/**
+ * Whether tag `tag` names a commit on main: main itself or an ancestor. The
+ * tag is read as a tag, an annotated one to its commit, so a branch of the
+ * same name cannot stand in for it.
+ */
+async function tagOnMain(gh, repo, tag) {
+  const ref = await gh.get(`/repos/${repo}/git/ref/tags/${encodeURIComponent(tag)}`);
+  let object = ref.status === 200 ? ref.json?.object : undefined;
+  if (object?.type === 'tag') {
+    const annotated = await gh.get(`/repos/${repo}/git/tags/${object.sha}`);
+    object = annotated.status === 200 ? annotated.json?.object : undefined;
+  }
+  if (object?.type !== 'commit' || !/^[0-9a-f]{40}$/.test(object.sha ?? '')) return false;
+  const { status, json } = await gh.get(`/repos/${repo}/compare/${MAIN}...${object.sha}`);
   return status === 200 && (json?.status === 'behind' || json?.status === 'identical');
 }
 
@@ -382,9 +397,13 @@ export async function judge(gh, repo, pr, owners) {
   const runsOf = new Map(files.map((file) => [file, changeRuns(file.patch)]));
   const mechanical = (test) => files.every((file) => file.status === 'modified' && runsOf.get(file) && test(runsOf.get(file)));
   const onboard = ONBOARD_TITLE.exec(pull.title ?? '')?.[1];
-  let exempt;
-  if (pull.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = 'Dependabot moving uses: shas';
-  else if (onboard && mechanical((runs) => onlyVersionMoves(runs, onboard)) && (await onMain(gh, repo, `v${onboard}`))) exempt = `onboard moving niyam to v${onboard}`;
+  let exempt = false;
+  if (pull.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = true;
+  else if (onboard && mechanical((runs) => versionMoves(runs, onboard) >= 0)) {
+    // The version must move somewhere, so a PR that only swaps sha256s is no onboard change.
+    const moved = files.reduce((total, file) => total + versionMoves(runsOf.get(file), onboard), 0);
+    exempt = moved > 0 && (await tagOnMain(gh, repo, `v${onboard}`));
+  }
 
   /** Each file that needs naming, with why. */
   const needs = [];
@@ -435,7 +454,15 @@ export async function judge(gh, repo, pr, owners) {
         continue;
       }
       const checks = await requiredChecks();
-      for (const name of now.filter((one) => !before.includes(one))) {
+      // A job is added when its name is there more times than before: a second job of a name counts.
+      const left = [...before];
+      const added = now.filter((one) => {
+        const at = left.indexOf(one);
+        if (at < 0) return true;
+        left.splice(at, 1);
+        return false;
+      });
+      for (const name of added) {
         const check = checks.find((one) => reports(name, one));
         if (check === undefined) continue;
         refusals.push({

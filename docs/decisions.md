@@ -1856,8 +1856,9 @@
     changed line only moves a `uses:` to another full sha of the same
     action, with its version comment. Onboard's
     (`chore(niyam): onboard at vX.Y.Z`) when every changed line only moves
-    older versions to that release, and any sha256 with them, and the tag
-    `vX.Y.Z` is on `main`. The sha256 is not checked against the release:
+    older versions to that release (other versions on a line stay), and any
+    sha256 with them, at least one version moves, and the tag `vX.Y.Z`,
+    read as a tag and not a branch of that name, is a commit on `main`. The sha256 is not checked against the release:
     the tarball URL can only move to that release, and a wrong sha256 fails
     the install.
   - Guard first reports on the pull request after this one. Once it passes

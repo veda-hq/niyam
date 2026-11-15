@@ -17,12 +17,12 @@ import {
   named,
   newer,
   onlyShaMoves,
-  onlyVersionMoves,
   ownersIn,
   reports,
   section,
   sliceOf,
   testChange,
+  versionMoves,
 } from './guard.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'guard-'));
@@ -183,15 +183,40 @@ describe('reading a change', () => {
     assert.ok(!onlyShaMoves([{ removed: ['run: pnpm check'], added: ['run: true'] }]));
   });
 
-  test('onlyVersionMoves takes onboard version and sha256 moves alone', () => {
+  test('versionMoves counts onboard version moves, and refuses anything more', () => {
     const run = (removed, added) => [{ removed, added }];
-    assert.ok(onlyVersionMoves(run(['    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.16'], ['    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.17']), '0.6.17'));
-    assert.ok(onlyVersionMoves(run([`echo "${'1'.repeat(64)}  x" v0.6.16`], [`echo "${'2'.repeat(64)}  x" v0.6.17`]), '0.6.17'));
-    assert.ok(!onlyVersionMoves(run(['run: pnpm check 0.6.16'], ['run: true 0.6.17']), '0.6.17'));
-    assert.ok(!onlyVersionMoves(run(['a 0.6.18'], ['a 0.6.17']), '0.6.17'));
-    assert.ok(!onlyVersionMoves(run(['a 0.6.16'], ['a 0.6.19']), '0.6.17'));
-    assert.ok(!onlyVersionMoves(run([`x ${'1'.repeat(64)}`], [`x ${'2'.repeat(64)}`]), '0.6.17'));
-    assert.ok(!onlyVersionMoves(run(['a 0.6.16'], []), '0.6.17'));
+    const H1 = '1'.repeat(64);
+    const H2 = '2'.repeat(64);
+    assert.equal(versionMoves(run(['    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.16'], ['    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.17']), '0.6.17'), 1);
+    // A sha256 alone may move; other versions on the line stay.
+    assert.equal(versionMoves(run([`echo "${H1}  $dir/niyam.tgz"`], [`echo "${H2}  $dir/niyam.tgz"`]), '0.6.17'), 0);
+    assert.equal(versionMoves(run(['# niyam 0.6.16, Node 24.21.0'], ['# niyam 0.6.17, Node 24.21.0']), '0.6.17'), 1);
+    assert.equal(versionMoves(run(['# niyam 0.6.16, Node 24.21.0'], ['# niyam 0.6.17, Node 24.22.0']), '0.6.17'), -1);
+    assert.equal(versionMoves(run(['run: pnpm check 0.6.16'], ['run: true 0.6.17']), '0.6.17'), -1);
+    assert.equal(versionMoves(run(['a 0.6.18'], ['a 0.6.17']), '0.6.17'), -1);
+    assert.equal(versionMoves(run(['a 0.6.16'], ['a 0.6.19']), '0.6.17'), -1);
+    assert.equal(versionMoves(run(['a 0.6.16'], ['a']), '0.6.17'), -1);
+    assert.equal(versionMoves(run(['a 0.6.16'], []), '0.6.17'), -1);
+  });
+
+  test("versionMoves takes onboard's own 0.6.17 lines (#348), prose aside", () => {
+    const H1 = 'd0124574c85fd69bf958c1574d2afc5ab953360fc7877926ed2ac7165ab747ef';
+    const H2 = 'a7a266229704903d855abbc2d7c4ff2bc48f01f3c38dff17dde5a19f0aeab6a2';
+    const runs = changeRuns(
+      [
+        '@@ -1,4 +1,4 @@',
+        '-# niyam 0.6.16 for Claude cloud sessions: Node 24.21.0 and the CLI, as niyam on PATH.',
+        '+# niyam 0.6.17 for Claude cloud sessions: Node 24.21.0 and the CLI, as niyam on PATH.',
+        ' set -euo pipefail',
+        '-curl -fsSL --connect-timeout 10 --max-time 120 -o "$dir/niyam.tgz" https://github.com/veda-hq/niyam/releases/download/v0.6.16/veda-hq-niyam-0.6.16.tgz',
+        `-echo "${H1}  $dir/niyam.tgz" | sha256sum -c --quiet -`,
+        '-cli="$dir/cli-0.6.16"',
+        '+curl -fsSL --connect-timeout 10 --max-time 120 -o "$dir/niyam.tgz" https://github.com/veda-hq/niyam/releases/download/v0.6.17/veda-hq-niyam-0.6.17.tgz',
+        `+echo "${H2}  $dir/niyam.tgz" | sha256sum -c --quiet -`,
+        '+cli="$dir/cli-0.6.17"',
+      ].join('\n'),
+    );
+    assert.equal(versionMoves(runs, '0.6.17'), 4);
   });
 
   test('jobNames reads names, else ids', () => {
@@ -373,12 +398,24 @@ describe('judging a pull request', () => {
     const files = [modified('.github/workflows/niyam.yml', patch)];
     const contents = { '.github/workflows/niyam.yml@h': WORKFLOW([['niyam']]), '.github/workflows/niyam.yml@m': WORKFLOW([['niyam']]) };
     const pull = { title: '🔧 chore(niyam): onboard at v0.6.17' };
-    const tagged = (status) => ({ [`/repos/${REPO}/compare/main...v0.6.17`]: { status } });
+    const TAG = 'c'.repeat(40);
+    const COMMIT = 'd'.repeat(40);
+    const tagged = (status, ref = { object: { type: 'tag', sha: TAG } }) => ({
+      [`/repos/${REPO}/git/ref/tags/v0.6.17`]: ref,
+      [`/repos/${REPO}/git/tags/${TAG}`]: { object: { type: 'commit', sha: COMMIT } },
+      [`/repos/${REPO}/compare/main...${COMMIT}`]: { status },
+    });
     assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS), []);
     assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('identical') }), REPO, 1, OWNERS), []);
-    // A tag off main, or one GitHub cannot find, is no exemption.
+    // A lightweight tag names its commit itself.
+    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('behind', { object: { type: 'commit', sha: COMMIT } }) }), REPO, 1, OWNERS), []);
+    // A tag off main, one GitHub cannot find, or an annotated tag it cannot read, is no exemption.
     assert.equal((await judge(github({ files, contents, body: 'none', pull, over: tagged('diverged') }), REPO, 1, OWNERS)).length, 1);
     assert.equal((await judge(github({ files, contents, body: 'none', pull }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: { ...tagged('behind'), [`/repos/${REPO}/git/tags/${TAG}`]: { status: 404, json: {} } } }), REPO, 1, OWNERS)).length, 1);
+    // Nor are sha256 swaps that move no version.
+    const swap = [modified('.github/niyam/cloud-setup.sh', `@@ -1 +1 @@\n-x ${'1'.repeat(64)}\n+x ${'2'.repeat(64)}`)];
+    assert.equal((await judge(github({ files: swap, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS)).length, 1);
     // Nor is a title for another release than the lines move to.
     assert.equal((await judge(github({ files, contents, body: 'none', pull: { title: 'chore(niyam): onboard at v0.6.18' } }), REPO, 1, OWNERS)).length, 1);
   });
@@ -405,6 +442,9 @@ describe('judging a pull request', () => {
     assert.match(refusal.message, /whose name is an expression/);
     [refusal] = await one('jobs: [', WORKFLOW([['other']]));
     assert.match(refusal.message, /does not parse as a workflow/);
+    // A second job of a required name counts as added.
+    [refusal] = await one(WORKFLOW([['check', 'Typecheck, test, build'], ['again', 'Typecheck, test, build']]), WORKFLOW([['check', 'Typecheck, test, build']]));
+    assert.match(refusal.message, /adds the job "Typecheck, test, build"/);
     // A base that no longer parses keeps no names.
     [refusal] = await one(WORKFLOW([['g', 'Guard']]), 'jobs: [');
     assert.match(refusal.message, /reports "Guard"/);
