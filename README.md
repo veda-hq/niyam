@@ -1304,18 +1304,27 @@ probe that does not verify. The session's line says why and the session
 works on as the agent. A commit claiming the agent without the agent's
 signature would fail PR identity, so it is all or nothing.
 
-Set the key up by hand, once per cloud environment, on a Mac:
+Set the key up once per cloud environment, in your own terminal on the Mac
+`niyam machine` set up for the agent: run `niyam cloud-key [agent]` (`--yes`
+skips its one question). It does four things:
 
-1. Make a key for the agent's cloud sessions alone, apart from any Mac's
-   signing key, so it can be revoked on its own:
-   `ssh-keygen -t ed25519 -N '' -C '<agent> cloud signing' -f agent-cloud`.
-2. Signed in to GitHub as the agent, add `agent-cloud.pub` under Settings →
-   SSH and GPG keys → New SSH key, with key type **Signing Key**.
-3. Copy the private key as one line, `base64 < agent-cloud | tr -d '\n' | pbcopy`,
-   and add it to the cloud environment's variables
-   (https://claude.ai/code → the environment's settings) as
-   `NIYAM_SIGNING_KEY=<the line>`.
-4. Delete both files.
+- makes a new ed25519 key in a private temporary folder, for the agent's cloud sessions alone, apart from the Mac's signing key, so it can be revoked on its own;
+- registers it as the agent's signing key, titled `niyam cloud signing`, with the token `machine` stored, and checks GitHub lists it;
+- puts `NIYAM_SIGNING_KEY=<the private key, base64>` on the clipboard, never on the screen;
+- deletes the files, at a Ctrl-C too.
+
+Paste the line into the cloud environment's variables (https://claude.ai/code →
+the environment's settings). Claude Code has no API for them, so this step stays
+yours. A key GitHub does not list, or one the clipboard does not take, is deleted
+from GitHub again, since no one holds it, and so is one a Ctrl-C stops after it
+was registered.
+
+`cloud-key` also names the agent's other cloud signing keys, by date and id. Delete
+one at https://github.com/settings/keys, signed in as the agent, once no environment
+uses it; `cloud-key` deletes none itself. It refuses in an agent session or a cloud
+session, and without a working agent token (`niyam machine` first). In a cloud
+session, `doctor` says whether the session's commits are the agent's, and names
+`niyam cloud-key` when the environment has no key.
 
 Anyone who uses the environment can read its variables, and so can any
 command its sessions run. Claude's settings warn against keeping secrets
