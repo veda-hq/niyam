@@ -181,6 +181,28 @@ describe('the board app', () => {
       assert.match(unset.browser.made?.body ?? '', /could not set its secrets/);
     });
 
+    it('says to look for the app, not to make one, when a request fails once GitHub has the code', async () => {
+      const { sys, browser } = await noApp();
+      sys.route('POST', `/app-manifests/${CODE}/conversions`, () => {
+        throw new Error('POST api.github.com/app-manifests: no answer');
+      });
+      assert.deepEqual(await setUpBoardApp(sys, capture().io, SLUG, OWNER), [
+        'Once for example-org: a request to GitHub failed once it had the code (POST api.github.com/app-manifests: no answer). At https://github.com/organizations/example-org/settings/apps, delete the board app if it was made, then run niyam onboard again.',
+      ]);
+      assert.equal(browser.made?.status, 502);
+      assert.ok(sys.slept.length < 10, 'no ten-minute wait');
+    });
+
+    it('leaves only the install when a request fails after the secrets are set', async () => {
+      const { sys } = await noApp();
+      sys.route('GET', INSTALLATIONS, () => {
+        throw new Error('GET api.github.com/orgs/example-org/installations: no answer');
+      });
+      assert.deepEqual(await setUpBoardApp(sys, capture().io, SLUG, OWNER), [
+        `Once for example-org: install the board app on ${SLUG} at https://github.com/apps/${APP.slug}/installations/new, if it is not there yet: onboard could not tell (GET api.github.com/orgs/example-org/installations: no answer).`,
+      ]);
+    });
+
     it('says where to install it when the owner does not click Install in time, or to add the repository when GitHub will not', async () => {
       const never = await noApp();
       never.sys.route('GET', INSTALLATIONS, { status: 200, json: { installations: [] } });

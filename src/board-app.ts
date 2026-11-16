@@ -193,21 +193,27 @@ async function make(sys: Sys, out: Output, { org, slug, token, repositoryId }: W
     if (query.state !== state || !query.code) return page(400, "This is not GitHub's answer to this run of niyam onboard.");
     if (asked) return page(409, 'niyam onboard has this answer already; go back to the terminal.');
     asked = true;
-    const app = await convert(sys, query.code);
-    if ('problem' in app) {
-      made = app;
-      return page(502, `niyam onboard could not get the app: ${app.problem}. The terminal says what is left.`);
-    }
-    // The key is set before anything else, as GitHub gives it once.
-    for (const [name, value] of [['NIYAM_BOARD_APP_ID', app.clientId], ['NIYAM_BOARD_APP_KEY', app.pem]] as const) {
-      const problem = await setOrgSecret(sys, org, token, name, value, [repositoryId]);
-      if (problem) {
-        made = { problem: `GitHub made the app ${app.slug} but ${problem}` };
-        return page(502, `The app is made, but niyam onboard could not set its secrets: ${problem}. The terminal says what is left.`);
+    try {
+      const app = await convert(sys, query.code);
+      if ('problem' in app) {
+        made = app;
+        return page(502, `niyam onboard could not get the app: ${app.problem}. The terminal says what is left.`);
       }
+      // The key is set before anything else, as GitHub gives it once.
+      for (const [name, value] of [['NIYAM_BOARD_APP_ID', app.clientId], ['NIYAM_BOARD_APP_KEY', app.pem]] as const) {
+        const problem = await setOrgSecret(sys, org, token, name, value, [repositoryId]);
+        if (problem) {
+          made = { problem: `GitHub made the app ${app.slug} but ${problem}` };
+          return page(502, `The app is made, but niyam onboard could not set its secrets: ${problem}. The terminal says what is left.`);
+        }
+      }
+      made = app;
+      return { status: 302, headers: { location: `${GITHUB_WEB}/apps/${app.slug}/installations/new` } };
+    } catch (error) {
+      // fail-open: GitHub may have made the app before the request failed, so the owner is told to look, not to make another.
+      made = { problem: `a request to GitHub failed once it had the code (${detail(error)})` };
+      return page(502, `niyam onboard could not finish: ${made.problem}. The terminal says what is left.`);
     }
-    made = app;
-    return { status: 302, headers: { location: `${GITHUB_WEB}/apps/${app.slug}/installations/new` } };
   });
   const redirect = `http://127.0.0.1:${served.port}/made`;
   try {
@@ -225,14 +231,20 @@ async function make(sys: Sys, out: Output, { org, slug, token, repositoryId }: W
   const app = made;
   out.out(`✓ made the board app ${app.slug} and set ${BOARD_SECRETS.join(' and ')}, shared with ${slug}`);
   // The browser is on the install page now; the owner clicks Install.
-  let installation: Installation | undefined;
-  for (let waited = 0; !installation && waited < BOARD_APP_WAIT_MS; waited += INSTALL_TICK_MS) {
-    installation = await installationOf(sys, org, token, (one) => one === app.slug);
-    if (!installation) await sys.sleep(INSTALL_TICK_MS);
+  const install = `Once for ${org}: install the board app on ${slug} at ${GITHUB_WEB}/apps/${app.slug}/installations/new`;
+  try {
+    let installation: Installation | undefined;
+    for (let waited = 0; !installation && waited < BOARD_APP_WAIT_MS; waited += INSTALL_TICK_MS) {
+      installation = await installationOf(sys, org, token, (one) => one === app.slug);
+      if (!installation) await sys.sleep(INSTALL_TICK_MS);
+    }
+    if (!installation) return [`${install}.`];
+    const problem = await includeRepository(sys, org, slug, token, installation, repositoryId);
+    if (problem) return [problem];
+  } catch (error) {
+    // fail-open: the app and its secrets stand; only the install is left.
+    return [`${install}, if it is not there yet: onboard could not tell (${detail(error)}).`];
   }
-  if (!installation) return [`Once for ${org}: install the board app on ${slug} at ${GITHUB_WEB}/apps/${app.slug}/installations/new.`];
-  const problem = await includeRepository(sys, org, slug, token, installation, repositoryId);
-  if (problem) return [problem];
   out.out(`✓ installed the board app on ${slug}`);
   return [];
 }
