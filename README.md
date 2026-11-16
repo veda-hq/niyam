@@ -1266,11 +1266,56 @@ session's shell, so run by hand there it always says STOP, which says
 nothing about the session.
 The hook's own line at session start is what counts.
 
-A cloud session's git commits are authored and committed as Claude's own
-account, `Claude <noreply@anthropic.com>`, and signed by it (Verified),
-while the push is the agent's. PR identity checks only commits that claim
-an agent, so these pass, and GitHub records the agent as having pushed
-them.
+By default, the platform authors and commits a cloud session's git commits as
+`Claude <noreply@anthropic.com>` and signs them with Anthropic's key
+(Verified), while the agent makes the push. PR identity checks only commits
+that claim an agent, so these pass, and GitHub records the agent as having
+pushed them.
+
+**The agent's commits, signed.** A cloud environment whose variables hold
+the agent's cloud signing key, `NIYAM_SIGNING_KEY`, makes its commits the
+agent's, as on a Mac: authored and committed with the agent's no-reply
+address and signed with that key.
+
+Once `session-start` confirms the login as the agent, it does four things:
+
+- reads the account's id from the same GitHub answer;
+- writes the key to the agent's key file (`~/.ssh/<agent>_signing`, mode 0600) and checks GitHub lists its public half as one of the agent's signing keys;
+- makes a probe commit object, on no branch, with exactly the settings the session will get;
+- checks that its signature verifies as that key's.
+
+Only then does it add the agent's author and committer variables and SSH
+signing, with `gpg.ssh.program` set back from the platform's own program to
+`ssh-keygen`, all together to `CLAUDE_ENV_FILE`. It also unsets the key's
+variable there, so commands do not carry it in their environment.
+
+When any step fails, nothing is set and the commits stay Claude's, which PR
+identity passes. Steps that can fail: no key, one that is not an OpenSSH
+private key, a key GitHub does not list, a lookup the proxy refuses, or a
+probe that does not verify. The session's line says why and the session
+works on as the agent. A commit claiming the agent without the agent's
+signature would fail PR identity, so it is all or nothing.
+
+Set the key up by hand, once per cloud environment, on a Mac:
+
+1. Make a key for the agent's cloud sessions alone, apart from any Mac's
+   signing key, so it can be revoked on its own:
+   `ssh-keygen -t ed25519 -N '' -C '<agent> cloud signing' -f agent-cloud`.
+2. Signed in to GitHub as the agent, add `agent-cloud.pub` under Settings →
+   SSH and GPG keys → New SSH key, with key type **Signing Key**.
+3. Copy the private key as one line, `base64 < agent-cloud | tr -d '\n' | pbcopy`,
+   and add it to the cloud environment's variables
+   (https://claude.ai/code → the environment's settings) as
+   `NIYAM_SIGNING_KEY=<the line>`.
+4. Delete both files.
+
+Anyone who uses the environment can read its variables, and so can any
+command its sessions run. Claude's settings warn against keeping secrets
+there. Whoever holds the key can sign commits that GitHub shows as Verified
+for the agent, though pushing still needs the agent's GitHub connection,
+which PR identity checks. To revoke the key, delete it from the agent's
+signing keys. The platform's own git hooks may still add a `Co-authored-by`
+trailer for Claude.
 
 The proxy refuses GitHub's GraphQL API, so the work rules and `reviews-due`
 read only its REST API, here and everywhere else. The one exception is who

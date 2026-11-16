@@ -1,4 +1,4 @@
-import { API, isNoToken } from './agent.ts';
+import { API, BASE_ENV, authorVars, configVars, isNoToken, keyBody, noreplyEmail, pathsFor, signingConfig } from './agent.ts';
 import { CLAUDE_CODE_WEB, SETUP_FIRST, workflowPins } from './onboard.ts';
 import { PRODUCT, tarballName } from './names.ts';
 import type { Output, Sys } from './types.ts';
@@ -18,15 +18,129 @@ export function cloudToken(sys: Sys): string {
   return token && !isNoToken(token) ? token : PROXY_TOKEN;
 }
 
-/** The account a cloud session reaches GitHub as, through its proxy, or why it cannot be told. */
-export async function cloudLogin(sys: Sys): Promise<{ login: string } | { problem: string }> {
+/**
+ * The account a cloud session reaches GitHub as, through its proxy, or why it
+ * cannot be told; with the account's id from the same answer, when it names
+ * a valid one, for the agent's no-reply address.
+ */
+export async function cloudLogin(sys: Sys): Promise<{ login: string; id?: number } | { problem: string }> {
   try {
     const { status, json } = await sys.http(`${API}/user`, { token: cloudToken(sys) });
-    const login = (json as { login?: unknown } | null)?.login;
-    return status === 200 && typeof login === 'string' ? { login } : { problem: `GitHub answered HTTP ${status} when asked who this session is` };
+    const { login, id } = (json as { login?: unknown; id?: unknown } | null) ?? {};
+    if (status !== 200 || typeof login !== 'string') return { problem: `GitHub answered HTTP ${status} when asked who this session is` };
+    return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? { login, id } : { login };
   } catch (error) {
     return { problem: `GitHub could not be asked who this session is (${error instanceof Error ? error.message : String(error)})` };
   }
+}
+
+/**
+ * The cloud environment's variable that holds the agent's cloud signing key:
+ * an OpenSSH private key, base64 on one line or as is. A key of its own, not
+ * a Mac's, registered as one of the agent's signing keys, so it is revoked
+ * on its own.
+ */
+export const SIGNING_KEY_VAR = 'NIYAM_SIGNING_KEY';
+
+/** The message of the probe commit `cloudSigning` signs. */
+const PROBE_MESSAGE = 'niyam: a probe of the agent\'s signing, never on a branch';
+
+/**
+ * What makes a cloud session's commits the agent's: its author and committer
+ * variables, with the address of the id GitHub gave with the login, and SSH
+ * signing with the key in SIGNING_KEY_VAR, over the platform's own signing
+ * (Claude's, through a program of its own: `gpg.ssh.program` goes back to
+ * ssh-keygen). All of them or none, since a commit that claims the agent
+ * must be Verified as the agent (PR identity) and a signing setup that fails
+ * breaks every commit: each is given only when the key is one GitHub lists
+ * for the agent and a probe commit signed with exactly these settings, in
+ * the clone at `root`, verifies as that key's. The probe is an object on no
+ * branch, which git's housekeeping drops. Otherwise why not, and the session
+ * keeps the cloud image's identity.
+ */
+export async function cloudSigning(sys: Sys, root: string, login: string, id: number | undefined): Promise<{ vars: [string, string][] } | { problem: string }> {
+  const given = sys.env[SIGNING_KEY_VAR]?.trim();
+  if (!given) return { problem: `the cloud environment's variables have no ${SIGNING_KEY_VAR}, ${login}'s cloud signing key (niyam's README, "Claude cloud sessions", says how to add one)` };
+  if (id === undefined) return { problem: `GitHub named no account id for ${login}` };
+  const text = (given.includes(PEM_BEGIN) ? given.replaceAll('\\n', '\n') : Buffer.from(given, 'base64').toString('utf8')).trim();
+  if (!text.startsWith(`${PEM_BEGIN}\n`) || !text.endsWith(`\n${PEM_END}`)) {
+    return { problem: `${SIGNING_KEY_VAR} is not an OpenSSH private key, base64 on one line or as is` };
+  }
+  const { dir, key } = pathsFor(sys.home, login);
+  const pub = `${key}.pub`;
+  const signers = `${dir}/allowed-signers`;
+  const email = noreplyEmail(id, login);
+  try {
+    sys.mkdir(dir);
+    sys.mkdir(key.slice(0, key.lastIndexOf('/')));
+    sys.write(key, `${text}\n`, 0o600);
+  } catch (error) {
+    // fail-open: the session keeps the image's identity, which PR identity passes, and says why.
+    return { problem: `writing ${SIGNING_KEY_VAR} to ${key} failed (${messageOf(error)})` };
+  }
+  const derived = sys.exec('ssh-keygen', ['-y', '-f', key], { input: '' });
+  if (derived.code !== 0) return { problem: `ssh-keygen cannot read ${SIGNING_KEY_VAR} (${lastLine(derived.stderr) || `exit ${derived.code}`})` };
+  const body = keyBody(derived.stdout);
+  const listed = await listedSigningKeys(sys, login);
+  if ('problem' in listed) return listed;
+  if (!listed.keys.includes(body)) return { problem: `GitHub does not list ${SIGNING_KEY_VAR}'s public half as one of ${login}'s signing keys` };
+  try {
+    sys.write(pub, `${body} ${login} cloud signing\n`, 0o644);
+    sys.write(signers, `${email} namespaces="git" ${body}\n`, 0o644);
+  } catch (error) {
+    // fail-open: the session keeps the image's identity, which PR identity passes, and says why.
+    return { problem: `writing ${pub} failed (${messageOf(error)})` };
+  }
+  const vars: [string, string][] = [...authorVars(login, id), ...configVars([['gpg.ssh.program', 'ssh-keygen'], ...signingConfig(pub)])];
+  const probe = probeSignature(sys, root, vars, signers);
+  return probe ? { problem: `a probe commit signed with ${SIGNING_KEY_VAR} did not verify as that key (${probe})` } : { vars };
+}
+
+const PEM_BEGIN = '-----BEGIN OPENSSH PRIVATE KEY-----';
+const PEM_END = '-----END OPENSSH PRIVATE KEY-----';
+
+/** The signing keys GitHub's public list names for `login`, asked through the proxy, or why they cannot be had. */
+async function listedSigningKeys(sys: Sys, login: string): Promise<{ keys: string[] } | { problem: string }> {
+  let answer: { status: number; json: unknown };
+  try {
+    answer = await sys.http(`${API}/users/${encodeURIComponent(login)}/ssh_signing_keys?per_page=100`, { token: cloudToken(sys) });
+  } catch (error) {
+    // fail-open: the session keeps the image's identity, which PR identity passes, and says why.
+    return { problem: `GitHub could not be asked for ${login}'s signing keys (${messageOf(error)})` };
+  }
+  if (answer.status !== 200 || !Array.isArray(answer.json)) return { problem: `GitHub answered HTTP ${answer.status} when asked for ${login}'s signing keys` };
+  return {
+    keys: answer.json.flatMap((entry: unknown) => {
+      const key = (entry as { key?: unknown } | null)?.key;
+      return typeof key === 'string' ? [keyBody(key)] : [];
+    }),
+  };
+}
+
+/**
+ * Makes a commit object on no branch with the environment `vars` give, and
+ * verifies its signature against `signers`, the agent's key alone: undefined
+ * when it verifies, else what failed.
+ */
+function probeSignature(sys: Sys, root: string, vars: [string, string][], signers: string): string | undefined {
+  // The session's commands get the env file's lines, which unset the lock first: the probe does the same.
+  const base = Object.fromEntries(Object.entries(sys.env).filter(([name]) => !(name in BASE_ENV) && name !== SIGNING_KEY_VAR));
+  const env = { ...base, ...Object.fromEntries(vars) };
+  const tree = sys.exec('git', ['mktree'], { cwd: root, env, input: '' });
+  if (tree.code !== 0) return `git mktree: ${lastLine(tree.stderr) || `exit ${tree.code}`}`;
+  // commit-tree reads no commit.gpgsign: -S signs as `git commit` would, with the key and program the settings name.
+  const commit = sys.exec('git', ['commit-tree', '-S', tree.stdout.trim(), '-m', PROBE_MESSAGE], { cwd: root, env, input: '' });
+  if (commit.code !== 0) return `git commit-tree: ${lastLine(commit.stderr) || `exit ${commit.code}`}`;
+  const verified = sys.exec('git', ['-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-commit', commit.stdout.trim()], { cwd: root, env, input: '' });
+  return verified.code === 0 ? undefined : `git verify-commit: ${lastLine(verified.stderr) || 'no signature by that key'}`;
+}
+
+function lastLine(text: string): string {
+  return text.trim().split('\n').at(-1) ?? '';
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** The Node a Claude cloud session runs the CLI with: its image's own is older than the CLI needs. */

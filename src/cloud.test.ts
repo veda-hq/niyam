@@ -5,10 +5,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { CLOUD_DIR, CLOUD_NODE, CLOUD_NODE_SHA256, FROM_SETUP, INSTALL_FAILED as FAILED, PROXY_TOKEN, cloudRepoScript, cloudScriptVersion, cloudSetup, cloudSetupHelp, cloudSetupSnippet, cloudToken, fileFromSetup, ranFromSetup, releaseTarball, repoReleases } from './cloud.ts';
+import { noreplyEmail, pathsFor } from './agent.ts';
+import { realSys } from './sys.ts';
+import type { Sys } from './types.ts';
+import { CLOUD_DIR, CLOUD_NODE, CLOUD_NODE_SHA256, FROM_SETUP, INSTALL_FAILED as FAILED, PROXY_TOKEN, SIGNING_KEY_VAR, cloudRepoScript, cloudSigning, cloudScriptVersion, cloudSetup, cloudSetupHelp, cloudSetupSnippet, cloudToken, fileFromSetup, ranFromSetup, releaseTarball, repoReleases } from './cloud.ts';
 import { CLOUD_SETUP_068 } from './older-texts.test.ts';
 import { workflow } from './onboard.ts';
-import { FakeSys, capture } from './fake.test.ts';
+import { AGENT, AGENT_ID, FakeSys, capture } from './fake.test.ts';
 import { CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
 
 const SHA = 'ab'.repeat(32);
@@ -271,6 +274,69 @@ describe('cloudSetupSnippet', () => {
     });
   });
 });
+
+describe('cloudSigning, with real git and ssh-keygen', () => {
+  it("signs a real commit as the agent's key, over the platform's signing, with the agent as author and committer, and gives nothing for a key GitHub does not list or no key", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'niyam-cloud-signing-'));
+    try {
+      await signsInClone(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** The real-git test of `cloudSigning` in the folder `dir`, which the test removes. */
+async function signsInClone(dir: string): Promise<void> {
+  // No config of the machine running the tests, and no housekeeping that could race the cleanup.
+  const gitEnv: Record<string, string> = { PATH: process.env.PATH ?? '', HOME: `${dir}/home`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const run = (command: string, args: string[], env: Record<string, string> = gitEnv, cwd = `${dir}/repo`): SpawnSyncReturns<string> => {
+    const ran = spawnSync(command, args, { cwd, env, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(ran.status, 0, `${command} ${args.join(' ')}: ${ran.stderr}`);
+    return ran;
+  };
+  {
+    mkdirSync(`${dir}/home`);
+    mkdirSync(`${dir}/repo`);
+    for (const name of ['agent', 'platform']) run('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', name, '-f', `${dir}/${name}`], gitEnv, dir);
+    run('git', ['init', '-q']);
+    // The platform signs through a program of its own, which the agent's signing must not reach.
+    writeFileSync(`${dir}/shim`, '#!/bin/sh\necho "the platform shim ran" >&2\nexit 1\n', { mode: 0o755 });
+    // The platform's own identity and signing, in the clone's config, as a cloud image sets it up with its own key.
+    for (const [key, value] of [
+      ['gpg.ssh.program', `${dir}/shim`],
+      ['maintenance.auto', 'false'],
+      ['gc.auto', '0'],
+      ['user.name', 'Claude'],
+      ['user.email', 'noreply@anthropic.com'],
+      ['gpg.format', 'ssh'],
+      ['user.signingkey', `${dir}/platform.pub`],
+      ['commit.gpgsign', 'true'],
+    ] as const) run('git', ['config', key, value]);
+  }
+  const agentPub = readFileSync(`${dir}/agent.pub`, 'utf8');
+  const sysWith = (listed: string, key = readFileSync(`${dir}/agent`).toString('base64')): Sys => ({
+    ...realSys(),
+    home: `${dir}/home`,
+    env: { ...gitEnv, [SIGNING_KEY_VAR]: key },
+    http: () => Promise.resolve({ status: 200, json: [{ key: listed }], headers: {} }),
+  });
+
+  const signing = await cloudSigning(sysWith(agentPub), `${dir}/repo`, AGENT, AGENT_ID);
+  assert.ok('vars' in signing, JSON.stringify(signing));
+  const env = { ...gitEnv, ...Object.fromEntries(signing.vars) };
+  run('git', ['commit', '-q', '--allow-empty', '-m', 'work'], env);
+  const commit = run('git', ['cat-file', 'commit', 'HEAD'], env).stdout;
+  assert.match(commit, /^author ExampleBot <42\+ExampleBot@users\.noreply\.github\.com> /m);
+  assert.match(commit, /^committer ExampleBot <42\+ExampleBot@users\.noreply\.github\.com> /m);
+  writeFileSync(`${dir}/agent-signers`, `${noreplyEmail(AGENT_ID, AGENT)} ${agentPub}`);
+  run('git', ['-c', `gpg.ssh.allowedSignersFile=${dir}/agent-signers`, 'verify-commit', 'HEAD'], env);
+  assert.equal(lstatSync(pathsFor(`${dir}/home`, AGENT).key).mode & 0o777, 0o600, 'the key is private');
+
+  const other = readFileSync(`${dir}/platform.pub`, 'utf8');
+  assert.match(JSON.stringify(await cloudSigning(sysWith(other), `${dir}/repo`, AGENT, AGENT_ID)), /GitHub does not list NIYAM_SIGNING_KEY's public half as one of ExampleBot's signing keys/);
+  assert.match(JSON.stringify(await cloudSigning(sysWith(agentPub, 'bm90IGEga2V5'), `${dir}/repo`, AGENT, AGENT_ID)), /NIYAM_SIGNING_KEY is not an OpenSSH private key/);
+}
 
 describe('cloudSetup', () => {
   it('prints the Setup snippet with its instructions as comment lines on standard output, and nothing on standard error (#333)', () => {

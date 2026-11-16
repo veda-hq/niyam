@@ -221,7 +221,8 @@ const LOCKED_CONFIG: [string, string][] = [
   [`url.${GITHUB_WEB}/.insteadOf`, `ssh://${GITHUB_SSH_443}:443/`],
 ];
 
-function configVars(config: [string, string][]): [string, string][] {
+/** Git config, as the GIT_CONFIG_COUNT variables that carry it over every config file. */
+export function configVars(config: [string, string][]): [string, string][] {
   return [
     ['GIT_CONFIG_COUNT', String(config.length)],
     ...config.flatMap(([key, value], i): [string, string][] => [
@@ -239,26 +240,49 @@ function configVars(config: [string, string][]): [string, string][] {
  */
 const AGENT_VARS_0610 = [AGENT_VAR, 'PROCESS_RULES_AGENT'];
 
+/**
+ * The variables that make the agent the author and committer of a session's
+ * commits, over any `user.name` and `user.email` git config: the same in a
+ * local session's file and a cloud session's env file.
+ */
+export function authorVars(agent: string, id: number): [string, string][] {
+  const email = noreplyEmail(id, agent);
+  return [
+    ['GIT_AUTHOR_NAME', agent],
+    ['GIT_COMMITTER_NAME', agent],
+    ['GIT_AUTHOR_EMAIL', email],
+    ['GIT_COMMITTER_EMAIL', email],
+  ];
+}
+
+/** Git config that signs commits and tags with the SSH key whose public half is at `pub`. */
+export function signingConfig(pub: string): [string, string][] {
+  return [
+    ['gpg.format', 'ssh'],
+    ['user.signingkey', pub],
+    ['commit.gpgsign', 'true'],
+    ['tag.gpgsign', 'true'],
+  ];
+}
+
+/** `vars` as shell lines exporting each, quoted. */
+export function exportLines(vars: readonly [string, string][]): string[] {
+  return vars.map(([name, value]) => `export ${name}=${quote(value)}`);
+}
+
 /** The variables an agent session gets, except GH_TOKEN. */
 function identityVars(agent: string, id: number, paths: Paths, agentVars: readonly string[] = [AGENT_VAR]): [string, string][] {
-  const email = noreplyEmail(id, agent);
   const helper = `!f() { test "$1" = get && printf 'username=%s\\npassword=%s\\n' ${agent} "$GH_TOKEN"; }; f`;
   const [reset, askpass, ...https] = LOCKED_CONFIG as [[string, string], [string, string], ...[string, string][]];
   return [
     ...agentVars.map((name): [string, string] => [name, agent]),
     ['GH_CONFIG_DIR', paths.gh],
-    ['GIT_AUTHOR_NAME', agent],
-    ['GIT_COMMITTER_NAME', agent],
-    ['GIT_AUTHOR_EMAIL', email],
-    ['GIT_COMMITTER_EMAIL', email],
+    ...authorVars(agent, id),
     ['GIT_TERMINAL_PROMPT', '0'],
     // Any SSH remote left (a host alias in ~/.ssh/config) fails instead of using the owner's key.
     ['GIT_SSH_COMMAND', NO_SSH],
     ...configVars([
-      ['gpg.format', 'ssh'],
-      ['user.signingkey', `${paths.key}.pub`],
-      ['commit.gpgsign', 'true'],
-      ['tag.gpgsign', 'true'],
+      ...signingConfig(`${paths.key}.pub`),
       // After the reset, the agent's token goes to GitHub's host only.
       reset,
       [`credential.${GITHUB_WEB}.helper`, helper],
@@ -334,7 +358,7 @@ function sessionText(agent: string, id: number, paths: Paths, read: string, agen
     `[ -n "$GH_TOKEN" ] || export GH_TOKEN=${NO_TOKEN}`,
     // Inherited `git -c` and config-file injection could bring back a helper; askpass could prompt.
     `unset ${UNSET.join(' ')}`,
-    ...identityVars(agent, id, paths, agentVars).map(([name, value]) => `export ${name}=${quote(value)}`),
+    ...exportLines(identityVars(agent, id, paths, agentVars)),
     '',
   ].join('\n');
 }
@@ -386,7 +410,7 @@ export function lockScript(home: string): string {
     `# Written by ${CLI} session-start. GitHub is locked out unless an agent identity below replaces this.`,
     `export GH_TOKEN=${NO_TOKEN}`,
     `unset ${UNSET.join(' ')}`,
-    ...vars.map(([name, value]) => `export ${name}=${quote(value)}`),
+    ...exportLines(vars),
     '',
   ].join('\n');
 }
