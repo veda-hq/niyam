@@ -1386,8 +1386,18 @@ command its sessions run. Claude's settings warn against keeping secrets
 there. Whoever holds the key can sign commits that GitHub shows as Verified
 for the agent, though pushing still needs the agent's GitHub connection,
 which PR identity checks. To revoke the key, delete it from the agent's
-signing keys. The platform's own git hooks may still add a `Co-authored-by`
-trailer for Claude.
+signing keys.
+
+**Trailers and hooks.** The cloud image's git config sets Claude's identity
+and signing and nothing else: no `core.hooksPath`, no hooks, no trailers.
+So the clone's own hooks run there as on a Mac, niyam's pre-push hook
+included, and git stores a commit message as it was written. The trailers
+a cloud session's commits carry come from Claude Code, which writes them
+into the message itself. The `Co-Authored-By: Claude …` line appears once,
+as on every machine. A cloud session's commits also carry a
+`Claude-Session: https://claude.ai/code/session_…` line, which links the
+commit to the session that made it. It names no co-author, and niyam leaves
+it alone (veda-hq/niyam#416).
 
 The proxy refuses GitHub's GraphQL API, so the work rules and `reviews-due`
 read only its REST API, here and everywhere else. The one exception is who
