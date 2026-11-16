@@ -913,6 +913,41 @@ records are in `.tmp/keep-going/`. The settings:
 origin's default branch. `printMode` names older print-mode variables read beside `NIYAM_PRINT_MODE`;
 `owner` is who the messages tell a session to tell; `tag` ends each message.
 
+**Document numbers are never reused.** `niyam doc-number <kind>` prints the
+next free number for a numbered document kind on stdout, and where it looked
+on stderr (`--json` for both at once). It takes one past every number held in:
+- every ref's history and every worktree's folder;
+- the reservation refs;
+- open pull requests;
+- the titles of Work item issues and the frozen folders, for the kind they share.
+
+`--reserve` claims the number for good with an atomic `git update-ref` in the
+repository's shared git store, so concurrent sessions in linked worktrees get
+distinct numbers. It refuses when any GitHub source could not be read.
+`niyam renumber-doc <kind> <from> <to>` previews moving a document to another
+number; `--apply` moves it and rewrites every reference and frontmatter
+relationship to it, outside the history paths. `niyam work-item-number`,
+run from a workflow on issue events and on a schedule, renumbers a Work item
+filed with a taken number. It comments first, then retitles, and stops if the
+title changed meanwhile. It also adds `label` to every Work item that lacks it.
+The settings, inline or as the path of a JSON file:
+
+```json
+{ "docNumbers": {
+  "reservations": "refs/niyam/{kind}-reservations/",
+  "kinds": {
+    "adr": { "dir": "docs/adr", "citation": "ADR", "frontmatterKey": "adr",
+      "relationships": { "docs/adr": ["supersedes", "superseded_by"] } },
+    "rfc": { "dir": "docs/rfcs", "citation": "RFC", "frontmatterKey": "rfc",
+      "relationships": { "docs/rfcs": ["supersedes"] } } },
+  "workItems": { "kind": "rfc", "issueType": "Work item", "label": "work-item", "lastMovedIssue": 1,
+    "frozen": { "dir": "docs/work", "entries": [] } },
+  "history": ["docs/work/"]
+} }
+```
+
+`workItems` is optional; so is `history`, whose `!` entries are exceptions.
+
 **Design frames** is the `figma` feature, an optional extension for clients
 that design in Figma: with it on and two Actions secrets, `FIGMA_LIBRARY`
 (the design library's file key) and `FIGMA_TOKEN`, each State of the slice
@@ -1420,7 +1455,7 @@ tag and the commit. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.21/veda-hq-niyam-0.6.21.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.22/veda-hq-niyam-0.6.22.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release
