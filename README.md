@@ -933,6 +933,21 @@ checked. The settings:
 `retire`, a command with `{number}` for the merged pull request, is the way out
 `refuse-retired` names; `footer` ends the placeholder body.
 
+**On sarathi's Auto-fix list.** Outside a cloud session, `claude-hook` puts
+the open pull request it opened or found on the session's sarathi Auto-fix
+list (sarathi 0.6.15's `autofix-watch.sh`): an `opened` row
+`{ "at", "pr": "owner/repo#N", "url", "event": "opened", "source": "niyam pr-autocreate" }`
+in `<dir>/<session id>.jsonl`, where `<dir>` is `SARATHI_AUTOFIX_DIR`, else
+`$XDG_STATE_HOME/sarathi/autofix`, else `~/.local/state/sarathi/autofix`. A
+pull request the list names already gets no second row. With
+`"autofixList": true`, for a repository whose sessions run that sarathi hook,
+the instruction leaves out its `set_monitor` step, because sarathi's warning
+repeats that call at every `wrap_up` until the app confirms Auto-fix. The
+ToolSearch step, the `<pr-created>` tag and `bind_pr` stay: without them the
+app refuses `set_monitor` for a pull request a hook opened. When the row
+cannot be written, or the session id cannot name a list, the whole
+instruction goes out.
+
 **Started work runs to merge.** `niyam keep-going`, Claude Code's Stop hook,
 sends a session back while its branch has commits the base lacks and its
 pull request has not merged at this commit, saying what is left (push, open
@@ -1557,7 +1572,7 @@ tag and the commit. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.23/veda-hq-niyam-0.6.23.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.24/veda-hq-niyam-0.6.24.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release

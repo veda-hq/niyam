@@ -55,6 +55,11 @@ export interface AutocreateSettings {
   retire?: string;
   /** A last line for the placeholder body. */
   footer?: string;
+  /**
+   * The repository runs sarathi's Auto-fix list (autofix-watch.sh): a pull request this hook puts on the list
+   * gets its `set_monitor` step from sarathi's warning, so the instruction leaves that step out.
+   */
+  autofixList: boolean;
 }
 
 const DEFAULTS: AutocreateSettings = {
@@ -64,6 +69,7 @@ const DEFAULTS: AutocreateSettings = {
   skip: ['mergify/', 'gh-readonly-queue/'],
   optOut: [],
   describe: '`gh pr edit --body-file`',
+  autofixList: false,
 };
 
 const where = `${SETTINGS_PATH} "prAutocreate"`;
@@ -86,14 +92,16 @@ export function autocreateSettings(raw: unknown): AutocreateSettings {
   const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).prAutocreate : undefined;
   if (value === undefined) return { ...DEFAULTS };
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${where} must be an object`);
-  const { base = DEFAULTS.base, draft = DEFAULTS.draft, protected: guarded = DEFAULTS.protected, skip = DEFAULTS.skip, optOut = DEFAULTS.optOut, describe, retired, retire, footer, ...rest } = value as Record<string, unknown>;
+  const { base = DEFAULTS.base, draft = DEFAULTS.draft, protected: guarded = DEFAULTS.protected, skip = DEFAULTS.skip, optOut = DEFAULTS.optOut, describe, retired, retire, footer, autofixList = DEFAULTS.autofixList, ...rest } = value as Record<string, unknown>;
   const extra = Object.keys(rest)[0];
-  if (extra !== undefined) throw new Error(`${where} has an unknown key "${extra}"; it takes "base", "draft", "protected", "skip", "optOut", "describe", "retired", "retire" and "footer"`);
+  if (extra !== undefined) throw new Error(`${where} has an unknown key "${extra}"; it takes "base", "draft", "protected", "skip", "optOut", "describe", "retired", "retire", "footer" and "autofixList"`);
   if (typeof base !== 'string' || !BRANCH.test(base)) throw new Error(`${where}.base must be a branch name`);
   if (typeof draft !== 'boolean') throw new Error(`${where}.draft must be true or false`);
+  if (typeof autofixList !== 'boolean') throw new Error(`${where}.autofixList must be true or false`);
   const settings: AutocreateSettings = {
     base,
     draft,
+    autofixList,
     protected: strings(guarded, 'protected', (item) => BRANCH.test(item)),
     skip: strings(skip, 'skip', (item) => item.length > 0 && BRANCH.test(item)),
     optOut: strings(optOut, 'optOut', (item) => ENV_NAME.test(item)),
@@ -548,24 +556,93 @@ export function pushTarget(command: string, cwd: string, home: string): PushTarg
   return undefined;
 }
 
-/** The instruction a session in the desktop app gets: switch Autofix on for the pull request. */
-export function reminder(pr: Pull, opened: string, created: boolean, cloud: boolean): string {
+/**
+ * The instruction a session in the desktop app gets: switch Autofix on for the pull request. `listed`: the pull
+ * request is on the session's sarathi Auto-fix list and the repository says sarathi warns from it, so the
+ * `set_monitor` step is sarathi's and left out here. The tag and `bind_pr` stay: without them the app refuses
+ * `set_monitor` for a pull request a hook opened, and sarathi goes quiet once it records the refusal.
+ */
+export function reminder(pr: Pull, opened: string, created: boolean, cloud: boolean, listed = false): string {
   if (cloud) {
     return `PR #${pr.number} (${pr.url}) ${opened}\nThis cloud session has no Autofix: CI, conflicts and review comments reach no one until a session reads them (gh api; GraphQL is refused here).`;
   }
   // The tag claims the session opened the pull request, so one merely found
   // on the branch gets it only when the session knows it ran that create.
   const claim = created ? 'Write' : 'Only if this session itself ran the `gh pr create` that opened this PR (in a background command, say), write';
-  return (
-    `PR #${pr.number} (${pr.url}) ${opened}\n` +
-    'Standing instruction from the user: Autofix must be ON for every PR a session pushes. Do this now, before anything else:\n' +
+  const steps =
     '1. If mcp__ccd_pr__get_status is not yet a callable tool, it may only be deferred: run ToolSearch with query "select:mcp__ccd_pr__get_status,mcp__ccd_pr__bind_pr,mcp__ccd_pr__set_monitor" to load its schema before concluding it is unavailable.\n' +
     `2. ${claim} this line in your reply text, exactly: <pr-created>${pr.url}</pr-created>\n` +
     'The app lets a session turn Autofix on only for a PR it is sure the session opened, and it learns that only from a FOREGROUND `gh pr create` result or this tag; a PR opened by this hook or inside a background command has neither. Never write the tag for a PR this session did not open.\n' +
-    `3. Call mcp__ccd_pr__get_status. If it reports no bound PR, call mcp__ccd_pr__bind_pr with url ${pr.url}.\n` +
+    `3. Call mcp__ccd_pr__get_status. If it reports no bound PR, call mcp__ccd_pr__bind_pr with url ${pr.url}.\n`;
+  const why = "tell the user in one line that Autofix could not be enabled and why, quoting the app's reason (the tag counts only within 15 minutes of the PR's creation, from the PR's own branch, and when the app's gh login authored it) — never fail silently and leave it off unreported.";
+  if (listed) {
+    return (
+      `PR #${pr.number} (${pr.url}) ${opened}\n` +
+      "Standing instruction from the user: Autofix must be ON for every PR a session pushes. This PR is on this session's sarathi Auto-fix list, and sarathi's warning gives the mcp__ccd_pr__set_monitor call that switches it on. Do this now, before anything else, so that call is not refused:\n" +
+      steps +
+      `If ToolSearch cannot find mcp__ccd_pr__* at all (truly not the desktop app), or get_status/bind_pr still fails, ${why}`
+    );
+  }
+  return (
+    `PR #${pr.number} (${pr.url}) ${opened}\n` +
+    'Standing instruction from the user: Autofix must be ON for every PR a session pushes. Do this now, before anything else:\n' +
+    steps +
     `4. If auto_fix is not true, call mcp__ccd_pr__set_monitor with {"auto_fix": true, "address_comments": true, "url": "${pr.url}"}. If it says the app is not sure this session opened the PR, or has not read it yet, call get_status once more and retry set_monitor once.\n` +
-    "If ToolSearch cannot find mcp__ccd_pr__* at all (truly not the desktop app), or get_status/bind_pr/set_monitor still fails, tell the user in one line that Autofix could not be enabled and why, quoting the app's reason (the tag counts only within 15 minutes of the PR's creation, from the PR's own branch, and when the app's gh login authored it) — never fail silently and leave it off unreported."
+    `If ToolSearch cannot find mcp__ccd_pr__* at all (truly not the desktop app), or get_status/bind_pr/set_monitor still fails, ${why}`
   );
+}
+
+/** A Claude session id sarathi lets name a list file (its `SESSION`). */
+const SARATHI_SESSION = /^[\w.-]{1,128}$/;
+const NAME = /^[\w.-]+$/;
+export const AUTOFIX_SOURCE = 'niyam pr-autocreate';
+
+/** owner/repo#N and the bare URL of https://<host>/<owner>/<repo>/pull/<N>, as sarathi's `fromUrl` reads one. */
+function pullOf(url: string): { pr: string; url: string } | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // fail-open: what is not a URL names no pull request, and the whole instruction goes out
+    return undefined;
+  }
+  const [, owner = '', repo = '', kind, number = ''] = parsed.pathname.split('/');
+  if (parsed.protocol !== 'https:' || kind !== 'pull' || !NAME.test(owner) || !NAME.test(repo) || !/^\d+$/.test(number)) return undefined;
+  return { pr: `${owner}/${repo}#${number}`, url: `https://${parsed.host}/${owner}/${repo}/pull/${number}` };
+}
+
+/** sarathi's Auto-fix list folder: SARATHI_AUTOFIX_DIR, else $XDG_STATE_HOME/sarathi/autofix, else ~/.local/state/sarathi/autofix. */
+export function autofixDir(sys: Sys): string {
+  const override = sys.env.SARATHI_AUTOFIX_DIR;
+  if (override) return override;
+  const state = sys.env.XDG_STATE_HOME;
+  return resolve(state || resolve(sys.home, '.local', 'state'), 'sarathi', 'autofix');
+}
+
+/**
+ * Puts the pull request on the session's sarathi Auto-fix list (sarathi
+ * 0.6.15's `<dir>/<session id>.jsonl`, one JSON row per fact), as `sarathi
+ * autofix add` does: an `opened` row, unless the list names it already, so a
+ * Stop after every turn adds no more. True once it is on the list; false when
+ * the session id cannot name a list or the row could not be written.
+ */
+export function listForAutofix(sys: Sys, session: string | undefined, url: string): boolean {
+  const pull = pullOf(url);
+  if (!session || !SARATHI_SESSION.test(session) || !pull) return false;
+  const file = resolve(autofixDir(sys), `${session}.jsonl`);
+  // sarathi writes its rows with JSON.stringify, so a row for the pull request holds this text; sarathi folds two
+  // spellings of one together by lower case. A row this misses only adds an `opened` row sarathi ignores.
+  const named = JSON.stringify({ pr: pull.pr }).slice(1, -1).toLowerCase();
+  try {
+    if (sys.exists(file) && sys.read(file).toLowerCase().includes(named)) return true;
+    sys.mkdir(dirname(file));
+    // The leading newline ends a partial row a short append left, as sarathi's appendRows does.
+    sys.append(file, `\n${JSON.stringify({ at: sys.now().toISOString(), ...pull, event: 'opened', source: AUTOFIX_SOURCE })}\n`);
+    return true;
+  } catch {
+    // fail-open: a list that cannot be read or written leaves the pull request off it, and the whole instruction goes out
+    return false;
+  }
 }
 
 /** How the session replaces the placeholder body. */
@@ -574,7 +651,7 @@ function editHint(settings: AutocreateSettings, pulls: Pulls, number: number): s
 }
 
 /** The instruction for the record's open pull request, once per session and pull request; empty when there is nothing to say. */
-async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettings, state: State, session: unknown, pulls: Pulls): Promise<string | { problem: string }> {
+async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettings, state: State, session: unknown, pulls: Pulls, listed: boolean): Promise<string | { problem: string }> {
   const pr = state.pr;
   if (!pr || pr.state !== 'OPEN' || !pr.url) return '';
   const who = String(session ?? 'nosession').replace(/[^A-Za-z0-9._-]/g, '_');
@@ -595,7 +672,7 @@ async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettin
     if (body === undefined) opened += ` If its body is still the automatic placeholder, ${replace}`;
     else if (body.includes(MARKER)) opened += ` Its body is still the automatic placeholder: ${replace}`;
   }
-  return reminder(pr, opened, state.created, pulls.cloud);
+  return reminder(pr, opened, state.created, pulls.cloud, listed && settings.autofixList);
 }
 
 /** The pull requests' transport for a repository, or why GitHub cannot be asked. */
@@ -704,7 +781,10 @@ export async function claudeHook(sys: Sys, io: Output, stdin: string, pullsOf: P
   }
   if ('problem' in state) return bail(state.problem);
 
-  let message = await autofixMessage(sys, root, settings, state, session, pulls);
+  // On the session's sarathi Auto-fix list, every time and before the once-only instruction, so a pull request
+  // told about before this release joins it too. A cloud session has no set_monitor, and sarathi is quiet there.
+  const listed = !pulls.cloud && state.pr?.state === 'OPEN' && Boolean(state.pr.url) && listForAutofix(sys, session, state.pr.url);
+  let message = await autofixMessage(sys, root, settings, state, session, pulls, listed);
   if (typeof message !== 'string') return bail(message.problem);
   if (!message && state.notes.length > 0 && event === 'PostToolUse') {
     message = state.notes.join('\n');
