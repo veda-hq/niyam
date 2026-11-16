@@ -34,6 +34,30 @@ describe('checks.yml', () => {
     }
   });
 
+  it("moves the board when a pull request from the repository opens, with the board app's token where the caller passes its secrets", () => {
+    type Job = { if: string; permissions: Record<string, string>; env: Record<string, string>; steps: (Step & { id?: string; if?: string; env?: Record<string, string>; 'continue-on-error'?: boolean })[] };
+    const started = jobs.started as unknown as Job;
+    assert.equal(started.if.replace(/\s+/g, ' ').trim(), "github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.pull_request.head.repo.full_name == github.repository");
+    assert.deepEqual(started.permissions, { contents: 'read', issues: 'read', 'pull-requests': 'read' }, 'read-only, as the caller that runs on pull requests grants');
+    const secrets = (parse(CHECKS) as { on: { workflow_call: { secrets: Record<string, { required: boolean }> } } }).on.workflow_call.secrets;
+    for (const name of ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY']) assert.equal(secrets[name]?.required, false, `${name} is optional, so callers from before it still run`);
+    const token = started.steps.find((step) => step.id === 'board');
+    assert.match(token?.uses ?? '', /^actions\/create-github-app-token@[0-9a-f]{40}$/, 'pinned to a full commit sha');
+    assert.equal(started.env.BOARD_APP_ID, '${{ secrets.NIYAM_BOARD_APP_ID }}');
+    assert.equal(token?.if, "env.BOARD_APP_ID != ''", 'made only where the caller passes the secrets');
+    assert.equal(token?.['continue-on-error'], true, 'a token GitHub will not make fails nothing');
+    assert.deepEqual(token?.with, {
+      'client-id': '${{ secrets.NIYAM_BOARD_APP_ID }}',
+      'private-key': '${{ secrets.NIYAM_BOARD_APP_KEY }}',
+      'permission-organization-projects': 'write',
+      'permission-issues': 'read',
+    });
+    const run = started.steps.find((step) => step.run?.includes('pr-started'));
+    assert.deepEqual(run?.env, { GH_TOKEN: '${{ github.token }}', NIYAM_BOARD_TOKEN: '${{ steps.board.outputs.token }}' });
+    // The app's key is used by the token step alone.
+    assert.equal(CHECKS.match(/secrets\.NIYAM_BOARD_APP_KEY/g)?.length, 1);
+  });
+
   it('takes niyam-ref alone, and keeps the decisions job on the key every release shares (P-57)', () => {
     const inputs = (parse(CHECKS) as { on: { workflow_call: { inputs: Record<string, { type: string; default: string }> } } }).on.workflow_call.inputs;
     assert.deepEqual(Object.keys(inputs), ['niyam-ref']);

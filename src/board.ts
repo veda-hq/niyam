@@ -798,8 +798,12 @@ export async function boardSwept(sys: Sys, token: string, slug: string): Promise
  * Work item's Step to Build, as its first slice has started; and every
  * other Work item to the Step `stepDue` gives it, so a closed one is Done
  * and a new one is at Frame. A workflow's GITHUB_TOKEN cannot write a
- * Project, so the agent's push does this, through GitHub's REST API alone,
- * as a cloud session's proxy refuses GraphQL. Returns what moved, as lines.
+ * Project, so this runs with the agent's token on its push from the desktop,
+ * and with the board GitHub App's token in the shared workflow's Slice
+ * started job when the pull request opens. A Claude cloud session's proxy
+ * refuses GraphQL and every path outside `repos/{owner}/{repo}/…`, so it
+ * never reaches an org's Projects; there only the workflow moves the board.
+ * It uses GitHub's REST API alone. Returns what moved, as lines.
  */
 export async function boardStarted(sys: Sys, token: string, slug: string, slice: number): Promise<string[]> {
   const issue = (await rest(sys, token, `${API}/repos/${slug}/issues/${slice}`)).json as RestIssue;

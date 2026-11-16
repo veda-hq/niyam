@@ -25,7 +25,7 @@ import { onboard, onboardArgs } from './onboard.ts';
 import { ownerStep, ownerStepArgs } from './owner-step.ts';
 import { sessionStart } from './session-start.ts';
 import { upgrade } from './upgrade.ts';
-import { prMerged, prePush, prWorkRules, propose } from './work.ts';
+import { prMerged, prStarted, prePush, prWorkRules, propose } from './work.ts';
 import type { Output, Sys } from './types.ts';
 
 import { CLI } from './names.ts';
@@ -59,6 +59,7 @@ Commands:
   pr-identity      Run by the shared workflow: agent commits Verified and pushed by the agent
   pr-work-rules    Run by the shared workflow: an agent pull request builds one slice it may build
   pr-merged        Run by the shared workflow: a merged pull request closes the slice and States it names
+  pr-started       Run by the shared workflow: an opened pull request moves its slice to In Progress on the board
   pr-design        Run by the shared workflow: each state of the slice links a frame from the design library
   decisions-weekly Run by the shared workflow weekly: decision checks, undo issues, expiring labels
   needs-owner      Run by the shared workflow: an ask labels its issue needs-owner; the owner's answer takes it off
@@ -231,6 +232,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
     case 'pr-identity':
     case 'pr-work-rules':
     case 'pr-merged':
+    case 'pr-started':
     case 'pr-design':
     case 'decisions-weekly':
     case 'needs-owner':
@@ -271,6 +273,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         if (command === 'pr-identity') return await prIdentity(await sys(), io);
         if (command === 'pr-work-rules') return await prWorkRules(await sys(), io);
         if (command === 'pr-merged') return await prMerged(await sys(), io);
+        if (command === 'pr-started') return await prStarted(await sys(), io);
         if (command === 'pre-push') {
           const real = await sys();
           return await prePush(real, io, real.readStdin(), rest[1] ?? '');

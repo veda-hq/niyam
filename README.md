@@ -601,10 +601,18 @@ hold their issues, so this reads no issue on its own. A Project whose Step
 has no Done, made before it, gets one line saying so, and `onboard` adds the
 option, keeping every item's Step. A workflow's `GITHUB_TOKEN` cannot write to a Project, so the
 agent's push does this, with the agent token's `project` scope, with `board`
-on. It uses GitHub's REST API for Projects alone, so it works through a
-Claude cloud session's GitHub proxy, which refuses GraphQL.
+on, through GitHub's REST API for Projects alone.
 A board it cannot read, or a move GitHub refuses, is said and does not stop
-the push; a push for a closed slice, such as a fix, moves nothing. When a pull request naming a slice merges into the default branch,
+the push; a push for a closed slice, such as a fix, moves nothing. A Claude
+cloud session's GitHub proxy lets through only `repos/{owner}/{repo}/…`, so
+its push never reaches an organization's Projects and says only that the
+workflow moves the slice. When a pull request from the repository opens or
+reopens, the shared workflow's Slice started job makes the same moves, under
+the same conditions, with a token from the board GitHub App. The client's
+workflow passes it the app's client id and private key as the
+`NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY` secrets. Without them, the job
+says so in one line and passes, as it does when the board refuses: the board
+never fails a pull request. When a pull request naming a slice merges into the default branch,
 the shared workflow comments on the slice, linking the pull request, and
 closes it, and the Project's Item closed workflow moves it to Done: a
 `Slice: #N` line is not one of GitHub's closing keywords, so GitHub does not
