@@ -444,11 +444,17 @@ on any platform without a token store, `niyam env` prints the lock alone.
    you (`label:needs-owner is:open`), Board (`type:Slice,Brief`, by Status,
    showing linked pull requests), Work items (`type:"Work item"`, grouped by Step), Decisions
    (`type:Decision`, grouped by Decision) and Reviews due (`"Review
-   date":<=@today`), with its workflows; so the board needs nothing done by
-   hand. What the board lacks is known only once you have signed in, so the
+   date":<=@today`), with its workflows. A copy lacks one workflow: Auto-add
+   to project, which names a repository, and which GitHub's API can neither
+   create nor set. Without it, a Work item or Slice an agent opens is on no
+   board, so "By hand:" names it, and Auto-add sub-issues to project when a
+   Project lacks that too, with the repository and the filter
+   `is:issue is:open` to give it. What the board lacks is known only once you have signed in, so the
    plan says "set up or check"; issue types are an organisation-wide
    setting, so the plan says "org-wide" and lists what it would change. If
-   a copy's workflows arrive off, "By hand:" links where to turn them on. A
+   a copy's workflows arrive off, "By hand:" links where to turn them on.
+   Auto-add adds an issue only as it opens or changes, never one already
+   open: `niyam board-audit` (below) lists those. A
    Project of that title made before the template is left as it is: the plan's
    yes does not replace it. When GitHub refuses the copy, or for such an
    older Project, `onboard` adds the fields and makes or updates the views
@@ -624,6 +630,22 @@ State GitHub closed already, through a closing keyword such as "Closes #N"
 beside it, still gets the comment; one that has it gets no second one. That job alone of a pull request's runs writes to issues. It runs only for
 pull requests from the repository itself: a fork's run gets a read-only token, so
 a slice a fork's pull request builds is closed by hand.
+
+**Checking the board.** `niyam board-audit [owner/repo] [--project <title>]`
+compares a repository with its Project and changes nothing: the open issues
+not on it, the unarchived items whose Status disagrees with their issue
+(open but Done, or closed but not Done), and whether Auto-add to project
+and Auto-add sub-issues to project are on. Open issues archived on the
+Project are listed in one line but not counted, since the audit cannot tell
+an archive made on purpose from one made before the issue reopened. The
+repository is the clone's here when none is named, and the Project is the
+one `.github/niyam.json`'s `"project"` names, else "<repo> work". GitHub's
+API shows a workflow's name and whether it is on, not the repository or
+filter it adds from, so the audit says so. It runs with `GH_TOKEN`, which
+needs read access to the Project, and exits 0 when the board matches, 3 when
+something is to fix, and 1 when it could not check. A Claude cloud
+session's GitHub proxy refuses GraphQL and an organisation's Projects
+(veda-hq/niyam#399), so there it says it cannot run and checks nothing.
 
 **What needs the owner.** A request the owner made on the work item is its
 own approval, linked as above. A fix needs none: it restores what the owner

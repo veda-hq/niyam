@@ -143,14 +143,17 @@ describe('setUpBoard', () => {
     assert.equal(out[0], '- issue types: GitHub has them for organisations only; skipped for a personal repository');
   });
 
-  it('copies the template for a new Project, links it, and leaves nothing to do by hand', async () => {
+  it('copies the template for a new Project, links it, and leaves only Auto-add to project by hand', async () => {
     const sys = new FakeSys();
     const board = new Board(sys);
     board.copyPending = 2;
     const { url, out, err, byHand } = await setUp(sys, ['y', 'y', 'y']);
     assert.deepEqual(err, []);
     assert.equal(url, COPY_URL);
-    assert.deepEqual(byHand, []);
+    // The template's copy lacks it, as it names a repository, and GitHub's API cannot add it.
+    assert.deepEqual(byHand, [
+      `Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.`,
+    ]);
     assert.deepEqual(board.titles, ['example-app work']);
     assert.ok(board.project?.linked);
     assert.deepEqual(sys.slept, [3000, 3000], 'waits for the fields GitHub adds after the copy');
@@ -160,13 +163,34 @@ describe('setUpBoard', () => {
       '✓ fields: Step, Decision, Review date',
       '✓ views: Needs you, Board, Work items, Decisions, Reviews due',
       "- Board shows slices and briefs; Done keeps one until the Auto-archive items workflow archives it, with the template's filter is:closed updated:<@today-7d, which GitHub's API can neither read nor set",
+      `Add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open in ${COPY_URL} → Workflows (GitHub's API cannot); it adds issues as they open or change, not those already open, which niyam board-audit lists`,
     ]);
     assert.ok(!board.operations.some((o) => o === 'createProjectV2(' || o === 'createProjectV2Field' || o.includes('ProjectV2View')));
+  });
+
+  it('names both auto-add workflows when a Project has neither, as veda-hq\'s "niyam work" had no Auto-add to project', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.copyAbsent = ['Auto-add to project', 'Auto-add sub-issues to project'];
+    const { out, byHand } = await setUp(sys, ['y', 'y', 'y']);
+    const steps = 'Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open; Auto-add sub-issues to project, turned on';
+    assert.equal(out.at(-1), `Add the workflows ${steps} in ${COPY_URL} → Workflows (GitHub's API cannot); it adds issues as they open or change, not those already open, which niyam board-audit lists`);
+    assert.deepEqual(byHand, [`Once for the board: at ${COPY_URL}/workflows, add the workflows ${steps}, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.`]);
+  });
+
+  it('asks for no auto-add workflow a Project has set up', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.copyAbsent = [];
+    const { out, byHand } = await setUp(sys, ['y', 'y', 'y']);
+    assert.deepEqual(byHand, []);
+    assert.ok(!out.some((line) => line.startsWith('Add the workflow')));
   });
 
   it("names a copy's workflows that are off", async () => {
     const sys = new FakeSys();
     const board = new Board(sys);
+    board.copyAbsent = [];
     board.copyOff = ['Item added to project', 'Pull request merged'];
     const { out, byHand } = await setUp(sys, ['y', 'y', 'y']);
     assert.equal(out.at(-1), `Turn on the workflows Item added to project, Pull request merged in ${COPY_URL} → Workflows (GitHub's API cannot)`);

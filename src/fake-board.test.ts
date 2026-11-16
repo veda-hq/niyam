@@ -62,7 +62,21 @@ export interface FakeProject {
   pending?: number;
   /** Its workflows that are off. */
   off?: string[];
+  /** The workflows of WORKFLOWS it has not set up, which GitHub then does not list. */
+  absent?: string[];
 }
+
+/** A Project's workflows once set up, as GitHub named them on 16 Nov 2026; the template has all but Auto-add to project. */
+export const WORKFLOWS = [
+  'Auto-add sub-issues to project',
+  'Auto-add to project',
+  'Auto-archive items',
+  'Auto-close issue',
+  'Item added to project',
+  'Item closed',
+  'Pull request linked to issue',
+  'Pull request merged',
+];
 
 /** The custom fields a copy of the template gains a little after the copy returns. */
 const FIELDS_ADDED = FIELDS.map((field) => field.name);
@@ -92,6 +106,19 @@ export interface FakeIssue {
   closed?: boolean;
 }
 
+/**
+ * An issue as the board audit reads it: its items on Projects (the board's
+ * when `project` names none), each archived or not and with its Status; a
+ * pull request, or one of another repository, is on the board alone.
+ */
+export interface AuditIssue {
+  number: number;
+  closed?: boolean;
+  repo?: string;
+  pull?: boolean;
+  on?: { project?: string; archived?: boolean; status?: string }[];
+}
+
 export class Board {
   /** The organisation's issue types, by name; their ids count from 1 in this order. */
   issueTypes = ['Task', 'Bug'];
@@ -111,6 +138,8 @@ export class Board {
   copyPending = 0;
   /** The workflows a copy of the template has off. */
   copyOff: string[] = [];
+  /** The workflows a copy of the template lacks: as GitHub's copy, the one that names a repository. */
+  copyAbsent: string[] = ['Auto-add to project'];
   /** The titles of the Projects this board created or copied. */
   titles: string[] = [];
   /** Projects listed before this board's, as pages of other titles. */
@@ -119,6 +148,10 @@ export class Board {
   itemsPerPage = 100;
   /** What the board's GraphQL calls asked for, by the operation they ran. */
   operations: string[] = [];
+  /** The issues the audit reads: the app's own, open unless closed, and their items on Projects. */
+  auditIssues: AuditIssue[] = [];
+  /** Whether GitHub shows no owner of the repository's name. */
+  noOwner = false;
 
   constructor(sys: FakeSys, organisation = true) {
     sys.ghToken = OWNER_TOKEN;
@@ -218,6 +251,10 @@ export class Board {
   graphql({ query, variables }: { query: string; variables: Record<string, unknown> }): { status: number; json: unknown } {
     const operation =
       [
+        // The audit's reads first: they hold other operations' words, such as items(first and projectsV2(.
+        'BoardAuditProject',
+        'BoardAuditIssues',
+        'BoardAuditItems',
         'copyProjectV2',
         'addProjectV2DraftIssue',
         'addProjectV2ItemById',
@@ -240,7 +277,56 @@ export class Board {
       ].find((name) => query.includes(name)) ?? 'unknown';
     this.operations.push(operation);
     const data = (json: unknown) => ({ status: 200, json: { data: json } });
+    const pageOf = <T,>(rows: T[], after: unknown) => {
+      const start = after === null || after === undefined ? 0 : Number(after);
+      const more = start + this.itemsPerPage < rows.length;
+      return { nodes: rows.slice(start, start + this.itemsPerPage), pageInfo: { hasNextPage: more, endCursor: more ? String(start + this.itemsPerPage) : null } };
+    };
+    const projectId = this.project?.id ?? 'P_1';
     switch (operation) {
+      case 'BoardAuditProject': {
+        if (this.noOwner) return data({ repositoryOwner: null });
+        const page = variables.after === null ? 0 : Number(variables.after);
+        const last = page >= this.otherPages;
+        const title = this.project?.title ?? 'example-app work';
+        const mine = this.project && { id: projectId, title, url: projectId === 'P_2' ? COPY_URL : URL, closed: this.project.closed ?? false };
+        // GitHub's search by title also finds a closed Project of the same name, and others like it.
+        const nodes = last ? [{ id: 'P_9', title, url: 'closed', closed: true }, ...(mine ? [mine] : [])] : [{ id: `P_${page + 10}`, title: `${title} ${page}`, url: 'x', closed: false }];
+        return data({ repositoryOwner: { projectsV2: { nodes, pageInfo: { hasNextPage: !last, endCursor: last ? null : String(page + 1) } } } });
+      }
+      case 'BoardAuditIssues': {
+        if (`${String(variables.owner)}/${String(variables.name)}` !== SLUG) return data({ repository: null });
+        const open = this.auditIssues.filter((issue) => !issue.closed && !issue.repo);
+        const nodes = open.map((issue) => ({
+          number: issue.number,
+          title: `Issue ${issue.number}`,
+          projectItems: { nodes: (issue.on ?? []).map((item) => ({ isArchived: item.archived ?? false, project: { id: item.project ?? projectId } })) },
+        }));
+        return data({ repository: { issues: pageOf(nodes, variables.after) } });
+      }
+      case 'BoardAuditItems': {
+        assert.equal(variables.id, projectId);
+        const project = this.at(variables.id);
+        const off = project.off ?? [];
+        const workflows = WORKFLOWS.filter((name) => !project.absent?.includes(name)).map((name) => ({ name, enabled: !off.includes(name) }));
+        const items = [
+          ...this.auditIssues.flatMap((issue) =>
+            (issue.on ?? [])
+              .filter((item) => (item.project ?? projectId) === projectId)
+              .map((item) => ({
+                isArchived: item.archived ?? false,
+                status: item.status === undefined ? null : { name: item.status },
+                content: issue.pull
+                  ? { __typename: 'PullRequest' }
+                  : { __typename: 'Issue', number: issue.number, title: `Issue ${issue.number}`, state: issue.closed ? 'CLOSED' : 'OPEN', repository: { nameWithOwner: issue.repo ?? SLUG.toUpperCase() } },
+              })),
+          ),
+          // A draft, and an item whose issue the token cannot see.
+          { isArchived: false, status: { name: 'Done' }, content: { __typename: 'DraftIssue' } },
+          { isArchived: false, status: null, content: null },
+        ];
+        return data({ node: { workflows: { nodes: workflows }, items: pageOf(items, variables.after) } });
+      }
       case 'projectsV2(': {
         const kind = query.includes('organization(') ? 'organization' : 'user';
         const page = variables.after === null ? 0 : Number(variables.after);
@@ -266,7 +352,7 @@ export class Board {
         assert.deepEqual({ ...variables, title: undefined }, { template: 'P_T', owner: 'O_1', title: undefined });
         this.titles.push(String(variables.title));
         if (this.project) this.old = this.project;
-        this.project = { id: 'P_2', fields: [...BUILT_IN], linked: false, views: settledViews(), grouped: true, items: [], pending: this.copyPending, off: [...this.copyOff] };
+        this.project = { id: 'P_2', fields: [...BUILT_IN], linked: false, views: settledViews(), grouped: true, items: [], pending: this.copyPending, off: [...this.copyOff], absent: [...this.copyAbsent] };
         return data({ copyProjectV2: { projectV2: { id: 'P_2', title: variables.title, url: COPY_URL } } });
       }
       case 'linkProjectV2ToRepository':
@@ -294,7 +380,9 @@ export class Board {
       case 'groupByFields': {
         const project = this.at(variables.id);
         const by = (name: string) => (project.grouped ? { 'Work items': [{ name: 'Step' }, {}], Decisions: [{ name: 'Decision' }] }[name] ?? [] : []);
-        const workflows = [{ name: 'Item closed', enabled: true }, ...(project.off ?? []).map((name) => ({ name, enabled: false }))];
+        const off = project.off ?? [];
+        const names = [...WORKFLOWS.filter((name) => !project.absent?.includes(name)), ...off.filter((name) => !WORKFLOWS.includes(name))];
+        const workflows = names.map((name) => ({ name, enabled: !off.includes(name) }));
         return data({ node: { views: { nodes: (project.views ?? []).map((view) => ({ name: view.name, groupByFields: { nodes: by(view.name) } })) }, workflows: { nodes: workflows } } });
       }
       case 'items(first': {
