@@ -26,6 +26,7 @@ import { reviewThread, threadArgs } from './review-thread.ts';
 import { onboard, onboardArgs } from './onboard.ts';
 import { ownerStep, ownerStepArgs } from './owner-step.ts';
 import { sessionStart } from './session-start.ts';
+import { SSH_SIGN, sshSign } from './ssh-sign.ts';
 import { upgrade } from './upgrade.ts';
 import { prMerged, prStarted, prePush, prWorkRules, propose } from './work.ts';
 import type { Output, Sys } from './types.ts';
@@ -58,6 +59,8 @@ Commands:
                    For agents run from any tool: the GitHub lock, then the agent identity where this Mac
                    has it, as shell lines for eval "$(niyam env)", or with -- the command run under them
   session-start    Run by a client's SessionStart hook: the agent identity, or GitHub locked out
+  ssh-sign -Y sign -n <namespace> -f <key> <file>...
+                   Run by git in a Claude cloud session, as gpg.ssh.program: signs as ssh-keygen does
   guard            Run by a client's PreToolUse hook: gh and git's remote commands only as the agent
   as-agent --session <session_id> -- <command> [args...]
                    For a client's hook: run one command as the session's agent, or nothing (exit ${LOCKED})
@@ -156,7 +159,7 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit' || command === SSH_SIGN ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
@@ -187,6 +190,8 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
       return 0;
     case 'cloud-setup':
       return cloudSetup(io);
+    case SSH_SIGN:
+      return sshSign(io, rest);
     case 'session-start':
       return sessionStart(await sys(), io);
     case 'guard':
