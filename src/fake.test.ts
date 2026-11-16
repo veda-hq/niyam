@@ -103,6 +103,8 @@ export class FakeSys implements Sys {
     this.route('GET', '/user', { status: 401, json: null });
     this.route('GET', '/users/ExampleBot/ssh_signing_keys', { status: 200, json: [] });
     this.route('GET', '/user/ssh_signing_keys', { status: 200, json: [] });
+    // The agent's signing keys with their titles: it has its cloud signing key already, unless a test routes them.
+    this.route('GET', '/user/ssh_signing_keys?per_page=100', { status: 200, json: [{ id: 3, title: 'niyam cloud signing', key: 'ssh-ed25519 AAAAcloud', created_at: '2026-11-16T00:00:00Z' }] });
     this.route('POST', '/repos/example-org/example-app/pulls', { status: 201, json: { number: 7, html_url: PULL_URL, node_id: 'PR_7' } });
     // No onboard pull request is open yet, from its branch or the one before P-56.
     this.route('GET', '/repos/example-org/example-app/pulls?state=open&head=example-org:niyam/onboard', { status: 200, json: [] });

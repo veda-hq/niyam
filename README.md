@@ -421,7 +421,17 @@ on any platform without a token store, `niyam env` prints the lock alone.
    every run (see Claude cloud sessions below); a cloud session with no
    niyam runs it from the SessionStart hook, so there is nothing to paste,
    and the first time, the plan lists the one connection of claude.ai's
-   GitHub as the agent, once per claude.ai account. Where the
+   GitHub as the agent, once per claude.ai account. When the agent has no
+   signing key on GitHub titled `niyam cloud signing`, the plan's Claude
+   cloud group also lists one, "signing key  for AGENT, on the clipboard":
+   as its last step, after the pull request opens, `onboard` makes it as
+   `niyam cloud-key` does (below), and "By hand:" starts with the paste
+   into each cloud environment's variables. The key is the agent's, not the
+   repository's, so onboarding a second repository finds it and says nothing
+   about it. A key that fails only warns, leaving the pull request and every
+   step before it in place, and "By hand:" names `niyam cloud-key <agent>`
+   instead; so does a run where `cloud-key` would refuse, in a Claude Code
+   or cloud session. A dry run plans no key. Where the
    repo still has `.github/process-rules/cloud-setup.sh`, which releases up
    to 0.6.10 wrote beside it, the pull request deletes it, but only where it
    leaves `.github/niyam/cloud-setup.sh` (one the run could not write, as
@@ -1331,9 +1341,12 @@ probe that does not verify. The session's line says why and the session
 works on as the agent. A commit claiming the agent without the agent's
 signature would fail PR identity, so it is all or nothing.
 
-Set the key up once per cloud environment, in your own terminal on the Mac
-`niyam machine` set up for the agent: run `niyam cloud-key [agent]` (`--yes`
-skips its one question). It does four things:
+`niyam onboard` makes the key the first time it runs for an agent that has
+none (see Adopting above), so all that is left is the paste. To make one
+yourself, as when the line was lost, run `niyam cloud-key [agent]` in your own
+terminal on the Mac `niyam machine` set up for the agent (`--yes` skips its
+one question). One line serves every cloud environment the agent works in.
+`onboard` and `cloud-key` make the key alike, in four steps:
 
 - makes a new ed25519 key in a private temporary folder, for the agent's cloud sessions alone, apart from the Mac's signing key, so it can be revoked on its own;
 - registers it as the agent's signing key, titled `niyam cloud signing`, with the token `machine` stored, and checks GitHub lists it;

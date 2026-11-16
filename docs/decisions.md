@@ -2136,3 +2136,20 @@
   - Rejected: onboard setting the secrets itself, since only the owner holds
     the app's private key; and `secrets: inherit`, which would hand the
     shared checks every secret of the repository.
+- **2026-11-16 — Record: onboard makes the agent's cloud signing key (slice
+  #417, Work item #22).** Alok asked why `onboard` does not do what
+  `niyam cloud-key` does. Unlike `machine` (2026-11-06), `cloud-key` needs
+  nothing pasted and no answer beyond one yes, so `onboard`'s one yes, and
+  `--yes`, can cover it.
+  - The key is the agent's: one `NIYAM_SIGNING_KEY` line serves every cloud
+    environment. `onboard` reads the agent's own list of signing keys with
+    the agent's token and plans a key only when none is titled
+    `niyam cloud signing`; with one, it says nothing about it.
+  - It is the last step, after the pull request opens, through
+    `cloud-key`'s own code. A failure only warns and names
+    `niyam cloud-key <agent>` under "By hand:"; nothing before it is undone.
+  - Where `cloud-key` would refuse (a Claude Code or cloud session), and in
+    a dry run, `onboard` plans no key and names the command instead. A Mac
+    with no token store never gets that far: `onboard` refuses it first.
+  - A list GitHub does not give makes no key, since there may be one
+    already: the plan warns and names `niyam cloud-key <agent>`.
