@@ -10,6 +10,7 @@ import { PROXY_TOKEN } from './cloud.ts';
 import { FakeSys, HOME, ROOT, capture } from './fake.test.ts';
 import { GITHUB_API } from './host.ts';
 import {
+  AUTOFIX_SOURCE,
   MARKER,
   OPTOUT_KEPT,
   PR_LIST_LIMIT,
@@ -18,8 +19,10 @@ import {
   RETIRED_UNCHECKED,
   STATE_DIR,
   autocreateSettings,
+  autofixDir,
   claudeHook,
   ensurePr,
+  listForAutofix,
   optedOut,
   optoutLines,
   optoutPath,
@@ -29,6 +32,7 @@ import {
   pushedRefs,
   recordOptout,
   refuseRetired,
+  reminder,
   retiredBy,
   spawnWatchers,
   statePath,
@@ -410,6 +414,109 @@ describe('pr-autocreate claude-hook (real git, GitHub faked)', () => {
   });
 });
 
+describe("pr-autocreate claude-hook and sarathi's Auto-fix list", () => {
+  let w: ReturnType<typeof world>;
+  let github: FakeGitHub;
+  let sys: ReturnType<typeof machine>;
+  const PR = 'https://github.com/example-org/example-app/pull/100';
+  const STEP4 = /\n4\. If auto_fix is not true, call mcp__ccd_pr__set_monitor with \{"auto_fix": true, "address_comments": true, "url": "https:\/\/github\.com\/example-org\/example-app\/pull\/100"\}\./;
+  beforeEach(() => {
+    w = world();
+    github = new FakeGitHub();
+    sys = machine(github, w.dir);
+  });
+  const list = (dir = join(w.dir, '.local/state/sarathi/autofix'), session = 's1'): Record<string, unknown>[] => {
+    const file = join(dir, `${session}.jsonl`);
+    if (!existsSync(file)) return [];
+    return readFileSync(file, 'utf8').split('\n').filter((text) => text.startsWith('{')).map((text) => JSON.parse(text) as Record<string, unknown>);
+  };
+  const listOn = (): void => {
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { autofixList: true } }));
+  };
+
+  it('puts the pull request on the list, and with the setting off says the whole instruction as before', async () => {
+    const got = await hook(sys, bash(w.work, 'git push'));
+    assert.deepEqual(list(), [{ at: '2026-11-15T10:00:00.000Z', pr: 'example-org/example-app#100', url: PR, event: 'opened', source: AUTOFIX_SOURCE }]);
+    const said = context(got.out);
+    assert.match(said, STEP4);
+    assert.match(said, /or get_status\/bind_pr\/set_monitor still fails, tell the user/);
+    const opened = (said.split('\n')[0] as string).slice(`PR #100 (${PR}) `.length);
+    assert.equal(said, reminder({ number: 100, url: PR, state: 'OPEN' }, opened, true, false));
+  });
+
+  it('with "autofixList" leaves out only the set_monitor step', async () => {
+    listOn();
+    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
+    assert.equal(list().length, 1);
+    assert.doesNotMatch(said, /\n4\./);
+    assert.doesNotMatch(said, /retry set_monitor/);
+    assert.match(said, /^PR #100 .*Its body is still the automatic placeholder: replace it/);
+    assert.match(said, /This PR is on this session's sarathi Auto-fix list, and sarathi's warning gives the mcp__ccd_pr__set_monitor call/);
+    assert.match(said, /\n1\. .*ToolSearch with query "select:mcp__ccd_pr__get_status,mcp__ccd_pr__bind_pr,mcp__ccd_pr__set_monitor"/);
+    assert.match(said, /\n2\. Write this line in your reply text, exactly: <pr-created>https:\/\/github\.com\/example-org\/example-app\/pull\/100<\/pr-created>\n/);
+    assert.match(said, /\n3\. Call mcp__ccd_pr__get_status\. If it reports no bound PR, call mcp__ccd_pr__bind_pr with url https:\/\/github\.com\/example-org\/example-app\/pull\/100\.\n/);
+    assert.match(said, /or get_status\/bind_pr still fails, tell the user in one line that Autofix could not be enabled/);
+  });
+
+  it('says the whole instruction when the row cannot be written, or the session names no list', async () => {
+    listOn();
+    const blocked = join(w.dir, 'not-a-folder');
+    writeFileSync(blocked, 'a file where the folder goes');
+    const unwritable = machine(github, w.dir, { SARATHI_AUTOFIX_DIR: join(blocked, 'autofix') });
+    assert.match(context((await hook(unwritable, bash(w.work, 'git push'))).out), STEP4);
+    // An id sarathi refuses (a slash, too long), or none.
+    for (const session of ['a/b', 'x'.repeat(129), '']) {
+      const said = context((await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: session }))).out);
+      assert.match(said, STEP4);
+    }
+    assert.deepEqual(list(), []);
+  });
+
+  it('adds no second row for a pull request the list names already, whoever put it there', async () => {
+    const dir = join(w.dir, '.local/state/sarathi/autofix');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 's1.jsonl'), `not json\n${JSON.stringify({ at: 'x', pr: 'Example-Org/Example-App#100', url: PR, event: 'on', source: 'mcp__ccd_pr__set_monitor' })}\n`);
+    listOn();
+    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
+    assert.doesNotMatch(said, /\n4\./);
+    await hook(sys, input('Stop', { cwd: w.work }));
+    assert.deepEqual(list().map((row) => row.event), ['on']);
+  });
+
+  it('adds one row for a session told before, and none in a cloud session', async () => {
+    await hook(sys, bash(w.work, 'git push'));
+    await hook(sys, input('Stop', { cwd: w.work }));
+    await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
+    assert.equal(list().length, 1);
+    assert.equal(list(undefined, 's2').length, 1);
+    const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
+    await hook(cloud, input('Stop', { cwd: w.work, session_id: 's3' }), viaToken(true));
+    assert.deepEqual(list(undefined, 's3'), []);
+  });
+
+  it('lists a pull request it found on the branch, and still asks for the tag only if the session opened it', async () => {
+    github.pulls.push({ number: 7, head: 'feature', state: 'open', merged_at: null, body: 'Real.' });
+    listOn();
+    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
+    assert.deepEqual(list().map((row) => row.pr), ['example-org/example-app#7']);
+    assert.match(said, /\n2\. Only if this session itself ran the `gh pr create` that opened this PR/);
+    assert.doesNotMatch(said, /\n4\./);
+  });
+
+  it('finds the list where sarathi does: SARATHI_AUTOFIX_DIR, then XDG_STATE_HOME, then ~/.local/state', () => {
+    const at = (env: Record<string, string>): string => autofixDir(machine(github, '/home/u', env));
+    assert.equal(at({ SARATHI_AUTOFIX_DIR: '/x/list', XDG_STATE_HOME: '/state' }), '/x/list');
+    assert.equal(at({ SARATHI_AUTOFIX_DIR: '', XDG_STATE_HOME: '/state' }), '/state/sarathi/autofix');
+    assert.equal(at({ XDG_STATE_HOME: '' }), '/home/u/.local/state/sarathi/autofix');
+    for (const url of ['not a url', 'http://github.com/a/b/pull/1', 'https://github.com/a/b/issues/1', 'https://github.com/a/b/pull/x', 'https://github.com/a/b%20c/pull/1']) {
+      assert.equal(listForAutofix(sys, 's1', url), false, url);
+    }
+    assert.equal(listForAutofix(sys, 's1', 'https://github.com/a/b/pull/12/files'), true);
+    assert.deepEqual(list().map((row) => [row.pr, row.url]), [['a/b#12', 'https://github.com/a/b/pull/12']]);
+  });
+});
+
 describe('pr-autocreate spawn-watchers and watch (real git, GitHub faked)', () => {
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
@@ -776,9 +883,11 @@ describe('pushTarget', () => {
 describe('autocreateSettings', () => {
   it('takes the defaults, or what the client sets', () => {
     assert.deepEqual(autocreateSettings(null), autocreateSettings({}));
-    assert.deepEqual(autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: [], optOut: ['OLD_VAR'], retired: 'https://x.invalid/a', retire: 'tool retire --pr {number}', footer: 'f' } }), {
+    assert.equal(autocreateSettings({}).autofixList, false);
+    assert.deepEqual(autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: [], optOut: ['OLD_VAR'], retired: 'https://x.invalid/a', retire: 'tool retire --pr {number}', footer: 'f', autofixList: true } }), {
       base: 'trunk',
       draft: false,
+      autofixList: true,
       protected: ['release'],
       skip: [],
       optOut: ['OLD_VAR'],
@@ -800,6 +909,8 @@ describe('autocreateSettings', () => {
       [{ retired: 'http://x' }, /retired must be an https link/],
       [{ retire: 'tool retire' }, /retire must name the merged pull request as \{number\}/],
       [{ retire: 'a\nb' }, /retire must be one line/],
+      [{ autofixList: 'yes' }, /autofixList must be true or false/],
+      [{ autocreate: true }, /unknown key "autocreate".*"footer" and "autofixList"/],
     ] as const) {
       assert.throws(() => autocreateSettings({ prAutocreate: value }), error);
     }
