@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 
 import { LOCKED, asAgent, asAgentArgs } from './as-agent.ts';
+import { auditArgs, boardAudit } from './board-audit.ts';
 import { cloudSetup } from './cloud.ts';
 import { cloudKey, cloudKeyArgs } from './cloud-key.ts';
 import { needsOwner } from './asks.ts';
@@ -111,6 +112,10 @@ Commands:
   work-item-number [--issue <N>] [--apply]
                    Run by a client's workflow on issue events: a Work item whose number something else
                    holds is renumbered, with a comment; --apply writes
+  board-audit [owner/repo] [--project <title>]
+                   Read only: the open issues not on the work board, items whose Status disagrees with
+                   their issue, and whether the auto-add workflows are on; exit 3 when something is to fix.
+                   Needs GH_TOKEN; cannot run in a Claude cloud session, whose proxy refuses Projects
   help            Show this text
   version          Print the installed version
 
@@ -151,17 +156,17 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
     io.err(USAGE);
     return 2;
   }
-  if (command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number') {
+  if (command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit') {
     // Their options are checked here, so a bad one is bad usage (exit 2).
     try {
-      (command === 'cloud-key' ? cloudKeyArgs : command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
+      (command === 'board-audit' ? auditArgs : command === 'cloud-key' ? cloudKeyArgs : command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
     } catch (error) {
       io.err(`niyam: ${error instanceof Error ? error.message : String(error)}`);
       io.err(USAGE);
@@ -255,7 +260,9 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
     case 'doc-number':
     case 'renumber-doc':
     case 'work-item-number':
+    case 'board-audit':
       try {
+        if (command === 'board-audit') return await boardAudit(await sys(), io, rest);
         if (command === 'doc-number') return docNumber(await sys(), io, rest);
         if (command === 'renumber-doc') return renumberDoc(await sys(), io, rest);
         if (command === 'work-item-number') return workItemNumber(await sys(), io, rest);

@@ -64,6 +64,11 @@
       "count": 9
     }
   },
+  "src/board-audit.ts": {
+    "shuddhi/schema-parse-untrusted": {
+      "count": 1
+    }
+  },
   "src/board.ts": {
     "shuddhi/no-raw-error-string": {
       "count": 2

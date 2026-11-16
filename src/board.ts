@@ -73,6 +73,23 @@ const GROUPING = [
 const ARCHIVE_FILTER = 'is:closed updated:<@today-7d';
 
 /**
+ * The Project workflows that put a repository's issues on the board, by
+ * GitHub's names. GitHub's API can neither create nor set one, and lists
+ * one only once it is set up; a copy of the template has no Auto-add to
+ * project, since that one names a repository. Without them an issue an
+ * agent opens directly, such as a Work item or a Slice, is on no board.
+ */
+export const AUTO_ADD = ['Auto-add to project', 'Auto-add sub-issues to project'] as const;
+
+/** The filter Auto-add to project takes: every open issue of the repository. */
+export const AUTO_ADD_FILTER = 'is:issue is:open';
+
+/** What the owner sets up for an auto-add workflow that is missing, at the repository `slug`. */
+function autoAddStep(name: string, slug: string): string {
+  return name === 'Auto-add to project' ? `${name}, for the repository ${slug} with the filter ${AUTO_ADD_FILTER}` : `${name}, turned on`;
+}
+
+/**
  * How the owner shows Type on Needs you. GitHub's API can neither read nor
  * set the issue-type column: GraphQL lists no such field, REST cannot update
  * a view, and updateProjectV2View refuses its id ("Visible fields must be
@@ -99,7 +116,7 @@ interface Repo {
   organisation: boolean;
 }
 
-async function graphql(sys: Sys, token: string, query: string, variables: Record<string, unknown>): Promise<unknown> {
+export async function graphql(sys: Sys, token: string, query: string, variables: Record<string, unknown>): Promise<unknown> {
   const { status, json } = await sys.http(`${API}/graphql`, { method: 'POST', token, body: { query, variables } });
   const reply = json as { data?: unknown; errors?: { message?: string }[] } | null;
   if (status !== 200 || reply?.errors?.length || !reply?.data) {
@@ -319,6 +336,12 @@ export async function setUpBoard(
     }
     io.out(`- Board shows slices and briefs; Done keeps one until the Auto-archive items workflow archives it, with the template's filter ${ARCHIVE_FILTER}, which GitHub's API can neither read nor set`);
   }
+  if (done.missing.length > 0) {
+    const steps = done.missing.map((name) => autoAddStep(name, slug)).join('; ');
+    const plural = done.missing.length === 1 ? '' : 's';
+    io.out(`Add the workflow${plural} ${steps} in ${project.url} → Workflows (GitHub's API cannot); it adds issues as they open or change, not those already open, which niyam board-audit lists`);
+    byHand.push(`Once for the board: at ${project.url}/workflows, add the workflow${plural} ${steps}, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.`);
+  }
   if (done.off.length > 0) {
     io.out(`Turn on the workflows ${done.off.join(', ')} in ${project.url} → Workflows (GitHub's API cannot)`);
     byHand.push(`Once for the board: turn on the workflow${done.off.length === 1 ? '' : 's'} ${done.off.join(', ')} at ${project.url}/workflows, which GitHub's API cannot.`);
@@ -388,9 +411,10 @@ async function copyTemplate(sys: Sys, io: Output, token: string, ownerId: string
 /**
  * What a copy of the template has that GitHub's API cannot set: whether the
  * views are grouped as the template's are, which marks a Project copied from
- * it, and the names of its workflows that are off.
+ * it, the names of its workflows that are off, and the auto-add workflows it
+ * lacks.
  */
-async function finished(sys: Sys, token: string, projectId: string): Promise<{ grouped: boolean; off: string[] }> {
+async function finished(sys: Sys, token: string, projectId: string): Promise<{ grouped: boolean; off: string[]; missing: string[] }> {
   const read = (await graphql(
     sys,
     token,
@@ -401,6 +425,7 @@ async function finished(sys: Sys, token: string, projectId: string): Promise<{ g
   return {
     grouped: GROUPING.every(({ view, field }) => views.some((had) => had.name === view && had.groupByFields.nodes.some((by) => by.name === field))),
     off: read.node.workflows.nodes.filter((workflow) => !workflow.enabled).map((workflow) => workflow.name),
+    missing: AUTO_ADD.filter((name) => !read.node.workflows.nodes.some((workflow) => workflow.name === name)),
   };
 }
 

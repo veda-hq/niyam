@@ -195,6 +195,8 @@ describe('onboard', () => {
       `└  ${PULL_URL}  merges itself when checks pass`,
       '',
       'By hand:',
+      // A copy of the template has no Auto-add to project, which names a repository.
+      `  Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.`,
       // GitHub lists no secrets here, so onboard cannot tell whether the board app's are set.
       `  ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}`,
       `  Once for example-org/example-app: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ExampleBot and the prompt below the line in https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
@@ -241,7 +243,7 @@ describe('onboard', () => {
     assert.ok(body.includes(`\n  - Project "example-app work": ${COPY_URL}\n  - fields: Step, Decision, Review date\n`), body);
     assert.ok(body.includes('\n- pre-push hook:\n  - wrote the pre-push git hook .git/hooks/pre-push, which checks an agent session pushes to GitHub as the agent, and the work rules\n'), body);
     assert.ok(body.includes('\n  - committer: ExampleBot; verified: true (valid)\n  - GitHub shows the test commit Verified by ExampleBot\n'), body);
-    assert.ok(body.includes(`\nLeft to do by hand:\n\n- ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}\n- The review routine: create a weekly Claude routine on example-org/example-app`), body);
+    assert.ok(body.includes(`\nLeft to do by hand:\n\n- Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.\n- ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}\n- The review routine: create a weekly Claude routine on example-org/example-app`), body);
     assert.ok(
       body.includes(
         `\n- Claude cloud sessions, once per claude.ai account: connect claude.ai's GitHub as ExampleBot. Each session with no niyam installs it from ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so there is nothing to paste; what niyam cloud-setup prints, put in the cloud environment's Setup script, makes sessions start faster, since Claude caches what a Setup script installs.\n`,
