@@ -8,7 +8,11 @@ import { after, before as beforeAll, describe, it } from 'node:test';
 import {
   type DocSettings,
   type RunGh,
+  NiyamFileSchema,
+  PullListSchema,
+  WorkItemLineSchema,
   allocate,
+  schema,
   detail,
   wholeNumber,
   basenamesOnRef,
@@ -213,6 +217,25 @@ describe('detail and wholeNumber', () => {
   });
 });
 
+describe('the schemas', () => {
+  it('validate the Standard Schema way: the value, or the issue', () => {
+    assert.deepEqual(WorkItemLineSchema['~standard'].validate({ number: 7, title: 't' }), { value: { number: 7, title: 't' } });
+    assert.deepEqual(WorkItemLineSchema['~standard'].validate({ number: 7.5, title: 't' }), { issues: [{ message: 'not {number, title}' }] });
+    assert.deepEqual(PullListSchema['~standard'].validate({}), { issues: [{ message: '`gh pr list` returned an unexpected shape' }] });
+    assert.equal(schema(Number)['~standard'].vendor, 'niyam');
+  });
+  it('read niyam.json only as an object', () => {
+    assert.deepEqual(NiyamFileSchema.parse({ docNumbers: 'x.json', other: 1 }), { docNumbers: 'x.json' });
+    assert.throws(() => NiyamFileSchema.parse([]), /must be an object/);
+  });
+  it('keep a pull request with odd entries, listing only real paths', () => {
+    assert.deepEqual(PullListSchema.parse([null, { number: 3, files: [{ path: 'a' }, null, { path: 1 }] }]), [
+      { number: undefined, paths: [], listed: 0 },
+      { number: 3, paths: ['a'], listed: 3 },
+    ]);
+  });
+});
+
 describe('ghIn', () => {
   it("gives gh's output, from the repository, and throws with its error", () => {
     const calls: { args: readonly string[]; cwd: string | undefined }[] = [];
@@ -241,7 +264,7 @@ describe('prClaimedNumbers', () => {
 
   it('warns rather than throws when gh fails, answers non-JSON, or answers another shape', () => {
     assert.match(prClaimedNumbers(ADR, [], fakeGh({})).warnings[0] ?? '', /could not read open PRs/);
-    assert.match(prClaimedNumbers(ADR, [], fakeGh({ [PR_LIST]: 'nope' })).warnings[0] ?? '', /could not read open PRs/);
+    assert.match(prClaimedNumbers(ADR, [], fakeGh({ [PR_LIST]: 'nope' })).warnings[0] ?? '', /^`gh pr list` returned output that is not JSON/);
     assert.match(claims({ pulls: [] }).warnings[0] ?? '', /unexpected shape/);
   });
 

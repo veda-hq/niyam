@@ -371,7 +371,7 @@ describe('checkWorkItemNumbers: incomplete sources', () => {
       ok: false,
       error:
         'sources incomplete: could not read Work item issues via `gh` (not installed, not authenticated, or offline) — numbers in their titles were NOT considered; ' +
-        'could not read open PRs via `gh` (not installed, not authenticated, offline, or not JSON) — numbers claimed by unmerged PRs were NOT considered',
+        '`gh pr list` returned output that is not JSON — PR claims were NOT considered',
     });
     assert.deepEqual(github.writes(), []);
   });
@@ -419,7 +419,7 @@ describe('checkWorkItemNumbers: incomplete sources', () => {
     assert.deepEqual(check(PLAIN, github, { apply: true }), {
       ok: false,
       error:
-        'allocator incomplete: could not read open PRs via `gh` (not installed, not authenticated, offline, or not JSON) — numbers claimed by unmerged PRs were NOT considered; ' +
+        'allocator incomplete: `gh pr list` returned output that is not JSON — PR claims were NOT considered; ' +
         'could not read Work item issues via `gh` (not installed, not authenticated, or offline) — numbers in their titles were NOT considered',
     });
     assert.deepEqual(github.writes(), []);
