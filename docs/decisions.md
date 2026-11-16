@@ -2076,3 +2076,35 @@
     refused (exit 3), as with any other write failure there.
   - Rejected: checking only `.tmp/pr-autocreate` itself. A linked record
     file or lock inside a real folder would still pass that check.
+- **2026-11-16 — Record: a slice moves to In Progress when its pull request
+  opens (P-70, Work item #399, slice #395).** A Claude cloud session's GitHub
+  proxy lets through only `repos/{owner}/{repo}/…`, so its push never reaches
+  an organization's Projects (veda-hq/veda#102). Every slice built in the
+  cloud skipped In Progress. The Done move needs no project token: the
+  merged job closes the slice with `GITHUB_TOKEN`, and the Project's Item
+  closed workflow moves it. A workflow's `GITHUB_TOKEN` cannot write an org
+  Project, so on 2026-11-16 the owner chose a GitHub App for the started
+  move.
+  - The shared workflow's Slice started job runs `pr-started` on a pull
+    request opened or reopened from the repository itself, read-only like
+    the other pull request jobs. It moves the board as the pre-push move
+    does (`boardStarted`), and only when the pull request names one slice,
+    board and work-rules are on, and the slice passes the work rules, read
+    with `GITHUB_TOKEN`.
+  - The board is written with a token minted from the board app
+    (`actions/create-github-app-token`, organization Projects write and
+    Issues read). The app reaches the shared workflow as two optional
+    secrets, `NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY`, as
+    `FIGMA_TOKEN` does. The token step runs only where the client id is
+    passed. A token GitHub will not make, a missing secret or a board error
+    is reported in one line, and the job passes: the board never fails a
+    pull request. Until onboard passes the secrets (#397), the job reports
+    that line.
+  - The pre-push move stays the early path on the desktop. On the proxy's
+    "sessions are bound to their configured repositories" 403, it prints a
+    short note that the workflow moves the slice when its pull request
+    opens.
+  - Rejected: a fine-grained token of the agent's, which expires and belongs
+    to a person; and the Project's own "Pull request linked to issue"
+    workflow, which needs a closing keyword in each pull request and never
+    moves the Work item's Step.

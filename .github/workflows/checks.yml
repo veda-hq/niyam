@@ -21,12 +21,19 @@ on:
       FIGMA_LIBRARY:
         description: The file key of the Figma design library, kept out of the committed settings
         required: false
+      NIYAM_BOARD_APP_ID:
+        description: The client id of the board GitHub App, which can write the organization's Projects
+        required: false
+      NIYAM_BOARD_APP_KEY:
+        description: The board GitHub App's private key
+        required: false
 
 # No workflow-wide permissions: GitHub refuses a whole run, before any job's
 # `if`, when a job here asks for more than the calling job grants. So the
 # read-only jobs say so each, and the weekly job takes what its caller grants:
 # `issues: write` from the client's weekly job, nothing more from the others.
 # The merged job does too: `issues: write` from the client's merged job.
+# The started job stays read-only and writes the board with the board app's own token.
 jobs:
   settings:
     name: Settings
@@ -211,10 +218,59 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      # The slice the pull request names is closed, which moves it to Done on the board, and so is each State of it the pull request names.
+      # The slice the pull request names is closed, which the Project's Item closed workflow moves to Done on the board,
+      # and so is each State of it the pull request names.
       - run: node .niyam/src/cli.ts pr-merged
         env:
           GH_TOKEN: ${{ github.token }}
+
+  started:
+    name: Slice started
+    # Opened or reopened, from this repository: a fork's run gets no secrets. A Claude cloud session's push cannot
+    # reach an organization's Projects, so the slice moves to In Progress here, when its pull request opens.
+    if: >-
+      github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BOARD_APP_ID: ${{ secrets.NIYAM_BOARD_APP_ID }}
+    steps:
+      # The settings come from the base branch, as in PR identity.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository || 'veda-hq/niyam' }}
+          ref: ${{ job.workflow_sha || inputs.niyam-ref || 'main' }}
+          path: .niyam
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # A workflow's GITHUB_TOKEN cannot write a Project: the board app's token can, made only where the caller passes
+      # its secrets. A token GitHub will not make leaves the board as it is and fails nothing.
+      - name: The board app's token
+        id: board
+        if: env.BOARD_APP_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.NIYAM_BOARD_APP_ID }}
+          private-key: ${{ secrets.NIYAM_BOARD_APP_KEY }}
+          permission-organization-projects: write
+          permission-issues: read
+      # The slice the pull request names moves to In Progress, and its work item to Build, once it passes the work rules.
+      - run: node .niyam/src/cli.ts pr-started
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIYAM_BOARD_TOKEN: ${{ steps.board.outputs.token }}
 
   decisions:
     name: Decisions, weekly

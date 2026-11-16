@@ -9,7 +9,7 @@ import type { Settings } from './agent.ts';
 import { RestBoard } from './fake-board.test.ts';
 import { AGENT, FakeSys, ROOT, SETTINGS, capture } from './fake.test.ts';
 import { askProblem } from './asks.ts';
-import { prMerged, prePush, prWorkRules, propose, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
+import { prMerged, prStarted, prePush, prWorkRules, propose, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
 
 const SLUG = 'example-org/example-app';
 const OWNER = 'example-owner';
@@ -1285,6 +1285,19 @@ describe('prePush', () => {
       });
     });
 
+    it("says only that the workflow moves the slice when a Claude cloud session's proxy refuses the board", async () => {
+      const sys = session('Slice: #12');
+      const board = new RestBoard(sys);
+      // The proxy's answer for any path outside repos/{owner}/{repo}/… (veda-hq/veda#102).
+      const message = 'This GitHub API path is not available: sessions are bound to their configured repositories. Use repository-scoped endpoints (repos/{owner}/{repo}/...).';
+      board.refuse = (method, path) => (path === '/orgs/example-org/projectsV2' ? { status: 403, json: { message } } : undefined);
+      assert.deepEqual(await push(sys, pushing), {
+        code: 0,
+        err: ["- board: this cloud session cannot reach the board; niyam's workflow moves #12 when its pull request opens"],
+      });
+      assert.deepEqual(moves(board), []);
+    });
+
     it('makes the other moves when GitHub refuses one', async () => {
       const sys = session('Slice: #12');
       const board = new RestBoard(sys);
@@ -1497,6 +1510,112 @@ describe('prMerged', () => {
       refused.route('PATCH', STATE, { status: 403, json: { message: 'Resource not accessible by integration' } });
       await assert.rejects(run(refused), /cannot close #31: Resource not accessible by integration; the client workflow needs a job with issues: write/);
     });
+  });
+});
+
+describe('prStarted', () => {
+  const EVENT = '/tmp/event.json';
+  /** The Slice started job on pull request #40 with `body`, slice #12 as graph() has it, and the board app's token unless `board` is null. */
+  function actions(body: string | null, board: string | null = 'ghs_board'): FakeSys {
+    const sys = new FakeSys();
+    sys.env = { GITHUB_EVENT_PATH: EVENT, GITHUB_REPOSITORY: SLUG, GH_TOKEN: 'ghs_run', ...(board === null ? {} : { NIYAM_BOARD_TOKEN: board }) };
+    sys.files.set(EVENT, JSON.stringify({ pull_request: { number: 40, body } }));
+    github(sys, graph().issue, [{ number: 40, body, head: { ref: 'work', repo: { full_name: SLUG } } }]);
+    return sys;
+  }
+  async function run(sys: FakeSys): Promise<{ code: number; out: string[]; err: string[] }> {
+    const { io, out, err } = capture();
+    return { code: await prStarted(sys, io), out, err };
+  }
+  const writes = (board: RestBoard): string[] => board.writes.map(({ path }) => path.split('/').at(-1) as string);
+  const boardReads = (sys: FakeSys): boolean => sys.requests.some((r) => r.url.includes('projectsV2'));
+
+  it("moves the slice to In Progress and its work item to Build with the board app's token, reading the slice with the workflow's", async () => {
+    const sys = actions('Builds the thing.\n\nSlice: #12');
+    const board = new RestBoard(sys);
+    assert.deepEqual(await run(sys), {
+      code: 0,
+      out: [
+        '✓ board: slice #12 is In Progress in "example-app work"',
+        '✓ board: work item #10 is at Step Build in "example-app work"',
+        '✓ board: work item #20 had no Step; it is at Frame in "example-app work"',
+      ],
+      err: [],
+    });
+    assert.deepEqual(writes(board), ['100', '101', '102']);
+    assert.ok(sys.requests.filter((r) => r.url.includes('projectsV2')).every((r) => r.token === 'ghs_board'));
+    assert.ok(sys.requests.filter((r) => r.url.endsWith('/issues/10/timeline?per_page=100&page=1')).every((r) => r.token === 'ghs_run'), 'the work rules read with GH_TOKEN');
+    assert.ok(!sys.requests.some((r) => r.url.endsWith('/graphql')));
+  });
+
+  it("says so and passes without the board app's token, reading nothing", async () => {
+    const sys = actions('Slice: #12', null);
+    const board = new RestBoard(sys);
+    assert.deepEqual(await run(sys), {
+      code: 0,
+      out: [
+        'pr-started: no board app token here (the NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY secrets are not passed, or GitHub would not make the token), so #12 moves on the board only from a desktop push',
+      ],
+      err: [],
+    });
+    assert.deepEqual(writes(board), []);
+    assert.ok(!sys.requests.some((r) => r.url.includes('/issues/12')), 'the slice is not read');
+    // An empty token is what the workflow passes when the token step is skipped or fails.
+    assert.match((await run(actions('Slice: #12', ''))).out[0] ?? '', /^pr-started: no board app token here/);
+  });
+
+  it('moves nothing for a slice the work rules refuse, and passes, as Work rules fails the pull request', async () => {
+    const sys = actions('Slice: #12');
+    const g = graph();
+    g.timeline.splice(1, 1);
+    github(sys, g.issue);
+    const board = new RestBoard(sys);
+    assert.deepEqual(await run(sys), { code: 0, out: ['pr-started: #12 may not be built yet (Work rules says why), so nothing moves on the board'], err: [] });
+    assert.deepEqual(writes(board), []);
+    assert.equal(boardReads(sys), false);
+  });
+
+  for (const [body, line] of [
+    [null, 'pr-started: #40 names no slice; nothing moves on the board'],
+    ['Slice: #12\nSlice: #13', 'pr-started: #40 names 2 slices; nothing moves on the board'],
+  ] as const) {
+    it(`moves nothing for a pull request with body ${JSON.stringify(body)}`, async () => {
+      const sys = actions(body);
+      const board = new RestBoard(sys);
+      assert.deepEqual(await run(sys), { code: 0, out: [line], err: [] });
+      assert.deepEqual(writes(board), []);
+    });
+  }
+
+  it('says when GitHub refuses the board, and passes', async () => {
+    const sys = actions('Slice: #12');
+    const board = new RestBoard(sys);
+    board.refuse = (method, path) => (path === '/orgs/example-org/projectsV2' ? { status: 403, json: { message: 'Resource not accessible by integration' } } : undefined);
+    assert.deepEqual(await run(sys), {
+      code: 0,
+      out: ["! board: nothing moved for #12 (GitHub's REST API refused GET /orgs/example-org/projectsV2?per_page=100: HTTP 403 Resource not accessible by integration); the pull request's checks go on"],
+      err: [],
+    });
+  });
+
+  it('moves nothing with the board or work-rules feature off', async () => {
+    for (const [features, line] of [
+      [['identity', 'work-rules'], `pr-started: board is off in .github/niyam.json; nothing to check`],
+      [['identity', 'board'], `pr-started: work-rules is off in .github/niyam.json; nothing to check`],
+    ] as const) {
+      const sys = actions('Slice: #12');
+      sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: OWNER, agent: AGENT, features }));
+      const board = new RestBoard(sys);
+      assert.deepEqual(await run(sys), { code: 0, out: [line], err: [] });
+      assert.deepEqual(writes(board), []);
+      assert.equal(boardReads(sys), false);
+    }
+  });
+
+  it('moves nothing for an event that is not a pull request', async () => {
+    const sys = actions('Slice: #12');
+    sys.files.set(EVENT, '{}');
+    assert.deepEqual(await run(sys), { code: 0, out: ['pr-started: not a pull request; nothing to move'], err: [] });
   });
 });
 

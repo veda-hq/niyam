@@ -615,17 +615,28 @@ export async function prePush(sys: Sys, io: Output, refLines: string, url: strin
   return report(io, 'pre-push', problems);
 }
 
+/** How a Claude cloud session's GitHub proxy refuses a path outside `repos/{owner}/{repo}/…`, such as an org's Projects. */
+const CLOUD_PROXY_REFUSAL = /sessions are bound to their configured repositories/i;
+
 /**
  * Moves the board on for slice `slice`, which a push is starting to build,
- * with the board feature on, through GitHub's REST API, which a Claude
- * cloud session's proxy lets through; a board it cannot read, or a move
- * GitHub refuses, is said and does not stop the push.
+ * with the board feature on, through GitHub's REST API; a board it cannot
+ * read, or a move GitHub refuses, is said and does not stop the push. A
+ * Claude cloud session's proxy lets through only `repos/{owner}/{repo}/…`,
+ * never an org's or a user's Projects, so there the push only says that the
+ * shared workflow's Slice started job moves the slice when its pull request
+ * opens.
  */
 async function moveBoard(sys: Sys, io: Output, token: string, slug: string, slice: number): Promise<void> {
   try {
     for (const line of await boardStarted(sys, token, slug, slice)) io.err(line);
   } catch (error) {
-    io.err(`! board: could not read where #${slice} and its work item are on the board, so nothing moved (${(error as Error).message}); the push goes on`);
+    const message = (error as Error).message;
+    io.err(
+      CLOUD_PROXY_REFUSAL.test(message)
+        ? `- board: this cloud session cannot reach the board; niyam's workflow moves #${slice} when its pull request opens`
+        : `! board: could not read where #${slice} and its work item are on the board, so nothing moved (${message}); the push goes on`,
+    );
   }
 }
 
@@ -738,6 +749,72 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
       continue;
     }
     await closeBuilt(sys, io, token, issue, pull);
+  }
+  return 0;
+}
+
+/**
+ * Moves the board on for the slice a pull request names as it opens or
+ * reopens, run by the shared workflow's Slice started job: the move a push
+ * makes from the desktop, which a Claude cloud session's push cannot, since
+ * its proxy never reaches an org's Projects. It moves nothing unless the
+ * pull request names one slice, the board and work-rules features are on,
+ * and the slice passes the work rules, which it reads with the workflow's
+ * GH_TOKEN. A workflow's GITHUB_TOKEN cannot write a Project, so the board
+ * moves with NIYAM_BOARD_TOKEN, minted from the board GitHub App. Without
+ * that token, or when GitHub refuses, it says so and passes: the board never
+ * fails a pull request.
+ */
+export async function prStarted(sys: Sys, io: Output): Promise<number> {
+  const { GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: slug, GH_TOKEN: token, NIYAM_BOARD_TOKEN: board } = sys.env;
+  if (!eventPath || !slug || !token) {
+    throw new Error('pr-started runs in GitHub Actions: GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set');
+  }
+  const event = JSON.parse(sys.read(eventPath)) as { pull_request?: { number: number; body: string | null } };
+  const pull = event.pull_request;
+  if (!pull) {
+    io.out('pr-started: not a pull request; nothing to move');
+    return 0;
+  }
+  const notAdopted = notAdoptedLine(sys, sys.cwd, 'pr-started');
+  if (notAdopted) {
+    io.out(notAdopted);
+    return 0;
+  }
+  for (const feature of ['work-rules', 'board'] as const) {
+    if (!isOn(sys, sys.cwd, feature)) {
+      io.out(offLine('pr-started', feature));
+      return 0;
+    }
+  }
+  if (await isPersonal(sys, slug, token)) {
+    io.out(offLine('pr-started', 'work-rules', PERSONAL_REPO));
+    return 0;
+  }
+  const slices = slicesNamed(pull.body ?? '');
+  if (slices.length !== 1) {
+    io.out(`pr-started: #${pull.number} names ${slices.length === 0 ? 'no slice' : `${slices.length} slices`}; nothing moves on the board`);
+    return 0;
+  }
+  const [slice] = slices as [number];
+  if (!board) {
+    io.out(
+      `pr-started: no board app token here (the NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY secrets are not passed, or GitHub would not make the token), so #${slice} moves on the board only from a desktop push`,
+    );
+    return 0;
+  }
+  try {
+    const problems = await sliceProblems(sys, token, slug, slice, loadSettings(sys, sys.cwd), { pull: pull.number, states: statesNamed(pull.body ?? '') });
+    if (problems.length > 0) {
+      io.out(`pr-started: #${slice} may not be built yet (Work rules says why), so nothing moves on the board`);
+      return 0;
+    }
+    const moved = await boardStarted(sys, board, slug, slice);
+    for (const line of moved) io.out(line);
+    if (moved.length === 0) io.out(`pr-started: #${slice} and its work item are where they belong on the board already`);
+  } catch (error) {
+    // fail-open: the board never fails a pull request; Work rules judges the slice, and the line says what GitHub refused.
+    io.out(`! board: nothing moved for #${slice} (${(error as Error).message}); the pull request's checks go on`);
   }
   return 0;
 }
