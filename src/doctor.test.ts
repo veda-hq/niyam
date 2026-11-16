@@ -193,11 +193,11 @@ describe('doctor', () => {
     assert.equal((await check(sys)).out.at(-1), '└  All good');
     sys.files.set(`${ROOT}/.claude/settings.json`, '{}');
     sys.files.delete(`${ROOT}/.github/niyam.json`);
-    assert.ok(!(await check(sys, AGENT)).out.some((line) => line.includes('Auto-fix')));
+    assert.ok(!(await check(sys, AGENT)).out.some((line) => line.includes('Auto-fix') || line.includes('publish the page')));
     const outside = healthy();
     outside.files.set(`${ROOT}/.claude/settings.json`, '{}');
     outside.inRepo = false;
-    assert.ok(!(await check(outside, AGENT)).out.some((line) => line.includes('Auto-fix')));
+    assert.ok(!(await check(outside, AGENT)).out.some((line) => line.includes('Auto-fix') || line.includes('publish the page')));
   });
 
   it('gives the owner steps while the desktop app started before gh moved to the agent, and still passes', async () => {
