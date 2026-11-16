@@ -163,13 +163,12 @@ export function docSettings(raw: unknown): DocSettings {
 export function loadDocSettings(sys: Sys, root: string): DocSettings {
   const path = `${root}/${SETTINGS_PATH}`;
   if (!sys.exists(path)) throw new Error(`${SETTINGS_PATH} not found in ${root}`);
-  const raw = untrustedJson(sys.read(path));
-  const entry = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).docNumbers : undefined;
+  const entry = NiyamFileSchema.parse(JSON.parse(sys.read(path))).docNumbers;
   if (entry === undefined) throw new Error(`${SETTINGS_PATH} has no "docNumbers": name the document kinds there, or the JSON file that does`);
   if (typeof entry !== 'string') return docSettings(entry);
   const file = text(entry, where, PATH);
   if (!sys.exists(`${root}/${file}`)) throw new Error(`${where} names ${file}, which is not there (run pnpm install?)`);
-  return docSettings(untrustedJson(sys.read(`${root}/${file}`)));
+  return DocSettingsSchema.parse(JSON.parse(sys.read(`${root}/${file}`)));
 }
 
 /** A kind by its name on the command line, in any case; undefined when the settings have none. */
@@ -233,12 +232,68 @@ export function detail(error: unknown): string {
 }
 
 /**
- * JSON text as a value nobody has checked yet: every caller checks its shape by hand, field by field, as the other
- * settings readers here do (niyam carries no schema library).
+ * A validator in the Standard Schema shape (https://standardschema.dev), for JSON that comes from outside: `parse`
+ * gives the value `check` made of it, or throws why not. niyam carries no schema library, so each check is written
+ * here, once per producer, beside what reads its output.
  */
-export function untrustedJson(text: string): unknown {
-  return JSON.parse(text) as unknown;
+export interface Schema<T> {
+  readonly '~standard': {
+    readonly version: 1;
+    readonly vendor: 'niyam';
+    validate(value: unknown): { value: T } | { issues: { message: string }[] };
+  };
+  parse(value: unknown): T;
 }
+
+/** A Schema whose check is `check`. */
+export function schema<T>(check: (value: unknown) => T): Schema<T> {
+  return {
+    '~standard': {
+      version: 1,
+      vendor: 'niyam',
+      validate(value) {
+        try {
+          return { value: check(value) };
+        } catch (error) {
+          // fail-open: an invalid value is the answer here, reported as the issue.
+          return { issues: [{ message: detail(error) }] };
+        }
+      },
+    },
+    parse: check,
+  };
+}
+
+/** `.github/niyam.json`, for its `"docNumbers"` entry. */
+export const NiyamFileSchema = schema((value) => ({ docNumbers: record(value, SETTINGS_PATH).docNumbers }));
+
+/** The `"docNumbers"` settings, or the file they are in. */
+export const DocSettingsSchema = schema(docSettings);
+
+/** One open pull request from `gh pr list --json number,files`: its number, its listed paths, and how many it listed. */
+export interface Pull {
+  readonly number: unknown;
+  readonly paths: string[];
+  readonly listed: number;
+}
+
+/** `gh pr list --json number,files`: a list; an entry without files lists none, and a file without a path is skipped. */
+export const PullListSchema = schema((value): Pull[] => {
+  if (!Array.isArray(value)) throw new Error('`gh pr list` returned an unexpected shape');
+  return (value as unknown[]).map((pr) => {
+    const entry = typeof pr === 'object' && pr !== null ? (pr as { number?: unknown; files?: unknown }) : {};
+    const files = Array.isArray(entry.files) ? (entry.files as unknown[]) : [];
+    const paths = files.map((file) => (typeof file === 'object' && file !== null ? (file as { path?: unknown }).path : undefined)).filter((path): path is string => typeof path === 'string');
+    return { number: entry.number, paths, listed: files.length };
+  });
+});
+
+/** One line of the Work item list: `{number, title}`. */
+export const WorkItemLineSchema = schema((value): { number: number; title: string } => {
+  const { number, title } = (typeof value === 'object' && value !== null ? value : {}) as { number?: unknown; title?: unknown };
+  if (typeof number !== 'number' || !Number.isInteger(number) || typeof title !== 'string') throw new Error('not {number, title}');
+  return { number, title };
+});
 
 /** A whole number from digits the caller has matched; throws on anything else. */
 export function wholeNumber(digits: string): number {
@@ -328,30 +383,32 @@ function allPrFiles(number: unknown, gh: RunGh): { ok: true; paths: string[] } |
 export function prClaimedNumbers(kind: DocKind, mainNames: readonly string[], gh: RunGh): Layer {
   const warnings: string[] = [];
   const numbers = new Set<string>();
-  let pulls: unknown;
+  let raw: string;
   try {
-    pulls = untrustedJson(gh(['pr', 'list', '--state', 'open', '--limit', String(PR_SCAN_LIMIT), '--json', 'number,files']));
+    raw = gh(['pr', 'list', '--state', 'open', '--limit', String(PR_SCAN_LIMIT), '--json', 'number,files']);
   } catch {
     // fail-open: a preview must never block an author; the warning makes --reserve refuse.
-    warnings.push('could not read open PRs via `gh` (not installed, not authenticated, offline, or not JSON) — numbers claimed by unmerged PRs were NOT considered');
+    warnings.push('could not read open PRs via `gh` (not installed, not authenticated, or offline) — numbers claimed by unmerged PRs were NOT considered');
     return { numbers, warnings };
   }
-  if (!Array.isArray(pulls)) {
-    warnings.push('`gh pr list` returned an unexpected shape — PR claims were NOT considered');
+  let pulls: Pull[];
+  try {
+    pulls = PullListSchema.parse(JSON.parse(raw));
+  } catch (error) {
+    // fail-open: as above, the warning is what makes --reserve refuse.
+    warnings.push(error instanceof SyntaxError ? '`gh pr list` returned output that is not JSON — PR claims were NOT considered' : '`gh pr list` returned an unexpected shape — PR claims were NOT considered');
     return { numbers, warnings };
   }
   if (pulls.length >= PR_SCAN_LIMIT) warnings.push(`${String(pulls.length)} open PRs listed (the scan limit) — there may be more, and any claim they carry was NOT considered`);
   const onMain = new Set(mainNames);
   const prefix = `${kind.dir}/`;
-  for (const pr of pulls as unknown[]) {
-    const entry = typeof pr === 'object' && pr !== null ? (pr as { number?: unknown; files?: unknown }) : {};
-    const listed = Array.isArray(entry.files) ? (entry.files as unknown[]) : [];
-    let paths = listed.map((file) => (typeof file === 'object' && file !== null ? (file as { path?: unknown }).path : undefined)).filter((path): path is string => typeof path === 'string');
+  for (const pr of pulls) {
+    let paths = pr.paths;
     // A pull request at the page's end may hide a document past it: read its whole list.
-    if (listed.length >= PR_FILES_PAGE) {
-      const full = allPrFiles(entry.number, gh);
+    if (pr.listed >= PR_FILES_PAGE) {
+      const full = allPrFiles(pr.number, gh);
       if (full.ok) paths = full.paths;
-      else warnings.push(`PR #${String(entry.number)} has ${String(listed.length)}+ files and its full file list could not be read (${full.reason}) — any claim past its first ${String(listed.length)} listed files was NOT considered`);
+      else warnings.push(`PR #${String(pr.number)} has ${String(pr.listed)}+ files and its full file list could not be read (${full.reason}) — any claim past its first ${String(pr.listed)} listed files was NOT considered`);
     }
     for (const path of paths) {
       if (!path.startsWith(prefix)) continue;
@@ -385,15 +442,14 @@ export function listWorkItems(work: WorkItems, gh: RunGh): { items: WorkItem[]; 
   const items: WorkItem[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
-    let parsed: unknown;
+    let parsed: { number: number; title: string };
     try {
-      parsed = untrustedJson(line);
-    } catch {
+      parsed = WorkItemLineSchema.parse(JSON.parse(line));
+    } catch (error) {
       // fail-open: the warning is what makes --reserve refuse.
-      return none('the Work item issue list returned a line that is not JSON — Work item titles were NOT considered');
+      return none(error instanceof SyntaxError ? 'the Work item issue list returned a line that is not JSON — Work item titles were NOT considered' : 'the Work item issue list returned an unexpected shape — Work item titles were NOT considered');
     }
-    const { number, title } = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as { number?: unknown; title?: unknown };
-    if (typeof number !== 'number' || !Number.isInteger(number) || typeof title !== 'string') return none('the Work item issue list returned an unexpected shape — Work item titles were NOT considered');
+    const { number, title } = parsed;
     items.push({ number, title, workNumber: numberFromWorkItemTitle(title) });
   }
   // A repository with Work items has some, so an empty answer is GitHub answering wrongly, not "none".

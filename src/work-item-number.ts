@@ -17,7 +17,7 @@ import {
   numberFromName,
   numberFromWorkItemTitle,
   prClaimedNumbers,
-  untrustedJson,
+  schema,
   wholeNumber,
 } from './doc-numbers.ts';
 import type { Output, Sys } from './types.ts';
@@ -113,12 +113,24 @@ export function renumberComment(work: WorkItems, from: string, to: string, holde
   ].join('\n');
 }
 
+/** One issue as `gh api …/issues/N --jq '{number, title, type: .type.name}'` gives it; `type` is null untyped. */
+const IssueSchema = schema((value): { title: string; type: string | null } => {
+  const { title, type } = (typeof value === 'object' && value !== null ? value : {}) as { title?: unknown; type?: unknown };
+  if (typeof title !== 'string' || (type !== null && typeof type !== 'string')) throw new Error('unexpected shape');
+  return { title, type };
+});
+
 /** The event's issue as a Work item, or why it needs nothing; throws when it cannot be read. */
 function readEvent(work: WorkItems, gh: RunGh, issue: number, previousTitle: string | undefined): EventItem | string {
   const at = `#${String(issue)}`;
-  const raw = untrustedJson(gh(['api', `repos/{owner}/{repo}/issues/${String(issue)}`, '--jq', '{number, title, type: .type.name}']));
-  const { title, type } = (typeof raw === 'object' && raw !== null ? raw : {}) as { title?: unknown; type?: unknown };
-  if (typeof title !== 'string' || (type !== null && typeof type !== 'string')) throw new Error(`${at} came back in an unexpected shape`);
+  const raw = gh(['api', `repos/{owner}/{repo}/issues/${String(issue)}`, '--jq', '{number, title, type: .type.name}']);
+  let read: { title: string; type: string | null };
+  try {
+    read = IssueSchema.parse(JSON.parse(raw));
+  } catch (error) {
+    throw new Error(error instanceof SyntaxError ? `${at} came back as text that is not JSON` : `${at} came back in an unexpected shape`);
+  }
+  const { title, type } = read;
   if (type !== work.issueType) return `${at} is not a ${work.issueType}`;
   const workNumber = numberFromWorkItemTitle(title);
   if (workNumber === null) return `${at}'s title carries no number`;
@@ -188,7 +200,7 @@ export function checkWorkItemNumbers(sys: Sys, root: string, settings: DocSettin
   if (!next.ok) return next;
   if (next.warnings.length > 0) return { ok: false, error: `allocator incomplete: ${next.warnings.join('; ')}` };
   const first = /^\d{4}$/.test(next.next) ? wholeNumber(next.next) : Number.NaN;
-  if (!/^\d{4}$/.test(next.next) || first + moving.size > 10_000) return { ok: false, error: `no room for ${String(moving.size)} number(s) from ${next.next}` };
+  if (!/^\d{4}$/.test(next.next) || first < 1 || first + moving.size > 10_000) return { ok: false, error: `no room for ${String(moving.size)} number(s) from ${next.next}` };
   const planned = [...moving.values()].map(({ item, work: from, holder }, index) => {
     const to = String(first + index).padStart(4, '0');
     return { move: { issue: item.number, from, to, holder, title: item.title.trimStart().replace(/^\d{4}/, to) }, was: item.title };
