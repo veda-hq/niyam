@@ -163,12 +163,13 @@ export function docSettings(raw: unknown): DocSettings {
 export function loadDocSettings(sys: Sys, root: string): DocSettings {
   const path = `${root}/${SETTINGS_PATH}`;
   if (!sys.exists(path)) throw new Error(`${SETTINGS_PATH} not found in ${root}`);
-  const entry = (JSON.parse(sys.read(path)) as Record<string, unknown> | null)?.docNumbers;
+  const raw = untrustedJson(sys.read(path));
+  const entry = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).docNumbers : undefined;
   if (entry === undefined) throw new Error(`${SETTINGS_PATH} has no "docNumbers": name the document kinds there, or the JSON file that does`);
   if (typeof entry !== 'string') return docSettings(entry);
   const file = text(entry, where, PATH);
   if (!sys.exists(`${root}/${file}`)) throw new Error(`${where} names ${file}, which is not there (run pnpm install?)`);
-  return docSettings(JSON.parse(sys.read(`${root}/${file}`)));
+  return docSettings(untrustedJson(sys.read(`${root}/${file}`)));
 }
 
 /** A kind by its name on the command line, in any case; undefined when the settings have none. */
@@ -219,6 +220,31 @@ export function frozenEntries(settings: DocSettings, kind: string): string[] {
 /** The distinct numbers of a kind's frozen folders, ascending. */
 export function frozenNumbers(settings: DocSettings, kind: string): string[] {
   return [...new Set(frozenEntries(settings, kind).map((path) => numberFromName(path) as string))].sort();
+}
+
+/** What a caught value says; one whose text cannot be read says so instead of throwing out of the handler. */
+export function detail(error: unknown): string {
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    // fail-open: this describes an error being reported already; a placeholder is better than a second throw.
+    return 'an error whose text could not be read';
+  }
+}
+
+/**
+ * JSON text as a value nobody has checked yet: every caller checks its shape by hand, field by field, as the other
+ * settings readers here do (niyam carries no schema library).
+ */
+export function untrustedJson(text: string): unknown {
+  return JSON.parse(text) as unknown;
+}
+
+/** A whole number from digits the caller has matched; throws on anything else. */
+export function wholeNumber(digits: string): number {
+  const number = Number(digits);
+  if (!/^\d+$/.test(digits) || !Number.isSafeInteger(number)) throw new Error(`"${digits}" is not a whole number`);
+  return number;
 }
 
 /** git's output, or null when git failed: "could not tell" is never "nothing there". */
@@ -304,7 +330,7 @@ export function prClaimedNumbers(kind: DocKind, mainNames: readonly string[], gh
   const numbers = new Set<string>();
   let pulls: unknown;
   try {
-    pulls = JSON.parse(gh(['pr', 'list', '--state', 'open', '--limit', String(PR_SCAN_LIMIT), '--json', 'number,files']));
+    pulls = untrustedJson(gh(['pr', 'list', '--state', 'open', '--limit', String(PR_SCAN_LIMIT), '--json', 'number,files']));
   } catch {
     // fail-open: a preview must never block an author; the warning makes --reserve refuse.
     warnings.push('could not read open PRs via `gh` (not installed, not authenticated, offline, or not JSON) — numbers claimed by unmerged PRs were NOT considered');
@@ -361,7 +387,7 @@ export function listWorkItems(work: WorkItems, gh: RunGh): { items: WorkItem[]; 
     if (line.trim() === '') continue;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(line);
+      parsed = untrustedJson(line);
     } catch {
       // fail-open: the warning is what makes --reserve refuse.
       return none('the Work item issue list returned a line that is not JSON — Work item titles were NOT considered');
@@ -395,7 +421,7 @@ export function reserveDocNumber(sys: Sys, root: string, settings: DocSettings, 
   const escape = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`(?:${escape(dir)}/|${escape(prefix)})(\\d{4})\\b`, 'g');
   const note = (out: string) => {
-    for (const match of out.matchAll(pattern)) used.add(Number(match[1]));
+    for (const match of out.matchAll(pattern)) used.add(wholeNumber(match[1] as string));
   };
   note(gitMust(sys, root, ['log', '--all', '--format=', '--name-only', '--', dir]));
   note(gitMust(sys, root, ['for-each-ref', prefix]));
@@ -475,10 +501,10 @@ export function allocate(sys: Sys, root: string, settings: DocSettings, kind: Do
   if (options.reserve && !complete) return { ok: false, error: `refusing to RESERVE while the GitHub scan is incomplete — a permanent claim must not be made blind to what open PRs and Work items hold. Re-run without \`--reserve\` to preview, or fix the cause: ${warnings.join('; ')}` };
   let next: string;
   try {
-    next = reserveDocNumber(sys, root, settings, kind, { alsoTaken: [...taken].map(Number), dryRun: !options.reserve, ...(options.warn ? { warn: options.warn } : {}) });
+    next = reserveDocNumber(sys, root, settings, kind, { alsoTaken: [...taken].map(wholeNumber), dryRun: !options.reserve, ...(options.warn ? { warn: options.warn } : {}) });
   } catch (error) {
     // fail-open: the failure is the return value, and the command exits 1 on it.
-    return { ok: false, error: `could not reserve a ${kind.citation} number: ${error instanceof Error ? error.message.trim() : String(error)}` };
+    return { ok: false, error: `could not reserve a ${kind.citation} number: ${detail(error).trim()}` };
   }
   return { ok: true, next, sources: { main: mainNames.length, local: localNames.length, pullRequests, workItems, frozen: frozen.length }, warnings };
 }

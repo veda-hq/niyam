@@ -166,13 +166,16 @@ export function rewriteAll(text: string, kind: DocKind, from: string, to: string
  * silence. A block list's items count under their key.
  */
 export function residualBareRefs(settings: DocSettings, text: string, from: string, path: string): string[] {
-  const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-  if (block === null) return [];
+  // The frontmatter's lines: after a first line of ---, up to the next line that starts with ---. Read line by line
+  // on purpose, not parsed: a malformed block must still be read.
+  const all = text.split('\n').map((line) => line.replace(/\r$/, ''));
+  const end = all.findIndex((line, i) => i > 0 && line.startsWith('---'));
+  if (all[0] !== '---' || end < 0) return [];
   const bare = new RegExp(`(?<![A-Za-z0-9-])${literal(from)}(?!\\d)`);
   const classified = new Set(Object.values(settings.kinds).flatMap((kind) => [kind.frontmatterKey, ...relationshipKeysFor(kind, path)]));
   const flagged: string[] = [];
   let enclosing: string | null = null;
-  for (const line of (block[1] as string).split('\n')) {
+  for (const line of all.slice(1, end)) {
     const entry = /^\s*([A-Za-z_][A-Za-z0-9_]*):/.exec(line);
     if (entry !== null) enclosing = entry[1] as string;
     else if (!/^\s*-\s/.test(line) && line.trim() !== '') enclosing = null;

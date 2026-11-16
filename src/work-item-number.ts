@@ -8,6 +8,7 @@ import {
   type WorkItems,
   allocate,
   basenamesOnRef,
+  detail,
   frozenEntries,
   ghIn,
   listWorkItems,
@@ -16,6 +17,8 @@ import {
   numberFromName,
   numberFromWorkItemTitle,
   prClaimedNumbers,
+  untrustedJson,
+  wholeNumber,
 } from './doc-numbers.ts';
 import type { Output, Sys } from './types.ts';
 
@@ -113,7 +116,7 @@ export function renumberComment(work: WorkItems, from: string, to: string, holde
 /** The event's issue as a Work item, or why it needs nothing; throws when it cannot be read. */
 function readEvent(work: WorkItems, gh: RunGh, issue: number, previousTitle: string | undefined): EventItem | string {
   const at = `#${String(issue)}`;
-  const raw: unknown = JSON.parse(gh(['api', `repos/{owner}/{repo}/issues/${String(issue)}`, '--jq', '{number, title, type: .type.name}']));
+  const raw = untrustedJson(gh(['api', `repos/{owner}/{repo}/issues/${String(issue)}`, '--jq', '{number, title, type: .type.name}']));
   const { title, type } = (typeof raw === 'object' && raw !== null ? raw : {}) as { title?: unknown; type?: unknown };
   if (typeof title !== 'string' || (type !== null && typeof type !== 'string')) throw new Error(`${at} came back in an unexpected shape`);
   if (type !== work.issueType) return `${at} is not a ${work.issueType}`;
@@ -166,7 +169,7 @@ export function checkWorkItemNumbers(sys: Sys, root: string, settings: DocSettin
       read = readEvent(work, gh, options.issue, options.previousTitle);
     } catch (error) {
       // fail-open: the failure is the return value, and the command exits 1 on it.
-      return { ok: false, error: `could not read #${String(options.issue)}: ${error instanceof Error ? error.message : String(error)}` };
+      return { ok: false, error: `could not read #${String(options.issue)}: ${detail(error)}` };
     }
     if (typeof read === 'string') note = read;
     else event = read;
@@ -184,7 +187,7 @@ export function checkWorkItemNumbers(sys: Sys, root: string, settings: DocSettin
   const next = options.allocate ? options.allocate() : allocate(sys, root, settings, kind, { ref, gh });
   if (!next.ok) return next;
   if (next.warnings.length > 0) return { ok: false, error: `allocator incomplete: ${next.warnings.join('; ')}` };
-  const first = Number(next.next);
+  const first = /^\d{4}$/.test(next.next) ? wholeNumber(next.next) : Number.NaN;
   if (!/^\d{4}$/.test(next.next) || first + moving.size > 10_000) return { ok: false, error: `no room for ${String(moving.size)} number(s) from ${next.next}` };
   const planned = [...moving.values()].map(({ item, work: from, holder }, index) => {
     const to = String(first + index).padStart(4, '0');
@@ -197,7 +200,7 @@ export function checkWorkItemNumbers(sys: Sys, root: string, settings: DocSettin
       applyRenumber(work, gh, move, was);
     } catch (error) {
       // fail-open: the failure is the return value, and the command exits 1 on it.
-      return { ok: false, error: `could not renumber #${String(move.issue)}: ${error instanceof Error ? error.message : String(error)}` };
+      return { ok: false, error: `could not renumber #${String(move.issue)}: ${detail(error)}` };
     }
   }
   return { ok: true, note, renumbers, applied: true };
@@ -211,11 +214,11 @@ export function unlabelledWorkItems(work: WorkItems & { label: string }, gh: Run
     for (const line of out.split('\n')) {
       if (line === '') continue;
       if (!/^[1-9]\d{0,8}$/.test(line)) throw new Error(`unexpected issue number "${line}"`);
-      issues.push(Number(line));
+      issues.push(wholeNumber(line));
     }
   } catch (error) {
     // fail-open: the failure is the return value, and the command exits 1 on it.
-    return { ok: false, error: `could not list unlabelled Work items: ${error instanceof Error ? error.message : String(error)}` };
+    return { ok: false, error: `could not list unlabelled Work items: ${detail(error)}` };
   }
   return { ok: true, issues };
 }
@@ -231,7 +234,7 @@ export function workItemArgs(args: readonly string[]): { issue?: number; apply: 
       const value = arg === '--issue' ? args[++i] : arg.slice('--issue='.length);
       if (value === undefined || !/^[1-9]\d{0,7}$/.test(value)) throw new Error('work-item-number --issue needs an issue number');
       if (issue !== undefined) throw new Error('work-item-number takes one --issue');
-      issue = Number(value);
+      issue = wholeNumber(value);
     } else throw new Error(`work-item-number: unexpected argument "${arg}"`);
   }
   return { ...(issue === undefined ? {} : { issue }), apply };
@@ -277,7 +280,7 @@ export function workItemNumber(sys: Sys, io: Output, args: readonly string[]): n
         gh(['issue', 'edit', String(issue), '--add-label', label]);
       } catch (error) {
         // fail-open: reported, and the command exits 1.
-        io.err(`❌ could not label #${String(issue)}: ${error instanceof Error ? error.message : String(error)}`);
+        io.err(`❌ could not label #${String(issue)}: ${detail(error)}`);
         return 1;
       }
     }
