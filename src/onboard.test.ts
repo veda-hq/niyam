@@ -15,7 +15,7 @@ import type { HttpResult } from './types.ts';
 import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
@@ -43,6 +43,8 @@ const WORKFLOW = `${ROOT}/${WORKFLOW_PATH}`;
 const OLD_WORKFLOW = `${ROOT}/.github/workflows/process-rules.yml`;
 /** A workflow as releases before P-56 wrote it: the job ids and the input naming the release say process-rules. */
 const oldIds = (text: string): string => text.replace(/^ {2}niyam(-weekly|-merged|-asks)?:$/gm, '  process-rules$1:').replaceAll('      niyam-ref:', '      process-rules-ref:');
+/** The workflow onboard writes with every feature on: the Figma secrets on each job, and the board app's on the pull request job. */
+const full = (branch: string, version: string, schedule?: string): string => workflow(branch, version, true, schedule, undefined, true);
 const PRE_PUSH = `${ROOT}/.git/hooks/pre-push`;
 const REPO = '/repos/example-org/example-app';
 const COLLABORATOR = `${REPO}/collaborators/ExampleBot`;
@@ -152,7 +154,7 @@ describe('onboard', () => {
     assert.equal(code, 0);
     assert.deepEqual(JSON.parse(repo(sys).get(SETTINGS) ?? ''), { owner: 'example-owner', agent: 'ExampleBot', features: [...FEATURES] });
     assert.deepEqual(JSON.parse(repo(sys).get(HOOKS) ?? ''), CLAUDE);
-    assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), true));
+    assert.equal(repo(sys).get(WORKFLOW), full('main', packageVersion()));
     assert.equal(sys.files.get(PRE_PUSH), PRE_PUSH_HOOK);
     assert.equal(sys.modes.get(PRE_PUSH), 0o755);
     assert.deepEqual(sys.dirs.filter((d) => d.startsWith(ROOT)), [], 'no folder made in the checkout');
@@ -193,6 +195,8 @@ describe('onboard', () => {
       `└  ${PULL_URL}  merges itself when checks pass`,
       '',
       'By hand:',
+      // GitHub lists no secrets here, so onboard cannot tell whether the board app's are set.
+      `  ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}`,
       `  Once for example-org/example-app: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ExampleBot and the prompt below the line in https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
       '  Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.',
     ]);
@@ -237,7 +241,7 @@ describe('onboard', () => {
     assert.ok(body.includes(`\n  - Project "example-app work": ${COPY_URL}\n  - fields: Step, Decision, Review date\n`), body);
     assert.ok(body.includes('\n- pre-push hook:\n  - wrote the pre-push git hook .git/hooks/pre-push, which checks an agent session pushes to GitHub as the agent, and the work rules\n'), body);
     assert.ok(body.includes('\n  - committer: ExampleBot; verified: true (valid)\n  - GitHub shows the test commit Verified by ExampleBot\n'), body);
-    assert.ok(body.includes('\nLeft to do by hand:\n\n- The review routine: create a weekly Claude routine on example-org/example-app'), body);
+    assert.ok(body.includes(`\nLeft to do by hand:\n\n- ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}\n- The review routine: create a weekly Claude routine on example-org/example-app`), body);
     assert.ok(
       body.includes(
         `\n- Claude cloud sessions, once per claude.ai account: connect claude.ai's GitHub as ExampleBot. Each session with no niyam installs it from ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so there is nothing to paste; what niyam cloud-setup prints, put in the cloud environment's Setup script, makes sessions start faster, since Claude caches what a Setup script installs.\n`,
@@ -262,7 +266,7 @@ describe('onboard', () => {
     const sys = fresh();
     sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT }));
     sys.files.set(HOOKS, JSON.stringify(CLAUDE));
-    sys.files.set(WORKFLOW, workflow('main', packageVersion(), true));
+    sys.files.set(WORKFLOW, full('main', packageVersion()));
     sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
     sys.files.set(CLOUD, CLOUD_FILE);
     const board = new Board(sys);
@@ -285,7 +289,7 @@ describe('onboard', () => {
     const sys = fresh();
     sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT }));
     sys.files.set(HOOKS, JSON.stringify(CLAUDE));
-    sys.files.set(WORKFLOW, workflow('main', packageVersion(), true));
+    sys.files.set(WORKFLOW, full('main', packageVersion()));
     sys.files.set(CLOUD, CLOUD_FILE).set(OLD_CLOUD, CLOUD_FILE);
     sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
     const board = new Board(sys);
@@ -1074,7 +1078,7 @@ describe('onboard', () => {
 
   it('moves only the version pins of a workflow already split', async () => {
     const sys = fresh();
-    const own = workflow('main', '0.5.2', true).replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
+    const own = full('main', '0.5.2').replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
     sys.files.set(WORKFLOW, own);
     const { out } = await run(sys);
     assert.ok(planned(out, 'Pull request').includes(`workflow: pins → v${packageVersion()}`), out.join('\n'));
@@ -1087,7 +1091,7 @@ describe('onboard', () => {
 
   it('leaves a split workflow at this release alone', async () => {
     const sys = fresh();
-    const own = workflow('main', packageVersion(), true).replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
+    const own = full('main', packageVersion()).replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
     sys.files.set(WORKFLOW, own);
     const { out } = await run(sys);
     assert.ok(!planned(out, 'Pull request').some((item) => item.startsWith('workflow')), out.join('\n'));
@@ -1282,7 +1286,7 @@ describe('onboard', () => {
       assert.equal(code, 0);
       assert.equal(out[2], '│  ! personal account: work-rules, figma, decisions left off');
       assert.deepEqual(JSON.parse(repo(sys).get(SETTINGS) ?? '').features, ['identity', 'pr-identity', 'board', 'review']);
-      assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false));
+      assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false, undefined, undefined, true));
     });
 
     it('refuses --features that need issue types, writing nothing', async () => {
@@ -1835,8 +1839,8 @@ describe('staged adoption', () => {
     });
     assert.deepEqual(planned(out, 'Pull request'), ['niyam.json: turn board on', 'workflow: new', `cloud-setup.sh: new, installs v${packageVersion()}`, 'auto-merge: when checks pass']);
     assert.ok(planned(out, 'GitHub — signed in as example-owner').includes('board: set up or check'));
-    // The board's Needs you labels and the type of each new issue come from the workflow's asks job.
-    assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false));
+    // The board's Needs you labels and the type of each new issue come from the workflow's asks job; its In Progress move, from the board app's secrets.
+    assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false, undefined, undefined, true));
   });
 
 
@@ -2471,6 +2475,80 @@ describe('workflowUpdate', () => {
     assert.ok(kept.kind === 'repin' && !kept.secrets && kept.text === own.replaceAll('0.5.4', '0.5.5'));
   });
 
+  it("passes the board app's secrets on the pull request job alone, beside the Figma secrets, and takes them off with board off (P-70)", () => {
+    const BOARD_LINES = '      NIYAM_BOARD_APP_ID: ${{ secrets.NIYAM_BOARD_APP_ID }}\n      NIYAM_BOARD_APP_KEY: ${{ secrets.NIYAM_BOARD_APP_KEY }}\n';
+    const both = workflow('main', '0.5.5', true, undefined, undefined, true);
+    // The niyam job's block alone: Figma first, then the board app's.
+    assert.equal(both.split(BOARD_LINES).length, 2);
+    assert.ok(both.includes(`    secrets:\n      FIGMA_TOKEN: \${{ secrets.FIGMA_TOKEN }}\n      FIGMA_LIBRARY: \${{ secrets.FIGMA_LIBRARY }}\n${BOARD_LINES}\n  # The weekly run alone`));
+    const boardOnly = workflow('main', '0.5.5', false, undefined, undefined, true);
+    assert.equal(boardOnly.match(/^ {4}secrets:$/gm)?.length, 1, 'no Figma secrets, so only the niyam job has a block');
+    assert.ok(boardOnly.includes(`      niyam-ref: v0.5.5\n    secrets:\n${BOARD_LINES}\n  # The weekly run alone`));
+
+    // An upgrade from a Figma-only workflow adds the board app's lines and moves the pins, so the shared checks it calls declare them.
+    assert.deepEqual(workflowUpdate(workflow('main', '0.5.4', true), 'main', '0.5.5', true, undefined, undefined, true), { kind: 'repin', text: both, from: '0.5.4', board: true });
+    assert.deepEqual(workflowUpdate(workflow('main', '0.5.4', false), 'main', '0.5.5', false, undefined, undefined, true), { kind: 'repin', text: boardOnly, from: '0.5.4', board: true });
+    // A round trip back to off, and Figma off with board kept.
+    assert.deepEqual(workflowUpdate(both, 'main', '0.5.5', true), { kind: 'repin', text: workflow('main', '0.5.5', true), board: true });
+    assert.deepEqual(workflowUpdate(both, 'main', '0.5.5', false, undefined, undefined, true), { kind: 'repin', text: boardOnly, secrets: true });
+    assert.deepEqual(workflowUpdate(both, 'main', '0.5.5', true, undefined, undefined, true), { kind: 'same' });
+
+    // A block with a secret of the client's own, or secrets: inherit, is left as it is.
+    const own = workflow('main', '0.5.4', true).replace('FIGMA_LIBRARY: ${{ secrets.FIGMA_LIBRARY }}\n', 'FIGMA_LIBRARY: ${{ secrets.FIGMA_LIBRARY }}\n      OTHER: ${{ secrets.OTHER }}\n');
+    const kept = workflowUpdate(own, 'main', '0.5.5', true, undefined, undefined, true);
+    assert.ok(kept.kind === 'repin' && !kept.board && kept.text.includes('      OTHER: ${{ secrets.OTHER }}\n\n  # The weekly run alone'), 'the niyam job kept its own block');
+    const inherit = workflow('main', '0.5.4', false).replace('      niyam-ref: v0.5.4\n\n  # The weekly run alone', '      niyam-ref: v0.5.4\n    secrets: inherit\n\n  # The weekly run alone');
+    const inherited = workflowUpdate(inherit, 'main', '0.5.5', false, undefined, undefined, true);
+    assert.ok(inherited.kind === 'repin' && !inherited.board && inherited.text.includes('    secrets: inherit\n') && !inherited.text.includes('NIYAM_BOARD_APP_ID'));
+  });
+
+  it("says how to set up the board app for the secrets the repository lacks, its own and its organization's counted, and nothing once both are set", async () => {
+    const BOTH = ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'] as const;
+    assert.equal(
+      boardAppSteps('example-org/example-app', BOTH),
+      'Once for example-org: make a GitHub App with organization Projects read and write and repository Issues read at https://github.com/organizations/example-org/settings/apps/new, install it on example-org/example-app, and set its client id as NIYAM_BOARD_APP_ID and its private key as NIYAM_BOARD_APP_KEY, Actions secrets of the organization or of https://github.com/example-org/example-app/settings/secrets/actions. Until then a slice moves to In Progress on the board only from a desktop push.',
+    );
+    const secrets = (sys: FakeSys, own: string[], org: string[]): void => {
+      sys.route('GET', `${REPO}/actions/secrets?per_page=100&page=1`, { status: 200, json: { total_count: own.length, secrets: own.map((name) => ({ name })) } });
+      sys.route('GET', `${REPO}/actions/organization-secrets?per_page=100&page=1`, { status: 200, json: { total_count: org.length, secrets: org.map((name) => ({ name })) } });
+    };
+    for (const [own, org, steps] of [
+      [[], [], boardAppSteps('example-org/example-app', BOTH)],
+      [['FIGMA_TOKEN'], ['NIYAM_BOARD_APP_ID'], boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_KEY'])],
+      [['NIYAM_BOARD_APP_KEY'], ['NIYAM_BOARD_APP_ID'], undefined],
+    ] as const) {
+      const sys = fresh();
+      secrets(sys, [...own], [...org]);
+      const { code, out } = await run(sys);
+      assert.equal(code, 0);
+      const lines = byHand(out).filter((line) => line.includes('GitHub App'));
+      assert.deepEqual(lines, steps === undefined ? [] : [steps], `${own.join(',')} / ${org.join(',')}`);
+      if (steps !== undefined) assert.ok(opened(sys)?.body.includes(`\n- ${steps}`), 'and in the pull request, left to do by hand');
+    }
+    assert.ok(boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_KEY']).includes('and set its private key as NIYAM_BOARD_APP_KEY, Actions secrets'));
+    // Board off, or a personal repository, whose checks skip the work rules: no app to set up.
+    const off = fresh();
+    off.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
+    assert.ok(!byHand((await run(off)).out).some((line) => line.includes('GitHub App')));
+  });
+
+  it("asks to pass, or stop passing, the board app's secrets", async () => {
+    const sys = fresh();
+    sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'board'] }));
+    sys.files.set(HOOKS, JSON.stringify(CLAUDE));
+    sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
+    sys.files.set(CLOUD, CLOUD_FILE);
+    sys.files.set(WORKFLOW, workflow('main', packageVersion(), false));
+    const on = await run(sys);
+    assert.ok(planned(on.out, 'Pull request').includes('workflow: board app secrets'), on.out.join('\n'));
+    assert.ok(
+      opened(sys)?.body.includes(
+        `\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, pass the pull request job's checks the board app's NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY secrets, which move a slice to In Progress when its pull request opens, leaving the rest as it is\n`,
+      ),
+    );
+    assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false, undefined, undefined, true));
+  });
+
   it('asks to pass, or stop passing, the Figma secrets', async () => {
     const sys = fresh();
     sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
@@ -2504,7 +2582,7 @@ describe('workflowUpdate', () => {
     const { code } = await run(sys, []);
     assert.equal(code, 0);
     const text = repo(sys).get(WORKFLOW) ?? '';
-    assert.equal(text, workflow('main', packageVersion(), true, '0 9 * * 1-5'));
+    assert.equal(text, full('main', packageVersion(), '0 9 * * 1-5'));
     assert.ok(text.includes(`  # The decisions job: cron 0 9 * * 1-5, UTC, as "schedule" in .github/niyam.json sets it.\n  schedule:\n    - cron: '0 9 * * 1-5'\n`));
     assert.ok(workflow('main', packageVersion(), true).includes("  # The weekly decisions job: Mondays, 06:17 UTC.\n  schedule:\n    - cron: '17 6 * * 1'\n"));
   });
@@ -2523,13 +2601,13 @@ describe('workflowUpdate', () => {
     sys.files.set(HOOKS, JSON.stringify(CLAUDE));
     sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
     sys.files.set(CLOUD, CLOUD_FILE);
-    const own = workflow('main', packageVersion(), true).replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
+    const own = full('main', packageVersion()).replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
     sys.files.set(WORKFLOW, own);
     const { code, out } = await run(sys, []);
     assert.equal(code, 0);
     assert.deepEqual(planned(out, 'Pull request'), ['workflow: schedule → 30 5 * * 2', 'auto-merge: when checks pass']);
     assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, run the weekly decisions job on the schedule .github/niyam.json sets, cron 30 5 * * 2 UTC, leaving the rest as it is\n`));
-    assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), true, '30 5 * * 2').replace('name: niyam\n', 'name: niyam\n# Our own note.\n'));
+    assert.equal(repo(sys).get(WORKFLOW), full('main', packageVersion(), '30 5 * * 2').replace('name: niyam\n', 'name: niyam\n# Our own note.\n'));
   });
 
   it('follows a changed schedule in a split workflow, keeping its quotes and leaving a cron of its own', () => {
@@ -2593,12 +2671,12 @@ describe('workflowUpdate', () => {
 
   it('asks to follow the default branch alone when the pins are current', async () => {
     const sys = fresh();
-    sys.files.set(WORKFLOW, workflow('main', packageVersion(), true));
+    sys.files.set(WORKFLOW, full('main', packageVersion()));
     sys.route('GET', REPO, { status: 200, json: repoJson(true, 'trunk') });
     const { out } = await run(sys);
     assert.ok(planned(out, 'Pull request').includes('workflow: branch → trunk'), out.join('\n'));
     assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, run pushes on the default branch, trunk, leaving the rest as it is\n`));
-    assert.equal(repo(sys).get(WORKFLOW), workflow('trunk', packageVersion(), true));
+    assert.equal(repo(sys).get(WORKFLOW), full('trunk', packageVersion()));
   });
 
   it('replaces a workflow it does not recognise, a split one with a pin missing included', () => {
