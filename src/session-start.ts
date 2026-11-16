@@ -1,6 +1,7 @@
 import {
   BASE_ENV,
   agentHere,
+  exportLines,
   anyLogin,
   either,
   loadSettings,
@@ -13,7 +14,7 @@ import {
   type Settings,
 } from './agent.ts';
 import { AGENT_VAR } from './names.ts';
-import { cloudLogin, cloudToken, ranFromSetup, repoReleases } from './cloud.ts';
+import { SIGNING_KEY_VAR, cloudLogin, cloudSigning, cloudToken, ranFromSetup, repoReleases } from './cloud.ts';
 import { CLOUD_SETUP_PATH } from './onboard-pull.ts';
 import { PRE_PUSH_HOOK, prePushHook } from './onboard.ts';
 import { packageVersion } from './version.ts';
@@ -136,7 +137,9 @@ function recordFor(sys: Sys): (entry: { agent: string } | { problem: string }) =
  * identity is the account claude.ai's GitHub connection uses, which GitHub
  * names through the session's proxy. When that is the agent, the lock the
  * settings' `env` gave the session is lifted, so gh and git reach GitHub
- * through the proxy, and the session is marked as the agent's for the guard
+ * through the proxy, the agent becomes the author, committer and signer of
+ * its commits when the environment holds its cloud signing key
+ * (`cloudCommits`), and the session is marked as the agent's for the guard
  * and the pre-push hook, which it writes, since a cloud clone has none of
  * the owner's. Otherwise GitHub stays locked out and the session is told to
  * stop: it would act as someone else.
@@ -184,7 +187,31 @@ async function cloudStart(sys: Sys): Promise<Said> {
     : hook.state === 'outside'
       ? ` Its pre-push hook ${hook.path} is outside the repository and was not checked, so only the pull request's checks may hold the work rules.`
       : '';
-  return { line: `niyam: this cloud session works as ${asked.login} on GitHub.${unchecked}`, agent: asked.login };
+  const signed = await cloudCommits(sys, root, envFile, asked);
+  return { line: `niyam: this cloud session works as ${asked.login} on GitHub.${unchecked}${signed}`, agent: asked.login };
+}
+
+/**
+ * Makes the agent the author, committer and signer of a cloud session's
+ * commits, as a local session's file does, over the cloud image's own
+ * identity, Claude's: `cloudSigning`'s variables, appended to CLAUDE_ENV_FILE
+ * after the lock is lifted, which reaches every command Claude Code runs and
+ * leaves the clone's git config alone. The key's variable is unset there, so
+ * commands do not carry it in their environment. A warning only, said after
+ * the line: when any of it fails, the session works on as the agent and its
+ * commits keep the image's identity, which PR identity passes.
+ */
+async function cloudCommits(sys: Sys, root: string, envFile: string, asked: { login: string; id?: number }): Promise<string> {
+  const keeps = (why: string): string => ` Its commits keep the cloud image's identity, Claude's: ${why}.`;
+  const signing = await cloudSigning(sys, root, asked.login, asked.id);
+  if ('problem' in signing) return keeps(signing.problem);
+  try {
+    sys.append(envFile, `unset ${SIGNING_KEY_VAR}\n${exportLines(signing.vars).join('\n')}\n`);
+  } catch (error) {
+    // fail-open: nothing of the signing reached the env file, so the session keeps the image's identity, and says why.
+    return keeps(`writing ${asked.login}'s signing to CLAUDE_ENV_FILE failed (${message(error)})`);
+  }
+  return ` Its commits are ${asked.login}'s, signed with ${SIGNING_KEY_VAR}.`;
 }
 
 function start(sys: Sys): Said {

@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { BASE_ENV, NO_TOKEN, lockScript, pathsFor, sessionNames, sessionRecord, sessionScript } from './agent.ts';
+import { BASE_ENV, NO_TOKEN, lockScript, noreplyEmail, pathsFor, sessionNames, sessionRecord, sessionScript } from './agent.ts';
 import { KEYCHAIN } from './token-store.ts';
+import type { ExecResult } from './types.ts';
 import { AGENT, AGENT_ID, FakeSys, HOME, ROOT, capture } from './fake.test.ts';
 import { FROM_SETUP, PROXY_TOKEN, cloudRepoScript } from './cloud.ts';
 import { CLOUD_SETUP_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
@@ -123,22 +124,150 @@ describe('sessionStart', () => {
 
   describe('in a Claude cloud session', () => {
     const STOP = 'Do not push, fetch, or run gh in this session; tell example-owner.';
-    /** A cloud session: no keychain or session file, GitHub reached through the proxy as `login`. */
-    const cloud = (login: string | null, env: Record<string, string> = {}): FakeSys => {
+    /**
+     * A cloud session: no keychain or session file, GitHub reached through the proxy as `login`. `answer` is what
+     * GitHub's /user gives beside the login: the agent's id, unless the test says otherwise.
+     */
+    const cloud = (login: string | null, env: Record<string, string> = {}, answer: { id?: unknown } = { id: AGENT_ID }): FakeSys => {
       const sys = new FakeSys();
       sys.env = { CLAUDE_ENV_FILE: ENV, CLAUDE_CODE_REMOTE: 'true', GH_TOKEN: NO_TOKEN, ...env };
       sys.stdin = JSON.stringify({ session_id: 'abc-123' });
-      if (login) sys.acceptToken(env.GH_TOKEN ?? PROXY_TOKEN, login);
+      if (login) sys.acceptToken(env.GH_TOKEN ?? PROXY_TOKEN, login, undefined, answer.id);
+      return sys;
+    };
+    const LIFTED = `\nunset ${Object.keys(BASE_ENV).join(' ')}\nexport GH_TOKEN=proxy-injected GITHUB_TOKEN=proxy-injected NIYAM_AGENT=ExampleBot\n`;
+    const KEEPS = " Its commits keep the cloud image's identity, Claude's: ";
+    const NO_KEY = `${KEEPS}the cloud environment's variables have no NIYAM_SIGNING_KEY, ExampleBot's cloud signing key (niyam's README, "Claude cloud sessions", says how to add one).`;
+    const WORKS = `niyam: this cloud session works as ExampleBot on GitHub.${NO_KEY}`;
+    const PEM = '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----\n';
+    const CLOUD_KEY = 'ssh-ed25519 AAAAcloud';
+    const KEY_FILE = pathsFor(HOME, AGENT).key;
+    /** A cloud session whose environment holds the agent's cloud signing key, which GitHub lists, and whose probe commit verifies. */
+    const keyed = (verifies = true, key = Buffer.from(PEM).toString('base64')): FakeSys => {
+      const sys = cloud(AGENT, { NIYAM_SIGNING_KEY: key });
+      sys.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 200, json: [{ key: 'ssh-ed25519 AAAAother' }, { key: `${CLOUD_KEY} cloud` }] });
+      sys.execOverride = ({ command, args }) => {
+        const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: '' });
+        if (command === 'ssh-keygen' && args[0] === '-y') return sys.files.get(args[2] ?? '') === PEM ? ok(`${CLOUD_KEY} comment\n`) : { code: 255, stdout: '', stderr: 'invalid format' };
+        if (command === 'git' && args[0] === 'mktree') return ok('tree0\n');
+        if (command === 'git' && args[0] === 'commit-tree') return ok('probe1\n');
+        if (command === 'git' && args.includes('verify-commit')) return verifies ? ok('') : { code: 1, stdout: '', stderr: 'Could not verify signature.' };
+        return undefined;
+      };
       return sys;
     };
 
-    it('works as the agent when GitHub says the connected account is the agent', async () => {
+    it('works as the agent when GitHub says the connected account is the agent, its commits staying the image\'s without the key', async () => {
       const sys = cloud(AGENT);
       const { out, env } = await start(sys);
-      assert.deepEqual(out, ['niyam: this cloud session works as ExampleBot on GitHub.']);
-      assert.equal(env, `\nunset ${Object.keys(BASE_ENV).join(' ')}\nexport GH_TOKEN=proxy-injected GITHUB_TOKEN=proxy-injected NIYAM_AGENT=ExampleBot\n`);
+      assert.deepEqual(out, [WORKS]);
+      assert.equal(env, LIFTED, 'no author or signing without the key');
       assert.equal(sys.files.get(RECORD), '{"agent":"ExampleBot"}\n');
       assert.equal(sys.requests.at(-1)?.token, PROXY_TOKEN, 'the proxy placeholder, never the lock');
+    });
+
+    it("makes the agent its commits' author, committer and signer with the cloud key, as a local session's file does", async () => {
+      const sys = keyed();
+      const { out, env } = await start(sys);
+      assert.deepEqual(out, ["niyam: this cloud session works as ExampleBot on GitHub. Its commits are ExampleBot's, signed with NIYAM_SIGNING_KEY."]);
+      const email = noreplyEmail(AGENT_ID, AGENT);
+      assert.equal(email, '42+ExampleBot@users.noreply.github.com');
+      const pub = `${KEY_FILE}.pub`;
+      assert.equal(env, `${LIFTED}unset NIYAM_SIGNING_KEY\n${[
+        "export GIT_AUTHOR_NAME='ExampleBot'",
+        "export GIT_COMMITTER_NAME='ExampleBot'",
+        `export GIT_AUTHOR_EMAIL='${email}'`,
+        `export GIT_COMMITTER_EMAIL='${email}'`,
+        "export GIT_CONFIG_COUNT='5'",
+        "export GIT_CONFIG_KEY_0='gpg.ssh.program'",
+        "export GIT_CONFIG_VALUE_0='ssh-keygen'",
+        "export GIT_CONFIG_KEY_1='gpg.format'",
+        "export GIT_CONFIG_VALUE_1='ssh'",
+        "export GIT_CONFIG_KEY_2='user.signingkey'",
+        `export GIT_CONFIG_VALUE_2='${pub}'`,
+        "export GIT_CONFIG_KEY_3='commit.gpgsign'",
+        "export GIT_CONFIG_VALUE_3='true'",
+        "export GIT_CONFIG_KEY_4='tag.gpgsign'",
+        "export GIT_CONFIG_VALUE_4='true'",
+      ].join('\n')}\n`);
+      for (const line of env?.split('\n').filter((one) => /^export GIT_(AUTHOR|COMMITTER)_/.test(one)) ?? []) assert.ok(SCRIPT.includes(line), `${line} is in a local session's file`);
+      assert.equal(sys.files.get(KEY_FILE), PEM);
+      assert.equal(sys.modes.get(KEY_FILE), 0o600, 'the key is private');
+      assert.equal(sys.files.get(pub), `${CLOUD_KEY} ExampleBot cloud signing\n`);
+      const probe = sys.calls.find((call) => call.args[0] === 'commit-tree');
+      assert.deepEqual(probe?.args, ['commit-tree', '-S', 'tree0', '-m', "niyam: a probe of the agent's signing, never on a branch"]);
+      assert.equal(probe?.cwd, ROOT);
+      assert.equal(probe?.env?.GIT_CONFIG_VALUE_2, pub, 'the probe signs with exactly what the session gets');
+      assert.equal(probe?.env?.NIYAM_SIGNING_KEY, undefined);
+      assert.equal(probe?.env?.GH_TOKEN, undefined, 'the lock lifted, as in the session');
+      const verify = sys.calls.find((call) => call.args.includes('verify-commit'));
+      assert.deepEqual(verify?.args, ['-c', `gpg.ssh.allowedSignersFile=${pathsFor(HOME, AGENT).dir}/allowed-signers`, 'verify-commit', 'probe1']);
+      assert.equal(sys.files.get(`${pathsFor(HOME, AGENT).dir}/allowed-signers`), `${email} namespaces="git" ${CLOUD_KEY}\n`, 'the agent key alone');
+      assert.deepEqual(sys.requests.map((request) => request.url), ['https://api.github.com/user', 'https://api.github.com/users/ExampleBot/ssh_signing_keys?per_page=100'], 'the id from the one /user answer');
+      assert.ok(sys.requests.every((request) => request.token === PROXY_TOKEN));
+    });
+
+    it('takes the key as is too, its newlines written out or not', async () => {
+      for (const key of [PEM, PEM.replaceAll('\n', '\\n')]) {
+        assert.match((await start(keyed(true, key))).out[0] ?? '', /Its commits are ExampleBot's, signed with NIYAM_SIGNING_KEY\.$/);
+      }
+    });
+
+    it('works on as the agent, its commits the image\'s, when any part of the signing fails', async () => {
+      const failed = async (sys: FakeSys, why: string): Promise<void> => {
+        const { out, env } = await start(sys);
+        assert.deepEqual(out, [`niyam: this cloud session works as ExampleBot on GitHub.${KEEPS}${why}.`]);
+        assert.equal(env, LIFTED, `${why}: nothing half set`);
+        assert.equal(sys.files.get(RECORD), '{"agent":"ExampleBot"}\n');
+      };
+      for (const id of [undefined, null, '42', 0, -1, 1.5]) {
+        const sys = keyed();
+        sys.acceptToken(PROXY_TOKEN, AGENT, undefined, id);
+        await failed(sys, 'GitHub named no account id for ExampleBot');
+      }
+      await failed(keyed(true, Buffer.from('not a key').toString('base64')), 'NIYAM_SIGNING_KEY is not an OpenSSH private key, base64 on one line or as is');
+      const unreadable = keyed(true, Buffer.from(PEM.replace('b3Bl', 'zzzz')).toString('base64'));
+      await failed(unreadable, 'ssh-keygen cannot read NIYAM_SIGNING_KEY (invalid format)');
+      const unlisted = keyed();
+      unlisted.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 200, json: [{ key: 'ssh-ed25519 AAAAother' }] });
+      await failed(unlisted, "GitHub does not list NIYAM_SIGNING_KEY's public half as one of ExampleBot's signing keys");
+      const refused = keyed();
+      refused.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 403, json: { message: 'not enabled for this session' } });
+      await failed(refused, "GitHub answered HTTP 403 when asked for ExampleBot's signing keys");
+      const down = keyed();
+      const http = down.http.bind(down);
+      down.http = (url, options) => (url.includes('ssh_signing_keys') ? Promise.reject(new Error('proxy down')) : http(url, options));
+      await failed(down, "GitHub could not be asked for ExampleBot's signing keys (proxy down)");
+      await failed(keyed(false), 'a probe commit signed with NIYAM_SIGNING_KEY did not verify as that key (git verify-commit: Could not verify signature.)');
+      const unsigned = keyed();
+      const fakeExec = unsigned.execOverride;
+      unsigned.execOverride = (call) => (call.args[0] === 'commit-tree' ? { code: 128, stdout: '', stderr: 'error: ssh-keygen failed\nfatal: failed to write commit object' } : fakeExec(call));
+      await failed(unsigned, 'a probe commit signed with NIYAM_SIGNING_KEY did not verify as that key (git commit-tree: fatal: failed to write commit object)');
+      const noTree = keyed();
+      const treeExec = noTree.execOverride;
+      noTree.execOverride = (call) => (call.args[0] === 'mktree' ? { code: 128, stdout: '', stderr: '' } : treeExec(call));
+      await failed(noTree, 'a probe commit signed with NIYAM_SIGNING_KEY did not verify as that key (git mktree: exit 128)');
+      const readOnly = keyed();
+      const write = readOnly.write.bind(readOnly);
+      readOnly.write = (path, data, mode) => {
+        if (path === KEY_FILE) throw new Error('read-only');
+        write(path, data, mode);
+      };
+      await failed(readOnly, `writing NIYAM_SIGNING_KEY to ${KEY_FILE} failed (read-only)`);
+      const noPub = keyed();
+      const writePub = noPub.write.bind(noPub);
+      noPub.write = (path, data, mode) => {
+        if (path === `${KEY_FILE}.pub`) throw new Error('read-only');
+        writePub(path, data, mode);
+      };
+      await failed(noPub, `writing ${KEY_FILE}.pub failed (read-only)`);
+      const full = keyed();
+      const append = full.append.bind(full);
+      full.append = (path, text) => {
+        if (text.includes('GIT_AUTHOR_NAME')) throw new Error('disk full');
+        append(path, text);
+      };
+      await failed(full, "writing ExampleBot's signing to CLAUDE_ENV_FILE failed (disk full)");
     });
 
     it('writes the pre-push git hook a fresh clone lacks, or replaces an older one', async () => {
@@ -157,12 +286,12 @@ describe('sessionStart', () => {
       const hook = `${ROOT}/.git/hooks/pre-push`;
       const ours = cloud(AGENT);
       ours.files.set(hook, '#!/bin/sh\npnpm lint\nniyam pre-push "$@"\n');
-      assert.deepEqual((await start(ours)).out, ['niyam: this cloud session works as ExampleBot on GitHub.']);
+      assert.deepEqual((await start(ours)).out, [WORKS]);
       for (const text of ['#!/bin/sh\npnpm lint\n', '#!/bin/sh\npnpm lint\nprocess-rules pre-push "$@"\n']) {
         const own = cloud(AGENT);
         own.files.set(hook, text);
         assert.deepEqual((await start(own)).out, [
-          "niyam: this cloud session works as ExampleBot on GitHub. Its pre-push hook .git/hooks/pre-push does not run niyam, so only the pull request's checks hold the work rules.",
+          `niyam: this cloud session works as ExampleBot on GitHub. Its pre-push hook .git/hooks/pre-push does not run niyam, so only the pull request's checks hold the work rules.${NO_KEY}`,
         ], 'the command before niyam runs nothing since P-54');
         assert.equal(own.files.get(hook), text, 'left as it is');
       }
@@ -172,7 +301,7 @@ describe('sessionStart', () => {
       const sys = cloud(AGENT);
       sys.execOverride = (call) => (call.args[1] === '--git-path' ? { code: 0, stdout: '/shared/hooks/pre-push\n', stderr: '' } : undefined);
       assert.deepEqual((await start(sys)).out, [
-        "niyam: this cloud session works as ExampleBot on GitHub. Its pre-push hook /shared/hooks/pre-push is outside the repository and was not checked, so only the pull request's checks may hold the work rules.",
+        `niyam: this cloud session works as ExampleBot on GitHub. Its pre-push hook /shared/hooks/pre-push is outside the repository and was not checked, so only the pull request's checks may hold the work rules.${NO_KEY}`,
       ]);
       assert.equal(sys.files.has('/shared/hooks/pre-push'), false);
     });
@@ -189,7 +318,6 @@ describe('sessionStart', () => {
     });
 
     describe("when the installed CLI is not the release the repo pins", () => {
-      const WORKS = 'niyam: this cloud session works as ExampleBot on GitHub.';
       const CLOUD_FILE = `${ROOT}/${CLOUD_SETUP_PATH}`;
       const v = packageVersion();
       /** A cloud session in a repo whose workflow pins `pin` and whose cloud setup file, when given, installs `file`. */
@@ -323,8 +451,9 @@ describe('sessionStart', () => {
       sys.http = () => Promise.reject(new Error('proxy down'));
       assert.match((await start(sys)).out[0] ?? '', /GitHub could not be asked who this session is \(proxy down\)/);
       const odd = cloud(null);
-      odd.route('GET', '/user', { status: 200, json: {} });
+      odd.route('GET', '/user', { status: 200, json: { id: AGENT_ID } });
       assert.match((await start(odd)).out[0] ?? '', /GitHub answered HTTP 200 when asked/);
+      for (const failed of [cloud(null), sys, odd]) assert.equal(failed.files.get(ENV), undefined, 'no author, and no lift, when /user fails');
     });
 
     it('says to stop without settings, an env file, or when the env file cannot be written', async () => {
@@ -489,11 +618,12 @@ describe('sessionStart', () => {
         const sys = new FakeSys();
         sys.env = { CLAUDE_ENV_FILE: ENV, CLAUDE_CODE_REMOTE: 'true', GH_TOKEN: NO_TOKEN };
         sys.files.set(`${ROOT}/.github/niyam.json`, TEAM);
-        sys.acceptToken(PROXY_TOKEN, login);
+        sys.acceptToken(PROXY_TOKEN, login, undefined, 7);
         return sys;
       };
-      assert.deepEqual((await start(cloud('OtherBot'))).out, ['niyam: this cloud session works as OtherBot on GitHub.']);
-      assert.deepEqual((await start(cloud(AGENT))).out, ['niyam: this cloud session works as ExampleBot on GitHub.']);
+      const keyNote = (agent: string): string => ` Its commits keep the cloud image's identity, Claude's: the cloud environment's variables have no NIYAM_SIGNING_KEY, ${agent}'s cloud signing key (niyam's README, "Claude cloud sessions", says how to add one).`;
+      assert.deepEqual((await start(cloud('OtherBot'))).out, [`niyam: this cloud session works as OtherBot on GitHub.${keyNote('OtherBot')}`]);
+      assert.deepEqual((await start(cloud(AGENT))).out, [`niyam: this cloud session works as ExampleBot on GitHub.${keyNote(AGENT)}`]);
       assert.deepEqual((await start(cloud('Second-Owner'))).out, [
         "niyam: STOP. This cloud session reaches GitHub as Second-Owner, not OtherBot or ExampleBot: claude.ai's GitHub connection must be OtherBot or ExampleBot for agent sessions. Do not push, fetch, or run gh in this session; tell example-owner.",
       ]);

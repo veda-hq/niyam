@@ -142,11 +142,12 @@ export class FakeSys implements Sys {
     return this.keychain.get(`niyam/${account}`);
   }
 
-  acceptToken(token: string, login: string, headers: Record<string, string> = CLASSIC): this {
+  /** GitHub's `/user` answers `token` as `login`, with the account's `id` when one is given. */
+  acceptToken(token: string, login: string, headers: Record<string, string> = CLASSIC, id?: unknown): this {
     const previous = this.routes.get('GET https://api.github.com/user');
     this.routes.set('GET https://api.github.com/user', () => {
       const last = this.requests.at(-1);
-      if (last?.token === token) return { status: 200, json: { login }, headers };
+      if (last?.token === token) return { status: 200, json: id === undefined ? { login } : { id, login }, headers };
       return typeof previous === 'function' ? previous() : previous ?? { status: 401, json: null };
     });
     return this;
