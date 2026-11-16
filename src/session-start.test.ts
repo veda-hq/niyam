@@ -270,6 +270,63 @@ describe('sessionStart', () => {
       await failed(full, "writing ExampleBot's signing to CLAUDE_ENV_FILE failed (disk full)");
     });
 
+    describe("in a cloud image with no ssh-keygen, as Claude's hosted one (#425)", () => {
+      const ENOENT: ExecResult = { code: 127, stdout: '', stderr: 'Error: spawnSync ssh-keygen ENOENT' };
+      /** A keyed session whose image lacks ssh-keygen until apt-get installs openssh-client; `apt` answers each apt-get step. */
+      const bare = (apt: (args: readonly string[]) => ExecResult = () => ({ code: 0, stdout: '', stderr: 'W: some warning' })): FakeSys => {
+        const sys = keyed();
+        const keyedExec = sys.execOverride;
+        let present = false;
+        sys.execOverride = (call) => {
+          if (call.command === 'apt-get') {
+            const ran = apt(call.args);
+            if (ran.code === 0 && call.args[0] === 'install') present = true;
+            return ran;
+          }
+          return call.command === 'ssh-keygen' && !present ? ENOENT : keyedExec(call);
+        };
+        return sys;
+      };
+
+      it("installs openssh-client, then signs as the agent, and says so with the Setup script's line that saves it", async () => {
+        const sys = bare();
+        const { out, env } = await start(sys);
+        assert.deepEqual(out, [
+          "niyam: this cloud session works as ExampleBot on GitHub. Its commits are ExampleBot's, signed with NIYAM_SIGNING_KEY. It installed openssh-client for ssh-keygen, which the cloud image lacks; \"apt-get update && apt-get install -y openssh-client\" in the environment's Setup script saves that.",
+        ]);
+        assert.match(env ?? '', /^export GIT_AUTHOR_NAME='ExampleBot'$/m, 'signed as on an image that has it');
+        const apt = sys.calls.filter((call) => call.command === 'apt-get');
+        assert.deepEqual(apt.map((call) => call.args), [['update', '-q'], ['install', '-y', '-q', '--no-install-recommends', 'openssh-client']]);
+        for (const call of apt) {
+          assert.equal(call.env?.DEBIAN_FRONTEND, 'noninteractive', 'asks nothing');
+          assert.equal(call.env?.NIYAM_SIGNING_KEY, undefined, 'the key stays out of it');
+          assert.equal(call.timeoutMs, 90_000);
+        }
+        assert.equal(sys.calls.filter((call) => call.command === 'ssh-keygen').length, 2, 'read again once installed');
+      });
+
+      it('installs nothing when the image has ssh-keygen', async () => {
+        const sys = keyed();
+        await start(sys);
+        assert.ok(sys.calls.every((call) => call.command !== 'apt-get'));
+      });
+
+      it("works on as the agent, its commits the image's, naming the missing ssh-keygen and its fix, when the install fails", async () => {
+        const failed = async (sys: FakeSys, why: string): Promise<void> => {
+          const { out, env } = await start(sys);
+          assert.deepEqual(out, [`niyam: this cloud session works as ExampleBot on GitHub.${KEEPS}${why}.`]);
+          assert.equal(env, LIFTED, `${why}: nothing half set`);
+          assert.equal(sys.files.get(RECORD), '{"agent":"ExampleBot"}\n');
+        };
+        const fix = `add "apt-get update && apt-get install -y openssh-client" to the cloud environment's Setup script`;
+        await failed(bare(() => ({ code: 127, stdout: '', stderr: 'Error: spawnSync apt-get ENOENT' })), "the cloud image has no ssh-keygen, and no apt-get to install openssh-client with; install OpenSSH's client tools in the cloud environment's Setup script");
+        const locked = bare((args) => (args[0] === 'update' ? { code: 100, stdout: '', stderr: 'E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)\nE: Unable to lock directory /var/lib/apt/lists/\n' } : { code: 0, stdout: '', stderr: '' }));
+        await failed(locked, `the cloud image has no ssh-keygen, and apt-get update failed installing openssh-client (E: Unable to lock directory /var/lib/apt/lists/); ${fix}`);
+        assert.equal(locked.calls.filter((call) => call.command === 'apt-get').length, 1, 'no install after a failed update');
+        await failed(bare((args) => ({ code: args[0] === 'install' ? 100 : 0, stdout: '', stderr: '' })), `the cloud image has no ssh-keygen, and apt-get install failed installing openssh-client (exit 100); ${fix}`);
+      });
+    });
+
     it('writes the pre-push git hook a fresh clone lacks, or replaces an older one', async () => {
       const hook = `${ROOT}/.git/hooks/pre-push`;
       const sys = cloud(AGENT);
