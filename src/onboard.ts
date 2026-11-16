@@ -258,13 +258,35 @@ export const AUTO_FIX_RULES = ['mcp__ccd_pr__bind_pr', 'mcp__ccd_pr__get_status'
 const PR_SERVER_RULES = ['mcp__ccd_pr', 'mcp__ccd_pr__*'];
 
 /**
- * Which of AUTO_FIX_RULES a settings file's `permissions.allow` lacks, in
- * their order: none when it allows the whole server.
+ * The permission rules that let agent sessions publish the claude.ai page
+ * every ask to the owner links (`Needs you:`, `Proposal:`, `niyam propose
+ * --page`): a new page, one from files, and a change to one. Without them
+ * the auto-mode classifier refuses the calls as communication. A new page
+ * is private to its owner.
  */
-export function missingAutoFixRules(settings: unknown): string[] {
+export const ARTIFACT_RULES = ['mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__edit_version'] as const;
+
+/** The rules that allow every tool of the artifacts server, ARTIFACT_RULES among them. */
+const ARTIFACT_SERVER_RULES = ['mcp__claude-artifacts', 'mcp__claude-artifacts__*'];
+
+/**
+ * Which of `rules` a settings file's `permissions.allow` lacks, in their
+ * order: none when it allows the whole server, by one of `server`.
+ */
+function missingRules(settings: unknown, rules: readonly string[], server: string[]): string[] {
   const allow = (settings as { permissions?: { allow?: unknown } } | null)?.permissions?.allow;
-  if (Array.isArray(allow) && allow.some((rule) => PR_SERVER_RULES.includes(rule as string))) return [];
-  return AUTO_FIX_RULES.filter((rule) => !Array.isArray(allow) || !allow.includes(rule));
+  if (Array.isArray(allow) && allow.some((rule) => server.includes(rule as string))) return [];
+  return rules.filter((rule) => !Array.isArray(allow) || !allow.includes(rule));
+}
+
+/** Which of AUTO_FIX_RULES a settings file's `permissions.allow` lacks. */
+export function missingAutoFixRules(settings: unknown): string[] {
+  return missingRules(settings, AUTO_FIX_RULES, PR_SERVER_RULES);
+}
+
+/** Which of ARTIFACT_RULES a settings file's `permissions.allow` lacks. */
+export function missingArtifactRules(settings: unknown): string[] {
+  return missingRules(settings, ARTIFACT_RULES, ARTIFACT_SERVER_RULES);
 }
 
 /** The hook commands older releases wrote, which onboard replaces with this release's. */
@@ -972,7 +994,7 @@ export interface SarathiEdit {
 /**
  * The client's Claude Code settings with this release's hooks and lock: each
  * entry an older release wrote swapped where it stands, a missing one added,
- * the lock's variables set in `env`, and REVIEW_THREAD_RULE and AUTO_FIX_RULES allowed. Every edit is made in the text, so
+ * the lock's variables set in `env`, and REVIEW_THREAD_RULE, AUTO_FIX_RULES and ARTIFACT_RULES allowed. Every edit is made in the text, so
  * the rest of the file keeps its layout. Says what changed, for the question.
  *
  * Where the project keeps `.claude/sarathi.json` (`sarathiBefore`) and the
@@ -1116,8 +1138,14 @@ export function claudeSettings(before: string | undefined, sarathiBefore?: strin
     if (lacking.length > 0) {
       changes.push(`allow ${lacking.join(', ')} without a prompt, so agent sessions turn Auto-fix on for their own pull requests`);
     }
-    // One word for both, so the plan's line stays short.
-    if (review || renamed.replaced > 0 || lacking.length > 0) labels.push(!(review || renamed.replaced > 0) ? 'Auto-fix rules' : lacking.length === 0 ? 'review rule' : 'allow rules');
+    const unpublished = missingArtifactRules(parsed());
+    for (const rule of unpublished) text = appendToArray(text, ['permissions'], 'allow', rule);
+    if (unpublished.length > 0) {
+      changes.push(`allow ${unpublished.join(', ')} without a prompt, so agent sessions publish the page an ask to the owner links`);
+    }
+    // One group's own word, or one word for several, so the plan's line stays short.
+    const groups = [review || renamed.replaced > 0 ? 'review rule' : '', lacking.length > 0 ? 'Auto-fix rules' : '', unpublished.length > 0 ? 'artifact rules' : ''].filter(Boolean);
+    if (groups.length > 0) labels.push(groups.length === 1 ? groups[0]! : 'allow rules');
   } catch (error) {
     throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
   }
