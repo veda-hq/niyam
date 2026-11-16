@@ -56,9 +56,11 @@ const PROBE_MESSAGE = 'niyam: a probe of the agent\'s signing, never on a branch
  * for the agent and a probe commit signed with exactly these settings, in
  * the clone at `root`, verifies as that key's. The probe is an object on no
  * branch, which git's housekeeping drops. Otherwise why not, and the session
- * keeps the cloud image's identity.
+ * keeps the cloud image's identity. An image with no ssh-keygen, as Claude's
+ * hosted one, gets SSH_PACKAGE first (`installSshKeygen`), and `installed`
+ * names it.
  */
-export async function cloudSigning(sys: Sys, root: string, login: string, id: number | undefined): Promise<{ vars: [string, string][] } | { problem: string }> {
+export async function cloudSigning(sys: Sys, root: string, login: string, id: number | undefined): Promise<{ vars: [string, string][]; installed?: string } | { problem: string }> {
   const given = sys.env[SIGNING_KEY_VAR]?.trim();
   if (!given) return { problem: `the cloud environment's variables have no ${SIGNING_KEY_VAR}, ${login}'s cloud signing key (niyam's README, "Claude cloud sessions", says how to add one)` };
   if (id === undefined) return { problem: `GitHub named no account id for ${login}` };
@@ -78,7 +80,15 @@ export async function cloudSigning(sys: Sys, root: string, login: string, id: nu
     // fail-open: the session keeps the image's identity, which PR identity passes, and says why.
     return { problem: `writing ${SIGNING_KEY_VAR} to ${key} failed (${messageOf(error)})` };
   }
-  const derived = sys.exec('ssh-keygen', ['-y', '-f', key], { input: '' });
+  const derive = () => sys.exec('ssh-keygen', ['-y', '-f', key], { input: '' });
+  let derived = derive();
+  // Claude's hosted image has no ssh-keygen (#425): it is installed here, before anything needs it.
+  const installed = derived.code === NOT_FOUND;
+  if (installed) {
+    const failed = installSshKeygen(sys);
+    if (failed) return { problem: failed };
+    derived = derive();
+  }
   if (derived.code !== 0) return { problem: `ssh-keygen cannot read ${SIGNING_KEY_VAR} (${lastLine(derived.stderr) || `exit ${derived.code}`})` };
   const body = keyBody(derived.stdout);
   const listed = await listedSigningKeys(sys, login);
@@ -93,7 +103,41 @@ export async function cloudSigning(sys: Sys, root: string, login: string, id: nu
   }
   const vars: [string, string][] = [...authorVars(login, id), ...configVars([['gpg.ssh.program', 'ssh-keygen'], ...signingConfig(pub)])];
   const probe = probeSignature(sys, root, vars, signers);
-  return probe ? { problem: `a probe commit signed with ${SIGNING_KEY_VAR} did not verify as that key (${probe})` } : { vars };
+  if (probe) return { problem: `a probe commit signed with ${SIGNING_KEY_VAR} did not verify as that key (${probe})` };
+  return installed ? { vars, installed: SSH_PACKAGE } : { vars };
+}
+
+/** What a shell exits with, and Sys.exec gives, for a command that is not there. */
+const NOT_FOUND = 127;
+
+/** The Debian and Ubuntu package with OpenSSH's client tools, ssh-keygen among them. */
+export const SSH_PACKAGE = 'openssh-client';
+
+/** How long `installSshKeygen` lets each apt-get step run: the two took about 3 seconds each in Claude's hosted image. */
+export const SSH_INSTALL_MS = 90_000;
+
+/**
+ * The line for a cloud environment's Setup script that installs ssh-keygen
+ * once, into the environment's snapshot, so sessions need not install it each
+ * time. A fresh image has no package lists, so it reads them first.
+ */
+export const SSH_SETUP_LINE = `apt-get update && apt-get install -y ${SSH_PACKAGE}`;
+
+/**
+ * Installs SSH_PACKAGE with apt-get, as root, for a cloud session whose image
+ * has no ssh-keygen: signing reads the key and signs with it. Undefined once
+ * installed, else why not, with the Setup script's line that does it instead.
+ * The key's variable is kept out of apt-get's environment.
+ */
+function installSshKeygen(sys: Sys): string | undefined {
+  const env = { ...Object.fromEntries(Object.entries(sys.env).filter(([name]) => name !== SIGNING_KEY_VAR)), DEBIAN_FRONTEND: 'noninteractive' };
+  const fix = `add "${SSH_SETUP_LINE}" to the cloud environment's Setup script`;
+  for (const args of [['update', '-q'], ['install', '-y', '-q', '--no-install-recommends', SSH_PACKAGE]]) {
+    const ran = sys.exec('apt-get', args, { env, input: '', timeoutMs: SSH_INSTALL_MS });
+    if (ran.code === NOT_FOUND) return `the cloud image has no ssh-keygen, and no apt-get to install ${SSH_PACKAGE} with; install OpenSSH's client tools in the cloud environment's Setup script`;
+    if (ran.code !== 0) return `the cloud image has no ssh-keygen, and apt-get ${args[0]} failed installing ${SSH_PACKAGE} (${lastLine(ran.stderr) || `exit ${ran.code}`}); ${fix}`;
+  }
+  return undefined;
 }
 
 const PEM_BEGIN = '-----BEGIN OPENSSH PRIVATE KEY-----';

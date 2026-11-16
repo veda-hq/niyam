@@ -20,7 +20,7 @@ import {
   tokenInfo,
 } from './agent.ts';
 import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
-import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
+import { FROM_SETUP, SIGNING_KEY_VAR, SSH_SETUP_LINE, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
 import { GITHUB_NOREPLY } from './host.ts';
 import { featuresIn } from './features.ts';
 import { typesDrift } from './issue-types.ts';
@@ -427,6 +427,14 @@ function cloudCommits(sys: Sys, agent: string): Finding {
     return { mark: '✓', text: `this session's commits are ${agent}'s, signed with ${SIGNING_KEY_VAR}` };
   }
   if (sys.env[SIGNING_KEY_VAR]) {
+    // Claude's hosted image has no ssh-keygen (#425): session-start installs it, unless it could not.
+    if (sys.exec('sh', ['-c', 'command -v ssh-keygen'], { input: '' }).code !== 0) {
+      return {
+        mark: '▲',
+        text: `${SIGNING_KEY_VAR} is set, but this cloud image has no ssh-keygen to sign with, so this session's commits are Claude's`,
+        fix: `"${SSH_SETUP_LINE}" in the environment's Setup script, then a new session`,
+      };
+    }
     return { mark: '▲', text: `${SIGNING_KEY_VAR} is set, but session-start could not use it, so this session's commits are Claude's`, fix: 'a new session; its first niyam line says why' };
   }
   return {

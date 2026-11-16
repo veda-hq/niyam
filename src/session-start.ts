@@ -14,7 +14,7 @@ import {
   type Settings,
 } from './agent.ts';
 import { AGENT_VAR } from './names.ts';
-import { SIGNING_KEY_VAR, cloudLogin, cloudSigning, cloudToken, ranFromSetup, repoReleases } from './cloud.ts';
+import { SIGNING_KEY_VAR, SSH_SETUP_LINE, cloudLogin, cloudSigning, cloudToken, ranFromSetup, repoReleases } from './cloud.ts';
 import { CLOUD_SETUP_PATH } from './onboard-pull.ts';
 import { PRE_PUSH_HOOK, prePushHook } from './onboard.ts';
 import { packageVersion } from './version.ts';
@@ -211,7 +211,10 @@ async function cloudCommits(sys: Sys, root: string, envFile: string, asked: { lo
     // fail-open: nothing of the signing reached the env file, so the session keeps the image's identity, and says why.
     return keeps(`writing ${asked.login}'s signing to CLAUDE_ENV_FILE failed (${message(error)})`);
   }
-  return ` Its commits are ${asked.login}'s, signed with ${SIGNING_KEY_VAR}.`;
+  const installed = signing.installed
+    ? ` It installed ${signing.installed} for ssh-keygen, which the cloud image lacks; "${SSH_SETUP_LINE}" in the environment's Setup script saves that.`
+    : '';
+  return ` Its commits are ${asked.login}'s, signed with ${SIGNING_KEY_VAR}.${installed}`;
 }
 
 function start(sys: Sys): Said {

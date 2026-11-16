@@ -221,9 +221,17 @@ describe('cloudSetupSnippet', () => {
     after(() => rmSync(dir, { recursive: true, force: true }));
     const then = 'echo "repo setup ran"\nexit 0\n';
 
-    /** Runs the snippet, then the repo's own setup, from `cwd`, as the Setup script runs from the folder holding the clone. */
-    function setup(cwd: string) {
-      const result = spawnSync('bash', ['-c', `${snippet}${then}`], { cwd, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+    /** The homes the snippet searches, beside the folder it runs from. */
+    const HOMES = ' /home/*/*/"$file" /root/*/"$file"';
+    /**
+     * Runs the snippet, then the repo's own setup, from `cwd`, as the Setup script runs from the folder holding the
+     * clone. Its homes are under `machine`, a folder the test made, so it never finds a real clone, such as a cloud
+     * session's own at /home/user/<repo>, whose install would replace this machine's niyam (#428).
+     */
+    function setup(cwd: string, machine = join(dir, 'no-homes')) {
+      const hermetic = snippet.replace(HOMES, ` ${machine}/home/*/*/"$file" ${machine}/root/*/"$file"`);
+      assert.notEqual(hermetic, snippet, 'the snippet searches the homes the test moves');
+      const result = spawnSync('bash', ['-c', `${hermetic}${then}`], { cwd, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
       return { status: result.status, stdout: result.stdout, stderr: result.stderr };
     }
 
@@ -238,6 +246,16 @@ describe('cloudSetupSnippet', () => {
       const home = join(dir, 'home');
       clone(join(home, 'example-app'));
       assert.deepEqual(setup(home), { status: 0, stdout: RAN, stderr: '' });
+    });
+
+    it("runs it from a clone in a user's home or root's, as a cloud session's, wherever the Setup script starts", () => {
+      for (const home of ['home/user', 'root']) {
+        const machine = join(dir, `machine-${home.replace('/', '-')}`);
+        clone(join(machine, home, 'example-app'));
+        const elsewhere = join(machine, 'elsewhere');
+        mkdirSync(elsewhere);
+        assert.deepEqual(setup(elsewhere, machine), { status: 0, stdout: RAN, stderr: '' }, home);
+      }
     });
 
     it('runs it from the clone itself', () => {

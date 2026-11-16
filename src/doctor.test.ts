@@ -591,9 +591,19 @@ describe('doctor in a Claude cloud session', () => {
     // session-start unsets the key's variable once it uses it: still set, it could not.
     const unused = cloud();
     unused.env = { ...unused.env, GIT_AUTHOR_NAME: 'Claude', GIT_AUTHOR_EMAIL: 'noreply@anthropic.com', NIYAM_SIGNING_KEY: 'a2V5' };
+    unused.execOverride = ({ command, args }) => (command === 'sh' && args.join(' ') === '-c command -v ssh-keygen' ? { code: 0, stdout: '/usr/bin/ssh-keygen\n', stderr: '' } : undefined);
     assert.deepEqual(marked((await check(unused)).out, '▲'), [
       "▲  NIYAM_SIGNING_KEY is set, but session-start could not use it, so this session's commits are Claude's → a new session; its first niyam line says why",
     ]);
+    // Claude's hosted image has no ssh-keygen (#425): the warning names it, and the Setup script's line that installs it.
+    const bare = cloud();
+    bare.env = { ...unused.env };
+    const { code, out } = await check(bare);
+    assert.equal(code, 0, 'a warning only');
+    const warned = "▲  NIYAM_SIGNING_KEY is set, but this cloud image has no ssh-keygen to sign with, so this session's commits are Claude's";
+    const setupLine = '"apt-get update && apt-get install -y openssh-client"';
+    assert.deepEqual(marked(out, '▲'), [`${warned} → ${setupLine} in the environment's Setup script, then a new session`]);
+    assert.ok(bare.calls.every((call) => call.command !== 'apt-get'), 'doctor only reads: it installs nothing');
     const other = cloud();
     other.env = { ...other.env, GIT_AUTHOR_EMAIL: noreplyEmail(7, 'OtherBot') };
     assert.match(marked((await check(other)).out, '▲')[0] ?? '', /commits are Claude's/, "another account's address is not the agent's");
