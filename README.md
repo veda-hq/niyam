@@ -1340,29 +1340,29 @@ address and signed with that key.
 Once `session-start` confirms the login as the agent, it does four things:
 
 - reads the account's id from the same GitHub answer;
-- writes the key to the agent's key file (`~/.ssh/<agent>_signing`, mode 0600) and checks GitHub lists its public half as one of the agent's signing keys; an image with no `ssh-keygen`, as Claude's hosted one, first gets OpenSSH's client tools (`apt-get install openssh-client`, about 7 seconds), and the session's line says so;
+- writes the key to the agent's key file (`~/.ssh/<agent>_signing`, mode 0600) and checks GitHub lists its public half as one of the agent's signing keys;
 - makes a probe commit object, on no branch, with exactly the settings the session will get;
 - checks that its signature verifies as that key's.
 
 Only then does it add the agent's author and committer variables and SSH
-signing, with `gpg.ssh.program` set back from the platform's own program to
-`ssh-keygen`, all together to `CLAUDE_ENV_FILE`. It also unsets the key's
+signing, all together to `CLAUDE_ENV_FILE`. `gpg.ssh.program` goes from the
+platform's own program to niyam's signer, `niyam ssh-sign`, through a small
+script next to the session's files. The hosted image has no `ssh-keygen`, so
+niyam reads the key and makes git's SSH signatures in Node. They are the same
+signatures `ssh-keygen -Y sign` makes, and it checks the probe's signature in
+Node too. The key must be an ed25519 key with no passphrase, as `cloud-key`
+makes. `niyam ssh-sign` only signs, so `git log --show-signature` in the
+session cannot check signatures; GitHub does. It also unsets the key's
 variable there, so commands do not carry it in their environment.
 
 When any step fails, nothing is set and the commits stay Claude's, which PR
 identity passes. Steps that can fail: no key, one that is not an OpenSSH
-private key, no `ssh-keygen` and no way to install it (no `apt-get`, no root,
-or no network to its mirrors), a key GitHub does not list, a lookup the proxy
-refuses, or a probe that does not verify. The session's line says why and the
-session works on as the agent. A commit claiming the agent without the agent's
-signature would fail PR identity, so it is all or nothing.
-
-What a session installs is not kept, so each session on the hosted image
-installs `ssh-keygen` again. `apt-get update && apt-get install -y
-openssh-client` in the environment's Setup script puts it in the
-environment's snapshot instead, and is the fix when the session cannot
-install it. `doctor` names that line when the key is set and the image has
-no `ssh-keygen`.
+private key or not an ed25519 one with no passphrase, a key GitHub does not
+list, a lookup the proxy refuses, or a probe that does not verify. The
+session's line says why and the session works on as the agent. A commit
+claiming the agent without the agent's signature would fail PR identity, so
+it is all or nothing. Nothing is installed: signing needs no `ssh-keygen`, no
+network and no root, so no Setup script line either.
 
 `niyam onboard` makes the key the first time it runs for an agent that has
 none (see Adopting above), so all that is left is the paste. To make one

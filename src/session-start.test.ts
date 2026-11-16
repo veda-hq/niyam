@@ -8,13 +8,15 @@ import { after, describe, it } from 'node:test';
 import { BASE_ENV, NO_TOKEN, lockScript, noreplyEmail, pathsFor, sessionNames, sessionRecord, sessionScript } from './agent.ts';
 import { KEYCHAIN } from './token-store.ts';
 import type { ExecResult } from './types.ts';
-import { AGENT, AGENT_ID, FakeSys, HOME, ROOT, capture } from './fake.test.ts';
+import { AGENT, AGENT_ID, FakeSys, HOME, ROOT, capture, openSshKey } from './fake.test.ts';
 import { FROM_SETUP, PROXY_TOKEN, cloudRepoScript } from './cloud.ts';
 import { CLOUD_SETUP_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
 import { OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, workflow } from './onboard.ts';
 import { packageVersion } from './version.ts';
 import { SESSION_0610, SESSION_069, SESSION_BEFORE_P50 } from './older-texts.test.ts';
 import { AUTO_FIX, CLOUD_INSTALL_MS, sessionStart } from './session-start.ts';
+import { signerScript } from './ssh-sign.ts';
+import { readPrivateKey, signMessage } from './sshsig.ts';
 
 const OWNER_LOGIN = 'example-owner';
 
@@ -139,19 +141,28 @@ describe('sessionStart', () => {
     const KEEPS = " Its commits keep the cloud image's identity, Claude's: ";
     const NO_KEY = `${KEEPS}the cloud environment's variables have no NIYAM_SIGNING_KEY, ExampleBot's cloud signing key (niyam's README, "Claude cloud sessions", says how to add one).`;
     const WORKS = `niyam: this cloud session works as ExampleBot on GitHub.${NO_KEY}`;
-    const PEM = '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----\n';
-    const CLOUD_KEY = 'ssh-ed25519 AAAAcloud';
+    // A real key, made at test time, since niyam reads and signs with it itself (#425).
+    const { pem: PEM, publicLine: CLOUD_KEY } = openSshKey();
     const KEY_FILE = pathsFor(HOME, AGENT).key;
-    /** A cloud session whose environment holds the agent's cloud signing key, which GitHub lists, and whose probe commit verifies. */
+    const SIGNER = `${pathsFor(HOME, AGENT).dir}/ssh-sign`;
+    /** The probe commit object git would write, signed by the key in `pem`. */
+    const probeObject = (pem: string): string => {
+      const payload = "tree tree0\nauthor ExampleBot <42+ExampleBot@users.noreply.github.com> 1 +0000\ncommitter ExampleBot <42+ExampleBot@users.noreply.github.com> 1 +0000\n\nniyam: a probe of the agent's signing, never on a branch\n";
+      const key = readPrivateKey(pem);
+      assert.ok(!('problem' in key));
+      const signature = signMessage(key, Buffer.from(payload), 'git').trimEnd().split('\n').join('\n ');
+      return payload.replace('\n\n', `\ngpgsig ${signature}\n\n`);
+    };
+    /** A cloud session whose environment holds the agent's cloud signing key, which GitHub lists, and whose probe commit is signed by it, or by another key. */
     const keyed = (verifies = true, key = Buffer.from(PEM).toString('base64')): FakeSys => {
       const sys = cloud(AGENT, { NIYAM_SIGNING_KEY: key });
       sys.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 200, json: [{ key: 'ssh-ed25519 AAAAother' }, { key: `${CLOUD_KEY} cloud` }] });
+      const probe = probeObject(verifies ? PEM : openSshKey().pem);
       sys.execOverride = ({ command, args }) => {
         const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: '' });
-        if (command === 'ssh-keygen' && args[0] === '-y') return sys.files.get(args[2] ?? '') === PEM ? ok(`${CLOUD_KEY} comment\n`) : { code: 255, stdout: '', stderr: 'invalid format' };
         if (command === 'git' && args[0] === 'mktree') return ok('tree0\n');
         if (command === 'git' && args[0] === 'commit-tree') return ok('probe1\n');
-        if (command === 'git' && args.includes('verify-commit')) return verifies ? ok('') : { code: 1, stdout: '', stderr: 'Could not verify signature.' };
+        if (command === 'git' && args[0] === 'cat-file') return ok(probe);
         return undefined;
       };
       return sys;
@@ -180,7 +191,7 @@ describe('sessionStart', () => {
         `export GIT_COMMITTER_EMAIL='${email}'`,
         "export GIT_CONFIG_COUNT='5'",
         "export GIT_CONFIG_KEY_0='gpg.ssh.program'",
-        "export GIT_CONFIG_VALUE_0='ssh-keygen'",
+        `export GIT_CONFIG_VALUE_0='${SIGNER}'`,
         "export GIT_CONFIG_KEY_1='gpg.format'",
         "export GIT_CONFIG_VALUE_1='ssh'",
         "export GIT_CONFIG_KEY_2='user.signingkey'",
@@ -200,9 +211,10 @@ describe('sessionStart', () => {
       assert.equal(probe?.env?.GIT_CONFIG_VALUE_2, pub, 'the probe signs with exactly what the session gets');
       assert.equal(probe?.env?.NIYAM_SIGNING_KEY, undefined);
       assert.equal(probe?.env?.GH_TOKEN, undefined, 'the lock lifted, as in the session');
-      const verify = sys.calls.find((call) => call.args.includes('verify-commit'));
-      assert.deepEqual(verify?.args, ['-c', `gpg.ssh.allowedSignersFile=${pathsFor(HOME, AGENT).dir}/allowed-signers`, 'verify-commit', 'probe1']);
-      assert.equal(sys.files.get(`${pathsFor(HOME, AGENT).dir}/allowed-signers`), `${email} namespaces="git" ${CLOUD_KEY}\n`, 'the agent key alone');
+      assert.deepEqual(sys.calls.find((call) => call.args[0] === 'cat-file')?.args, ['cat-file', 'commit', 'probe1'], 'the probe checked in Node, from the object git wrote');
+      assert.ok(!sys.calls.some((call) => call.command === 'ssh-keygen'), 'the hosted image has none');
+      assert.equal(sys.files.get(SIGNER), signerScript(sys.runtime.node, sys.runtime.cli));
+      assert.equal(sys.modes.get(SIGNER), 0o755);
       assert.deepEqual(sys.requests.map((request) => request.url), ['https://api.github.com/user', 'https://api.github.com/users/ExampleBot/ssh_signing_keys?per_page=100'], 'the id from the one /user answer');
       assert.ok(sys.requests.every((request) => request.token === PROXY_TOKEN));
     });
@@ -227,7 +239,7 @@ describe('sessionStart', () => {
       }
       await failed(keyed(true, Buffer.from('not a key').toString('base64')), 'NIYAM_SIGNING_KEY is not an OpenSSH private key, base64 on one line or as is');
       const unreadable = keyed(true, Buffer.from(PEM.replace('b3Bl', 'zzzz')).toString('base64'));
-      await failed(unreadable, 'ssh-keygen cannot read NIYAM_SIGNING_KEY (invalid format)');
+      await failed(unreadable, 'NIYAM_SIGNING_KEY cannot be used: it is not an OpenSSH private key');
       const unlisted = keyed();
       unlisted.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 200, json: [{ key: 'ssh-ed25519 AAAAother' }] });
       await failed(unlisted, "GitHub does not list NIYAM_SIGNING_KEY's public half as one of ExampleBot's signing keys");
@@ -238,7 +250,6 @@ describe('sessionStart', () => {
       const http = down.http.bind(down);
       down.http = (url, options) => (url.includes('ssh_signing_keys') ? Promise.reject(new Error('proxy down')) : http(url, options));
       await failed(down, "GitHub could not be asked for ExampleBot's signing keys (proxy down)");
-      await failed(keyed(false), 'a probe commit signed with NIYAM_SIGNING_KEY did not verify as that key (git verify-commit: Could not verify signature.)');
       const unsigned = keyed();
       const fakeExec = unsigned.execOverride;
       unsigned.execOverride = (call) => (call.args[0] === 'commit-tree' ? { code: 128, stdout: '', stderr: 'error: ssh-keygen failed\nfatal: failed to write commit object' } : fakeExec(call));
@@ -260,7 +271,7 @@ describe('sessionStart', () => {
         if (path === `${KEY_FILE}.pub`) throw new Error('read-only');
         writePub(path, data, mode);
       };
-      await failed(noPub, `writing ${KEY_FILE}.pub failed (read-only)`);
+      await failed(noPub, `writing NIYAM_SIGNING_KEY to ${KEY_FILE} failed (read-only)`);
       const full = keyed();
       const append = full.append.bind(full);
       full.append = (path, text) => {
@@ -270,61 +281,45 @@ describe('sessionStart', () => {
       await failed(full, "writing ExampleBot's signing to CLAUDE_ENV_FILE failed (disk full)");
     });
 
-    describe("in a cloud image with no ssh-keygen, as Claude's hosted one (#425)", () => {
-      const ENOENT: ExecResult = { code: 127, stdout: '', stderr: 'Error: spawnSync ssh-keygen ENOENT' };
-      /** A keyed session whose image lacks ssh-keygen until apt-get installs openssh-client; `apt` answers each apt-get step. */
-      const bare = (apt: (args: readonly string[]) => ExecResult = () => ({ code: 0, stdout: '', stderr: 'W: some warning' })): FakeSys => {
-        const sys = keyed();
-        const keyedExec = sys.execOverride;
-        let present = false;
-        sys.execOverride = (call) => {
-          if (call.command === 'apt-get') {
-            const ran = apt(call.args);
-            if (ran.code === 0 && call.args[0] === 'install') present = true;
-            return ran;
-          }
-          return call.command === 'ssh-keygen' && !present ? ENOENT : keyedExec(call);
-        };
-        return sys;
-      };
-
-      it("installs openssh-client, then signs as the agent, and says so with the Setup script's line that saves it", async () => {
-        const sys = bare();
+    it("works on with the image's identity when the probe's signature is another key's, or missing, checked in Node", async () => {
+      const failed = async (sys: FakeSys, why: string): Promise<void> => {
         const { out, env } = await start(sys);
-        assert.deepEqual(out, [
-          "niyam: this cloud session works as ExampleBot on GitHub. Its commits are ExampleBot's, signed with NIYAM_SIGNING_KEY. It installed openssh-client for ssh-keygen, which the cloud image lacks; \"apt-get update && apt-get install -y openssh-client\" in the environment's Setup script saves that.",
-        ]);
-        assert.match(env ?? '', /^export GIT_AUTHOR_NAME='ExampleBot'$/m, 'signed as on an image that has it');
-        const apt = sys.calls.filter((call) => call.command === 'apt-get');
-        assert.deepEqual(apt.map((call) => call.args), [['update', '-q'], ['install', '-y', '-q', '--no-install-recommends', 'openssh-client']]);
-        for (const call of apt) {
-          assert.equal(call.env?.DEBIAN_FRONTEND, 'noninteractive', 'asks nothing');
-          assert.equal(call.env?.NIYAM_SIGNING_KEY, undefined, 'the key stays out of it');
-          assert.equal(call.timeoutMs, 90_000);
-        }
-        assert.equal(sys.calls.filter((call) => call.command === 'ssh-keygen').length, 2, 'read again once installed');
-      });
+        assert.deepEqual(out, [`niyam: this cloud session works as ExampleBot on GitHub.${KEEPS}a probe commit signed with NIYAM_SIGNING_KEY did not verify as that key (${why}).`]);
+        assert.equal(env, LIFTED, `${why}: nothing half set`);
+      };
+      await failed(keyed(false), 'its signature: another key made it');
+      const bare = keyed();
+      const bareExec = bare.execOverride;
+      bare.execOverride = (call) => (call.args[0] === 'cat-file' ? { code: 0, stdout: 'tree tree0\n\nprobe\n', stderr: '' } : bareExec(call));
+      await failed(bare, 'the probe commit has no signature');
+      const unread = keyed();
+      const unreadExec = unread.execOverride;
+      unread.execOverride = (call) => (call.args[0] === 'cat-file' ? { code: 128, stdout: '', stderr: 'fatal: bad object probe1' } : unreadExec(call));
+      await failed(unread, 'git cat-file: fatal: bad object probe1');
+    });
 
-      it('installs nothing when the image has ssh-keygen', async () => {
-        const sys = keyed();
-        await start(sys);
-        assert.ok(sys.calls.every((call) => call.command !== 'apt-get'));
-      });
+    it('names a key it cannot sign with, one with a passphrase, and works on with the image\'s identity', async () => {
+      const field = (text: string): Buffer => {
+        const length = Buffer.alloc(4);
+        length.writeUInt32BE(text.length);
+        return Buffer.concat([length, Buffer.from(text, 'latin1')]);
+      };
+      // An encrypted key's header, between the real key's own BEGIN and END lines.
+      const lines = PEM.trim().split('\n');
+      const header = Buffer.concat([Buffer.from('openssh-key-v1\0', 'latin1'), field('aes256-ctr'), field('bcrypt'), field('')]).toString('base64');
+      const locked = `${[lines[0], header, lines.at(-1)].join('\n')}\n`;
+      const { out, env } = await start(keyed(true, Buffer.from(locked).toString('base64')));
+      assert.deepEqual(out, [`niyam: this cloud session works as ExampleBot on GitHub.${KEEPS}NIYAM_SIGNING_KEY cannot be used: it has a passphrase, and niyam signs with a key that has none.`]);
+      assert.equal(env, LIFTED);
+    });
 
-      it("works on as the agent, its commits the image's, naming the missing ssh-keygen and its fix, when the install fails", async () => {
-        const failed = async (sys: FakeSys, why: string): Promise<void> => {
-          const { out, env } = await start(sys);
-          assert.deepEqual(out, [`niyam: this cloud session works as ExampleBot on GitHub.${KEEPS}${why}.`]);
-          assert.equal(env, LIFTED, `${why}: nothing half set`);
-          assert.equal(sys.files.get(RECORD), '{"agent":"ExampleBot"}\n');
-        };
-        const fix = `add "apt-get update && apt-get install -y openssh-client" to the cloud environment's Setup script`;
-        await failed(bare(() => ({ code: 127, stdout: '', stderr: 'Error: spawnSync apt-get ENOENT' })), "the cloud image has no ssh-keygen, and no apt-get to install openssh-client with; install OpenSSH's client tools in the cloud environment's Setup script");
-        const locked = bare((args) => (args[0] === 'update' ? { code: 100, stdout: '', stderr: 'E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)\nE: Unable to lock directory /var/lib/apt/lists/\n' } : { code: 0, stdout: '', stderr: '' }));
-        await failed(locked, `the cloud image has no ssh-keygen, and apt-get update failed installing openssh-client (E: Unable to lock directory /var/lib/apt/lists/); ${fix}`);
-        assert.equal(locked.calls.filter((call) => call.command === 'apt-get').length, 1, 'no install after a failed update');
-        await failed(bare((args) => ({ code: args[0] === 'install' ? 100 : 0, stdout: '', stderr: '' })), `the cloud image has no ssh-keygen, and apt-get install failed installing openssh-client (exit 100); ${fix}`);
-      });
+    it("signs on a cloud image with no ssh-keygen, as Claude's hosted one, installing nothing (#425)", async () => {
+      const sys = keyed();
+      const keyedExec = sys.execOverride;
+      sys.execOverride = (call) => (call.command === 'ssh-keygen' ? { code: 127, stdout: '', stderr: 'Error: spawnSync ssh-keygen ENOENT' } : keyedExec(call));
+      const { out } = await start(sys);
+      assert.deepEqual(out, ["niyam: this cloud session works as ExampleBot on GitHub. Its commits are ExampleBot's, signed with NIYAM_SIGNING_KEY."]);
+      assert.ok(sys.calls.every((call) => call.command !== 'ssh-keygen' && call.command !== 'apt-get'), 'nothing run to read, sign or install');
     });
 
     it('writes the pre-push git hook a fresh clone lacks, or replaces an older one', async () => {
