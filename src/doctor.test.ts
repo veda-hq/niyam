@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { NO_TOKEN, launcherPath, launcherScript, pathsFor, sessionScript } from './agent.ts';
+import { NO_TOKEN, launcherPath, launcherScript, noreplyEmail, pathsFor, sessionScript } from './agent.ts';
 import { FROM_SETUP, PROXY_TOKEN, cloudRepoScript } from './cloud.ts';
 import { doctor } from './doctor.ts';
 import { KEYCHAIN } from './token-store.ts';
@@ -498,11 +498,13 @@ describe('doctor in a Claude cloud session', () => {
    * A cloud session session-start gave the agent's identity, in a clone whose
    * workflow pins this CLI and whose cloud setup file installs it, set up by
    * the Setup snippet: no keychain, GitHub reached through the proxy as `login`.
+   * Its environment holds the agent's cloud signing key, which session-start
+   * used, so the agent authors and signs its commits.
    */
   function cloud(login: string | null = AGENT): FakeSys {
     const sys = new FakeSys();
     sys.platform = 'linux';
-    sys.env = { CLAUDE_CODE_REMOTE: 'true', GH_TOKEN: PROXY_TOKEN, NIYAM_AGENT: AGENT };
+    sys.env = { CLAUDE_CODE_REMOTE: 'true', GH_TOKEN: PROXY_TOKEN, NIYAM_AGENT: AGENT, GIT_AUTHOR_NAME: AGENT, GIT_AUTHOR_EMAIL: noreplyEmail(AGENT_ID, AGENT) };
     sys.files.set(WORKFLOW, workflow('main', v, false));
     sys.files.set(CLOUD_FILE, cloudRepoScript(v, 'ab'.repeat(32)));
     // The mark the install leaves, naming the file the Setup snippet ran.
@@ -526,6 +528,7 @@ describe('doctor in a Claude cloud session', () => {
         '◇  GitHub — as ExampleBot',
         "✓  the proxy acts as ExampleBot, an agent the repo's settings name",
         "✓  session-start gave this session ExampleBot's identity",
+        "✓  this session's commits are ExampleBot's, signed with NIYAM_SIGNING_KEY",
         '│',
         '└  All good',
       ],
@@ -533,6 +536,26 @@ describe('doctor in a Claude cloud session', () => {
     });
     assert.equal(sys.requests.at(-1)?.token, PROXY_TOKEN, 'asks through the proxy');
     assert.ok(!sys.calls.some((call) => call.command.endsWith('security')), 'no keychain');
+  });
+
+  it("warns, and still passes, when the session's commits are Claude's, naming cloud-key or the session's line", async () => {
+    const unkeyed = cloud();
+    delete unkeyed.env.GIT_AUTHOR_NAME;
+    delete unkeyed.env.GIT_AUTHOR_EMAIL;
+    const none = await check(unkeyed);
+    assert.equal(none.code, 0);
+    assert.deepEqual(marked(none.out, '▲'), [
+      "▲  this session's commits are Claude's: the cloud environment's variables have no NIYAM_SIGNING_KEY → niyam cloud-key ExampleBot on your Mac, then paste it into the environment's variables",
+    ]);
+    // session-start unsets the key's variable once it uses it: still set, it could not.
+    const unused = cloud();
+    unused.env = { ...unused.env, GIT_AUTHOR_NAME: 'Claude', GIT_AUTHOR_EMAIL: 'noreply@anthropic.com', NIYAM_SIGNING_KEY: 'a2V5' };
+    assert.deepEqual(marked((await check(unused)).out, '▲'), [
+      "▲  NIYAM_SIGNING_KEY is set, but session-start could not use it, so this session's commits are Claude's → a new session; its first niyam line says why",
+    ]);
+    const other = cloud();
+    other.env = { ...other.env, GIT_AUTHOR_EMAIL: noreplyEmail(7, 'OtherBot') };
+    assert.match(marked((await check(other)).out, '▲')[0] ?? '', /commits are Claude's/, "another account's address is not the agent's");
   });
 
   it('says to run onboard again when the cloud setup file and the pin disagree', async () => {

@@ -20,7 +20,8 @@ import {
   tokenInfo,
 } from './agent.ts';
 import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
-import { FROM_SETUP, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
+import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
+import { GITHUB_NOREPLY } from './host.ts';
 import { featuresIn } from './features.ts';
 import { typesDrift } from './issue-types.ts';
 import { type Finding, closing, findingLines, heading, painter, tilde } from './layout.ts';
@@ -368,13 +369,37 @@ async function cloudDoctor(sys: Sys, io: Output, named?: string): Promise<number
           fix: 'a new session; its first niyam line says why',
         },
   );
+  const agent = given ?? ('login' in asked ? asked.login : undefined);
+  if (agent !== undefined) github.push(cloudCommits(sys, agent));
 
-  const about = 'login' in asked ? asked.login : agents !== undefined ? either(agents) : 'this cloud session';
+  const about ='login' in asked ? asked.login : agents !== undefined ? either(agents) : 'this cloud session';
   return report(sys, io, about, [
     ['This cloud session', session],
     [`GitHub — as ${about}`, github],
     ['This repo', repoFindings(sys)],
   ]);
+}
+
+/**
+ * Whose a cloud session's commits are: the agent's when session-start gave it
+ * the agent's author and signing (the key in SIGNING_KEY_VAR), else Claude's,
+ * which PR identity passes, so a warning only, with what makes them the
+ * agent's.
+ */
+function cloudCommits(sys: Sys, agent: string): Finding {
+  const name = sys.env.GIT_AUTHOR_NAME;
+  const email = sys.env.GIT_AUTHOR_EMAIL?.toLowerCase() ?? '';
+  if (name !== undefined && sameLogin(name, agent) && /^\d+\+/.test(email) && email.endsWith(`+${agent.toLowerCase()}@${GITHUB_NOREPLY}`)) {
+    return { mark: '✓', text: `this session's commits are ${agent}'s, signed with ${SIGNING_KEY_VAR}` };
+  }
+  if (sys.env[SIGNING_KEY_VAR]) {
+    return { mark: '▲', text: `${SIGNING_KEY_VAR} is set, but session-start could not use it, so this session's commits are Claude's`, fix: 'a new session; its first niyam line says why' };
+  }
+  return {
+    mark: '▲',
+    text: `this session's commits are Claude's: the cloud environment's variables have no ${SIGNING_KEY_VAR}`,
+    fix: `niyam cloud-key ${agent} on your Mac, then paste it into the environment's variables`,
+  };
 }
 
 function message(error: unknown): string {

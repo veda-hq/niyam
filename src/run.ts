@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 
 import { LOCKED, asAgent, asAgentArgs } from './as-agent.ts';
 import { cloudSetup } from './cloud.ts';
+import { cloudKey, cloudKeyArgs } from './cloud-key.ts';
 import { needsOwner } from './asks.ts';
 import { decisionsWeekly } from './decisions.ts';
 import { prDesign } from './design.ts';
@@ -49,6 +50,9 @@ Commands:
                    label <owner/repo> <number> <add|remove> <approved|do-not-merge>;
                    required-checks <owner/repo> <ruleset id or name> [--check <name>]…
   cloud-setup      Print an optional Setup snippet that makes Claude cloud sessions start faster
+  cloud-key [agent] [--yes]
+                   In your own terminal: a new signing key for the agent's Claude cloud sessions, registered
+                   as the agent, and NIYAM_SIGNING_KEY=… on the clipboard for the cloud environment's variables
   env [-- <command> [args...]]
                    For agents run from any tool: the GitHub lock, then the agent identity where this Mac
                    has it, as shell lines for eval "$(niyam env)", or with -- the command run under them
@@ -147,17 +151,17 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
     io.err(USAGE);
     return 2;
   }
-  if (command === 'onboard' || command === 'machine' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number') {
+  if (command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number') {
     // Their options are checked here, so a bad one is bad usage (exit 2).
     try {
-      (command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
+      (command === 'cloud-key' ? cloudKeyArgs : command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
     } catch (error) {
       io.err(`niyam: ${error instanceof Error ? error.message : String(error)}`);
       io.err(USAGE);
@@ -227,6 +231,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
       }
     }
     case 'machine':
+    case 'cloud-key':
     case 'doctor':
     case 'onboard':
     case 'pr-identity':
@@ -280,6 +285,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         }
         if (command === 'onboard') return await onboard(await sys(), io, rest);
         if (command === 'machine') return await machine(await sys(), io, rest);
+        if (command === 'cloud-key') return await cloudKey(await sys(), io, rest);
         return await doctor(await sys(), io, rest[0]);
       } catch (error) {
         io.err(`niyam ${command}: ${error instanceof Error ? error.message : String(error)}`);
