@@ -422,7 +422,8 @@ export function sessionNames(script: string): { agent: string; id: number } | un
   return agent && id ? { agent, id: Number(id) } : undefined;
 }
 
-function quote(value: string): string {
+/** `value` as one shell word, in single quotes. */
+export function quote(value: string): string {
   return `'${value.replaceAll(`'`, `'\\''`)}'`;
 }
 
