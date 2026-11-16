@@ -41,7 +41,7 @@ import {
 } from './onboard-pull.ts';
 import { cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
 import { tagOnMain } from './release-tag.ts';
-import { setSecret } from './secrets.ts';
+import { secretNames, setSecret } from './secrets.ts';
 import { UPGRADE } from './upgrade.ts';
 import { isNewer, packageVersion } from './version.ts';
 import type { Output, Sys } from './types.ts';
@@ -506,12 +506,58 @@ function workflowHead(branch: string, version: string, comments: string[], sched
 const FIGMA_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}', '      FIGMA_LIBRARY: ${{ secrets.FIGMA_LIBRARY }}'];
 /** The secrets every job passed before P-23, whether figma was on or not. */
 const OLDER_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}'];
+/** The board GitHub App's secrets, which the Slice started job makes its board token from (P-70). */
+export const BOARD_SECRETS = ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'] as const;
+const BOARD_SECRET_LINES = BOARD_SECRETS.map((name) => `      ${name}: \${{ secrets.${name} }}`);
+/** What each board app secret holds. */
+const BOARD_SECRET_HOLDS: Record<(typeof BOARD_SECRETS)[number], string> = { NIYAM_BOARD_APP_ID: 'client id', NIYAM_BOARD_APP_KEY: 'private key' };
+
 /**
- * A job's `niyam-ref` line and the block of Figma secrets after it, as
- * either list writes it, or the line alone when no secrets follow: a block
- * with secrets of the client's own is left as it is.
+ * The owner's steps, once per organization, to give `slug`'s Slice started
+ * job the board app's token: make the app, install it, and set the secrets
+ * `missing`. `unknown` when GitHub would not list the secrets, so they may be
+ * set already.
  */
-const SECRETS_AFTER_REF = /^( {6}niyam-ref:[^\n]*\n)(?: {4}secrets:\n(?: {6}FIGMA_(?:TOKEN|LIBRARY): \$\{\{ secrets\.FIGMA_(?:TOKEN|LIBRARY) \}\}\n)+(?! {6})|(?! {4}secrets:))/gm;
+export function boardAppSteps(slug: string, missing: readonly (typeof BOARD_SECRETS)[number][], unknown = false): string {
+  const org = slug.split('/')[0] as string;
+  const set = missing.map((name) => `its ${BOARD_SECRET_HOLDS[name]} as ${name}`).join(' and ');
+  return (
+    `${unknown ? `Unless ${slug} has the Actions secrets ${BOARD_SECRETS.join(' and ')} already, once` : 'Once'} for ${org}: ` +
+    `make a GitHub App with organization Projects read and write and repository Issues read at ${GITHUB_WEB}/organizations/${org}/settings/apps/new, ` +
+    `install it on ${slug}, and set ${set}, Actions secrets of the organization or of ${GITHUB_WEB}/${slug}/settings/secrets/actions. ` +
+    'Until then a slice moves to In Progress on the board only from a desktop push.'
+  );
+}
+
+/** What the jobs pass the shared checks: the Figma secrets with figma on, and the board app's with board on. */
+export interface Passed {
+  figma: boolean;
+  board: boolean;
+}
+
+/**
+ * The secrets block job `id` passes the shared checks: the Figma secrets on
+ * every job, and the board app's on the pull request job alone, since only
+ * its Slice started job uses them.
+ */
+function secretsOf(id: string, { figma, board }: Passed): string[] {
+  const lines = [...(figma ? FIGMA_SECRETS.slice(1) : []), ...(board && id === CLI ? BOARD_SECRET_LINES : [])];
+  return lines.length > 0 ? ['    secrets:', ...lines] : [];
+}
+
+/** A secret onboard writes, by name, as a line of a job's block. */
+const OWN_SECRET = String.raw`(?:FIGMA_(?:TOKEN|LIBRARY)|NIYAM_BOARD_APP_(?:ID|KEY))`;
+/**
+ * A job's `niyam-ref` line and the block of onboard's secrets after it, as
+ * any release writes it, or the line alone when no secrets follow: a block
+ * with secrets of the client's own, or `secrets: inherit`, is left as it is.
+ */
+const SECRETS_AFTER_REF = new RegExp(String.raw`^( {6}niyam-ref:[^\n]*\n)(?: {4}secrets:\n(?: {6}${OWN_SECRET}: \$\{\{ secrets\.${OWN_SECRET} \}\}\n)+(?! {6})|(?! {4}secrets:))`, 'gm');
+
+/** The id of the job whose lines run through `offset` in workflow `text`: the last two-space key before it. */
+function jobAt(text: string, offset: number): string | undefined {
+  return [...text.slice(0, offset).matchAll(/^ {2}([\w-]+):[ \t]*$/gm)].at(-1)?.[1];
+}
 
 /**
  * The jobs of a workflow that call the shared checks without passing them
@@ -540,10 +586,11 @@ function callChecks(version: string, secrets: string[]): string[] {
  * to the default branch and weekly, at the niyam release `version`.
  * Pull request and push runs are read-only; the weekly job alone writes to
  * issues. Upgrading is changing that version, which each job names twice.
- * The Figma secrets are passed only when the figma feature is on; the
+ * The Figma secrets are passed only when the figma feature is on, and the
+ * board app's, by the pull request job alone, only when `board` is; the
  * weekly job runs on the settings' `schedule`.
  */
-export function workflow(branch: string, version: string, figma: boolean, schedule = DEFAULT_SCHEDULE, settings: string = SETTINGS_PATH): string {
+export function workflow(branch: string, version: string, figma: boolean, schedule = DEFAULT_SCHEDULE, settings: string = SETTINGS_PATH, board = false): string {
   const secrets = figma ? FIGMA_SECRETS : [];
   return [
     ...workflowHead(
@@ -562,7 +609,7 @@ export function workflow(branch: string, version: string, figma: boolean, schedu
     `  ${CLI}:`,
     jobName(CLI),
     READ_ONLY_IF,
-    ...callChecks(version, secrets),
+    ...callChecks(version, secretsOf(CLI, { figma, board })),
     '',
     '  # The weekly run alone writes to issues: it comments and opens undo issues.',
     `  ${CLI}-weekly:`,
@@ -617,14 +664,15 @@ function flowScalar(value: string, quote: string): string {
 export type WorkflowUpdate =
   | { kind: 'same' }
   | { kind: 'write' | 'replace'; text: string; from?: string }
-  | { kind: 'repin'; text: string; from?: string; branch?: string; schedule?: string; secrets?: true; merged?: true; asks?: true; authors?: true; types?: true };
+  | { kind: 'repin'; text: string; from?: string; branch?: string; schedule?: string; secrets?: true; board?: true; merged?: true; asks?: true; authors?: true; types?: true };
 
 /**
  * What onboard does with the client's workflow: write it, or, in a workflow
  * already split into a read-only `niyam` job and a `niyam-weekly` job, move
  * the version pins, the one branch pushes run on when the default branch has
  * changed, the one cron the weekly job runs on when the settings' schedule
- * has changed, and each job's Figma secrets to what the figma feature needs,
+ * has changed, and each job's Figma secrets to what the figma feature needs
+ * and the pull request job's board app secrets to what `board` needs,
  * leaving the rest as the client has it; any other workflow is replaced.
  */
 export function workflowUpdate(
@@ -634,14 +682,21 @@ export function workflowUpdate(
   figma: boolean,
   schedule = DEFAULT_SCHEDULE,
   settings: string = SETTINGS_PATH,
+  board = false,
 ): WorkflowUpdate {
-  if (before === undefined) return { kind: 'write', text: workflow(branch, version, figma, schedule, settings) };
-  return repinned(before, branch, version, figma, schedule, settings);
+  if (before === undefined) return { kind: 'write', text: workflow(branch, version, figma, schedule, settings, board) };
+  return repinned(before, branch, version, figma, schedule, settings, board);
+}
+
+/** The secrets of onboard's own a block of a job names, by what they are for. */
+function ownSecrets(block: string): { figma: string; board: string } {
+  const names = [...block.matchAll(/^ {6}([\w-]+):/gm)].map((match) => match[1] as string);
+  return { figma: names.filter((name) => name.startsWith('FIGMA_')).join(','), board: names.filter((name) => name.startsWith('NIYAM_BOARD_')).join(',') };
 }
 
 /** workflowUpdate on a workflow that is there. */
-function repinned(before: string, branch: string, version: string, figma: boolean, schedule: string, settings: string): WorkflowUpdate {
-  const wanted = workflow(branch, version, figma, schedule, settings);
+function repinned(before: string, branch: string, version: string, figma: boolean, schedule: string, settings: string, board: boolean): WorkflowUpdate {
+  const wanted = workflow(branch, version, figma, schedule, settings, board);
   if (before === wanted) return { kind: 'same' };
   const pins = workflowPins(before);
   const from = pins[0];
@@ -651,13 +706,13 @@ function repinned(before: string, branch: string, version: string, figma: boolea
   const merged = job(`${CLI}-merged`);
   const added = split && !merged && pins.length === 4 && from !== undefined ? addMergedJob(before, from, figma) : undefined;
   if (added !== undefined) {
-    const update = repinned(added, branch, version, figma, schedule, settings);
+    const update = repinned(added, branch, version, figma, schedule, settings, board);
     return { ...(update.kind === 'repin' ? update : { text: added }), kind: 'repin', merged: true };
   }
   const asks = job(`${CLI}-asks`);
   const withAsks = split && merged && !asks && pins.length === 6 && from !== undefined ? addAsksJob(before, from, figma) : undefined;
   if (withAsks !== undefined) {
-    const update = repinned(withAsks, branch, version, figma, schedule, settings);
+    const update = repinned(withAsks, branch, version, figma, schedule, settings, board);
     // The asks job it adds also types each new issue, so the plan says so.
     return { ...(update.kind === 'repin' ? update : { text: withAsks }), kind: 'repin', asks: true, types: true };
   }
@@ -687,11 +742,30 @@ function repinned(before: string, branch: string, version: string, figma: boolea
       .replace(SCHEDULE, (line: string, comment: string | undefined, head: string, quote: string, _old: string, tail: string) =>
         rescheduled ? `${comment === undefined ? '' : `${scheduleComment(schedule, settings)}\n`}${head}${quote || "'"}${schedule}${quote || "'"}${tail}` : line,
       );
-    const secrets = figma ? `${FIGMA_SECRETS.join('\n')}\n` : '';
-    const text = pinned.replace(SECRETS_AFTER_REF, (_, ref: string) => `${ref}${secrets}`);
+    // Each job's block as that job passes it; which part changed, Figma's or the board app's, is said apart.
+    const changed = { figma: false, board: false };
+    const text = pinned.replace(SECRETS_AFTER_REF, (block: string, ref: string, offset: number, whole: string) => {
+      const lines = secretsOf(jobAt(whole, offset) ?? '', { figma, board });
+      const now = `${ref}${lines.map((line) => `${line}\n`).join('')}`;
+      const had = ownSecrets(block);
+      const has = ownSecrets(now);
+      changed.figma ||= had.figma !== has.figma;
+      changed.board ||= had.board !== has.board;
+      return now;
+    });
     if (text === before) return { kind: 'same' };
     const stale = pins.find((pin) => pin !== version);
-    return { kind: 'repin', text, ...(stale ? { from: stale } : {}), ...(moved ? { branch } : {}), ...(rescheduled ? { schedule } : {}), ...(text !== pinned ? { secrets: true as const } : {}), ...(authors ? { authors: true as const } : {}), ...(types ? { types: true as const } : {}) };
+    return {
+      kind: 'repin',
+      text,
+      ...(stale ? { from: stale } : {}),
+      ...(moved ? { branch } : {}),
+      ...(rescheduled ? { schedule } : {}),
+      ...(changed.figma ? { secrets: true as const } : {}),
+      ...(changed.board ? { board: true as const } : {}),
+      ...(authors ? { authors: true as const } : {}),
+      ...(types ? { types: true as const } : {}),
+    };
   }
   return { kind: 'replace', text: wanted };
 }
@@ -1110,7 +1184,7 @@ interface Step {
 }
 
 /** What a workflow update changes, in a few words for the plan. */
-function workflowDetail(update: Exclude<WorkflowUpdate, { kind: 'same' }>, version: string, figma: boolean): string {
+function workflowDetail(update: Exclude<WorkflowUpdate, { kind: 'same' }>, version: string, { figma, board }: Passed): string {
   if (update.kind !== 'repin') return { write: 'new', replace: 'replaced' }[update.kind];
   return (
     [
@@ -1118,6 +1192,7 @@ function workflowDetail(update: Exclude<WorkflowUpdate, { kind: 'same' }>, versi
       ...(update.branch ? [`branch → ${update.branch}`] : []),
       ...(update.schedule ? [`schedule → ${update.schedule}`] : []),
       ...(update.secrets ? [figma ? 'Figma secrets' : 'no Figma secrets'] : []),
+      ...(update.board ? [board ? 'board app secrets' : 'no board app secrets'] : []),
       ...(update.merged ? ['merged job'] : []),
       ...(update.asks ? ['needs-owner job'] : []),
       ...(update.authors ? ['needs-owner job only for owners, members and collaborators'] : []),
@@ -1127,7 +1202,7 @@ function workflowDetail(update: Exclude<WorkflowUpdate, { kind: 'same' }>, versi
 }
 
 /** What a workflow update changes, in full for the pull request's description. */
-function workflowWhat(update: Exclude<WorkflowUpdate, { kind: 'same' }>, version: string, figma: boolean, schedulePath: string, file: string = WORKFLOW_PATH): string {
+function workflowWhat(update: Exclude<WorkflowUpdate, { kind: 'same' }>, version: string, { figma, board }: Passed, schedulePath: string, file: string = WORKFLOW_PATH): string {
   if (update.kind !== 'repin') {
     return {
       write: `write ${WORKFLOW_PATH}, which runs the shared niyam checks`,
@@ -1139,6 +1214,9 @@ function workflowWhat(update: Exclude<WorkflowUpdate, { kind: 'same' }>, version
     ...(update.branch ? [`run pushes on the default branch, ${update.branch}`] : []),
     ...(update.schedule ? [`run the weekly decisions job on the schedule ${schedulePath} sets, cron ${update.schedule} UTC`] : []),
     ...(update.secrets ? [figma ? 'pass the FIGMA_TOKEN and FIGMA_LIBRARY secrets' : 'stop passing Figma secrets, with figma off'] : []),
+    ...(update.board
+      ? [board ? `pass the pull request job's checks the board app's ${BOARD_SECRETS.join(' and ')} secrets, which move a slice to In Progress when its pull request opens` : 'stop passing the board app secrets, with board off']
+      : []),
     ...(update.merged ? ['add a job that closes the slice a merged pull request names, the one pull request run that writes to issues'] : []),
     ...(update.asks ? ["add a job that labels an issue needs-owner where the agent asks the owner, and takes it off at the owner's approved label, Decision: comment or (hourly) 👍"] : []),
     ...(update.authors ? ['start the needs-owner job only on a comment by the owner, a member or a collaborator'] : []),
@@ -1482,13 +1560,25 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
 
   // The shared checks run only for features that need them.
   const workflowFrom = workflowPins(fileAt(WORKFLOW_PATH) ?? '')[0];
+  const passed: Passed = { figma: on('figma'), board: on('board') };
   const workflowFor = (branch: string): void => {
-    const update = workflowUpdate(fileAt(WORKFLOW_PATH), branch, version, on('figma'), schedule);
-    if (update.kind !== 'same') change(WORKFLOW_PATH, update.text, workflowWhat(update, version, on('figma'), SETTINGS_PATH));
+    const update = workflowUpdate(fileAt(WORKFLOW_PATH), branch, version, passed.figma, schedule, SETTINGS_PATH, passed.board);
+    if (update.kind !== 'same') change(WORKFLOW_PATH, update.text, workflowWhat(update, version, passed, SETTINGS_PATH));
   };
+  // The Slice started job's board token comes from the board app's secrets, which only the owner can make (P-70).
+  // A personal repository's checks skip the work rules, so it needs none.
+  if (workflowNeeded && passed.board && (await byOrganisation())) {
+    const names = await secretNames(sys, slug, token);
+    const missing = BOARD_SECRETS.filter((name) => !names?.includes(name));
+    if (missing.length > 0) {
+      const steps = boardAppSteps(slug, missing, names === undefined);
+      byHand.push(steps);
+      later.push(steps);
+    }
+  }
   if (workflowNeeded) {
-    const update = planned === undefined ? undefined : workflowUpdate(fileAt(WORKFLOW_PATH), planned, version, on('figma'), schedule);
-    const detail = update === undefined ? (fileAt(WORKFLOW_PATH) === undefined ? 'new' : 'write or update') : update.kind === 'same' ? undefined : workflowDetail(update, version, on('figma'));
+    const update = planned === undefined ? undefined : workflowUpdate(fileAt(WORKFLOW_PATH), planned, version, passed.figma, schedule, SETTINGS_PATH, passed.board);
+    const detail = update === undefined ? (fileAt(WORKFLOW_PATH) === undefined ? 'new' : 'write or update') : update.kind === 'same' ? undefined : workflowDetail(update, version, passed);
     if (detail !== undefined) pull.push({ label: 'workflow', detail });
   }
 

@@ -20,14 +20,16 @@ import {
   tokenInfo,
 } from './agent.ts';
 import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
-import { FROM_SETUP, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
+import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
+import { GITHUB_NOREPLY } from './host.ts';
 import { featuresIn } from './features.ts';
 import { typesDrift } from './issue-types.ts';
 import { type Finding, closing, findingLines, heading, painter, tilde } from './layout.ts';
 import { exposure, exposureFindings, movedFindings, readDeclined, setAside } from './lockout.ts';
 import { CLOUD_SETUP_PATH, HOOKS_PATH, SARATHI_PATH } from './onboard-pull.ts';
 import { leftoverDir, leftoverToken } from './machine.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, missingAutoFixRules, sarathiRunner } from './onboard.ts';
+import { BOARD_SECRETS, GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, missingAutoFixRules, sarathiRunner } from './onboard.ts';
+import { secretNames } from './secrets.ts';
 import { isOrganisation } from './owner-login.ts';
 import { leftBehind } from './owner-step.ts';
 import { repoRoot } from './session-start.ts';
@@ -110,6 +112,7 @@ export async function doctor(sys: Sys, io: Output, named?: string): Promise<numb
       return registered ? { mark: '✓', text: 'signing key registered' } : { mark: '✗', text: 'signing key not registered', fix: MACHINE };
     }),
     ...(await typesFindings(sys, token)),
+    ...(await boardAppFindings(sys, token)),
   ];
 
   return report(sys, io, agent, [
@@ -159,32 +162,64 @@ function leftoverFindings(sys: Sys, store: TokenStore, agent: string): Finding[]
 }
 
 /**
+ * The repository doctor runs in and its settings, parsed, where they turn
+ * the board on and doctor has a token to ask GitHub with; else undefined.
+ */
+function boardRepo(sys: Sys, token: string | undefined): { slug: string; settings: unknown } | undefined {
+  try {
+    const found = repoAt(sys);
+    const path = `${found.root}/${SETTINGS_PATH}`;
+    if (!token || !sys.exists(path)) return undefined;
+    const settings = JSON.parse(sys.read(path)) as unknown;
+    return featuresIn(settings).includes('board') ? { slug: found.slug, settings } : undefined;
+  } catch {
+    // Outside a client's clone, or settings doctor cannot read: onboard says what is wrong with them.
+    return undefined;
+  }
+}
+
+/**
  * Whether the organisation's enabled issue types are the work model's, no
  * issue here holds another, and every open one here has one but the
  * Approvals issue: checked in a repository whose settings turn the board on,
  * in an organisation, since onboard keeps them so there.
  */
 async function typesFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
-  let slug: string;
-  let approvals: number | undefined;
-  try {
-    const found = repoAt(sys);
-    const path = `${found.root}/${SETTINGS_PATH}`;
-    if (!token || !sys.exists(path)) return [];
-    const settings = JSON.parse(sys.read(path)) as unknown;
-    if (!featuresIn(settings).includes('board')) return [];
-    slug = found.slug;
-    const named = (settings as { approvals?: unknown } | null)?.approvals;
-    approvals = typeof named === 'number' ? named : undefined;
-  } catch {
-    // Outside a client's clone, or settings doctor cannot read: onboard says what is wrong with them.
-    return [];
-  }
+  const here = boardRepo(sys, token);
+  if (!here || !token) return [];
+  const { slug, settings } = here;
+  const named = (settings as { approvals?: unknown } | null)?.approvals;
+  const approvals = typeof named === 'number' ? named : undefined;
   const org = slug.split('/')[0] as string;
   try {
     return (await isOrganisation(sys, org)) ? [await typesDrift(sys, token, org, slug, approvals)] : [];
   } catch (error) {
     return [{ mark: '✗', text: `issue types: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
+  }
+}
+
+/**
+ * Whether the repository has the board app's secrets, which the Slice started
+ * job moves a slice to In Progress with when its pull request opens (P-70):
+ * checked where the settings turn the board on, in an organisation. A missing
+ * one is worth fixing, never broken, since the desktop push still moves the
+ * board; secrets GitHub will not list say nothing.
+ */
+async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
+  const here = boardRepo(sys, token);
+  if (!here || !token) return [];
+  const { slug } = here;
+  try {
+    if (!(await isOrganisation(sys, slug.split('/')[0] as string))) return [];
+    const names = await secretNames(sys, slug, token);
+    if (names === undefined) return [];
+    const missing = BOARD_SECRETS.filter((name) => !names.includes(name));
+    return missing.length === 0
+      ? [{ mark: '✓', text: 'board app secrets' }]
+      : [{ mark: '▲', text: `no ${missing.join(' or ')} secret, so a slice moves to In Progress only from a desktop push`, fix: `${ONBOARD}, which says how to set up the board app` }];
+  } catch (error) {
+    // fail-open: a read that failed is the one ▲ here, as a missing secret breaks nothing.
+    return [{ mark: '▲', text: `board app secrets: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
   }
 }
 
@@ -368,13 +403,37 @@ async function cloudDoctor(sys: Sys, io: Output, named?: string): Promise<number
           fix: 'a new session; its first niyam line says why',
         },
   );
+  const agent = given ?? ('login' in asked ? asked.login : undefined);
+  if (agent !== undefined) github.push(cloudCommits(sys, agent));
 
-  const about = 'login' in asked ? asked.login : agents !== undefined ? either(agents) : 'this cloud session';
+  const about ='login' in asked ? asked.login : agents !== undefined ? either(agents) : 'this cloud session';
   return report(sys, io, about, [
     ['This cloud session', session],
     [`GitHub — as ${about}`, github],
     ['This repo', repoFindings(sys)],
   ]);
+}
+
+/**
+ * Whose a cloud session's commits are: the agent's when session-start gave it
+ * the agent's author and signing (the key in SIGNING_KEY_VAR), else Claude's,
+ * which PR identity passes, so a warning only, with what makes them the
+ * agent's.
+ */
+function cloudCommits(sys: Sys, agent: string): Finding {
+  const name = sys.env.GIT_AUTHOR_NAME;
+  const email = sys.env.GIT_AUTHOR_EMAIL?.toLowerCase() ?? '';
+  if (name !== undefined && sameLogin(name, agent) && /^\d+\+/.test(email) && email.endsWith(`+${agent.toLowerCase()}@${GITHUB_NOREPLY}`)) {
+    return { mark: '✓', text: `this session's commits are ${agent}'s, signed with ${SIGNING_KEY_VAR}` };
+  }
+  if (sys.env[SIGNING_KEY_VAR]) {
+    return { mark: '▲', text: `${SIGNING_KEY_VAR} is set, but session-start could not use it, so this session's commits are Claude's`, fix: 'a new session; its first niyam line says why' };
+  }
+  return {
+    mark: '▲',
+    text: `this session's commits are Claude's: the cloud environment's variables have no ${SIGNING_KEY_VAR}`,
+    fix: `niyam cloud-key ${agent} on your Mac, then paste it into the environment's variables`,
+  };
 }
 
 function message(error: unknown): string {

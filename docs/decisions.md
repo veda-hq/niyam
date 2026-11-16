@@ -2108,3 +2108,31 @@
     to a person; and the Project's own "Pull request linked to issue"
     workflow, which needs a closing keyword in each pull request and never
     moves the Work item's Step.
+- **2026-11-16 — Record: onboard passes the board app's secrets (P-71, Work
+  item #399, slice #397).** P-70's Slice started job gets its token only
+  from secrets the client workflow passes, and the owner does not edit that
+  workflow by hand.
+  - With `board` on, onboard writes `NIYAM_BOARD_APP_ID` and
+    `NIYAM_BOARD_APP_KEY` under the `niyam` job's secrets, after the Figma
+    ones. Only the `niyam` job runs on a pull request opening, so the weekly,
+    merged and asks jobs pass Figma's alone. An upgrade rewrites a block of
+    onboard's own secrets and leaves one with a secret of the client's own,
+    or `secrets: inherit`, as it is. The plan names a board change apart from
+    a Figma one.
+  - Every write of the two lines also moves the pins to onboard's own
+    release. A caller that passes a secret its pinned `checks.yml` does not
+    declare is refused by GitHub, and releases up to 0.6.22 declare neither.
+  - Onboard lists the names of the repository's secrets and of the
+    organization's secrets shared with it, never their values, as the agent.
+    For each board secret missing there, its by-hand list and its pull request
+    give the once-per-organization steps: make the app (organization Projects
+    read and write, repository Issues read), install it, and set its client id
+    and private key. Where GitHub will not list them, the steps say "unless set
+    already". A personal repository gets none, since its checks skip the work
+    rules.
+  - `niyam doctor` marks a missing one ▲ in an organization's repository with
+    board on, and a read that fails ▲ too. Neither changes the exit code: the
+    desktop push still moves the board.
+  - Rejected: onboard setting the secrets itself, since only the owner holds
+    the app's private key; and `secrets: inherit`, which would hand the
+    shared checks every secret of the repository.

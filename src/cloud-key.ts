@@ -1,0 +1,201 @@
+import { API, account, agentFrom, checkToken, keyBody, signingKeys, tokenInfo } from './agent.ts';
+import { SIGNING_KEY_VAR } from './cloud.ts';
+import { CLAUDE_CODE_WEB } from './onboard.ts';
+import { agentSession } from './push-identity.ts';
+import { tokenStore, unsupported } from './token-store.ts';
+import type { Output, Sys } from './types.ts';
+import { GITHUB_WEB } from './host.ts';
+
+/** The title the cloud signing keys have on GitHub, so the agent's can be told apart from a Mac's. */
+export const CLOUD_KEY_TITLE = 'niyam cloud signing';
+
+/** Where the agent's signing keys are deleted, signed in as the agent. */
+const KEYS_PAGE = `${GITHUB_WEB}/settings/keys`;
+
+/** cloud-key's arguments: the agent, then `--yes`. */
+export function cloudKeyArgs(args: readonly string[]): { named?: string; yes?: true } {
+  let named: string | undefined;
+  let yes = false;
+  for (const arg of args) {
+    if (arg === '--yes') yes = true;
+    else if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`);
+    else if (named === undefined) named = arg;
+    else throw new Error(`unexpected argument "${arg}"`);
+  }
+  return { ...(named === undefined ? {} : { named }), ...(yes ? { yes: true as const } : {}) };
+}
+
+/** A signing key GitHub lists for the agent, as its own list gives it. */
+interface Listed {
+  id: number;
+  title: string;
+  created: string;
+}
+
+/**
+ * Sets up the agent's cloud signing key from the owner's Mac (#405): a new
+ * ed25519 key, in a private temporary folder, registered as the agent's
+ * signing key with the token `machine` stored, titled CLOUD_KEY_TITLE; once
+ * GitHub lists it, `NIYAM_SIGNING_KEY=<the private key, base64>` goes on the
+ * clipboard, for the cloud environment's variables, and the folder is
+ * removed, a Ctrl-C included. The key is never printed. When the clipboard
+ * does not take it, the key just registered is deleted again, since no one
+ * holds it. It names the agent's other cloud signing keys, for the owner to
+ * delete one no environment uses; it deletes none itself. Refuses in an agent
+ * session or a cloud session, where the token is not the owner's to use, and
+ * asks once before it changes anything (`--yes` skips the question).
+ */
+export async function cloudKey(sys: Sys, io: Output, args: readonly string[] = []): Promise<number> {
+  const { named, yes } = cloudKeyArgs(args);
+  if (agentSession(sys) || sys.env.CLAUDE_CODE_REMOTE === 'true') {
+    io.err('cloud-key: run it in your own terminal on your Mac, not in an agent session; it registers a key as the agent');
+    return 1;
+  }
+  const store = tokenStore(sys);
+  if (!store) {
+    io.err(`cloud-key: ${unsupported(sys)}`);
+    return 1;
+  }
+  const { login: agent } = await account(sys, agentFrom(sys, named));
+  const token = store.read(sys, agent);
+  if (!token) {
+    io.err(`cloud-key: ${store.where} has no ${agent} token; run niyam machine ${agent} first`);
+    return 1;
+  }
+  const check = checkToken(token, await tokenInfo(sys, token), agent, sys.now());
+  if (check.problem !== undefined) {
+    io.err(`cloud-key: the stored ${agent} token cannot be used: ${check.problem}; run niyam machine ${agent}`);
+    return 1;
+  }
+  const before = await listedKeys(sys, agent, token);
+  if ('problem' in before) {
+    io.err(`cloud-key: ${before.problem}`);
+    return 1;
+  }
+  io.out(`cloud-key: a new signing key for ${agent}'s Claude cloud sessions, registered on GitHub as ${agent} ("${CLOUD_KEY_TITLE}"),`);
+  io.out(`  its private key put on the clipboard as ${SIGNING_KEY_VAR}=…, for a cloud environment's variables. Nothing is printed.`);
+  const others = before.keys.filter((one) => one.title === CLOUD_KEY_TITLE);
+  if (!yes) {
+    if (!sys.tty) {
+      io.err('cloud-key: no terminal to ask in; pass --yes to go ahead without asking');
+      return 1;
+    }
+    if (!(await sys.choose('Go ahead?'))) {
+      io.out('Nothing changed.');
+      return 1;
+    }
+  }
+
+  const dir = sys.tempDir();
+  let removed = false;
+  const cleanUp = (): boolean => {
+    if (!removed) {
+      try {
+        sys.remove(dir);
+      } catch {
+        // fail-open: said below, with the command that removes it.
+      }
+      removed = !sys.exists(dir);
+    }
+    return removed;
+  };
+  let interrupted = false;
+  const off = sys.onInterrupt(() => {
+    interrupted = true;
+    cleanUp();
+  });
+  let code = 1;
+  try {
+    code = await makeAndRegister(sys, io, agent, token, `${dir}/key`, others, () => interrupted);
+  } finally {
+    off();
+    if (cleanUp()) {
+      io.out('✓ deleted the key files');
+    } else {
+      io.out(`✗ could not delete ${dir}, which holds the private key → rm -rf ${dir}`);
+      code = 1;
+    }
+  }
+  return code;
+}
+
+/**
+ * Makes the key at `key`, registers it, and puts it on the clipboard; each
+ * step one line. The key is read before it is registered, so a Ctrl-C that
+ * removes the files leaves it to delete from GitHub again, which it is.
+ */
+async function makeAndRegister(sys: Sys, io: Output, agent: string, token: string, key: string, others: Listed[], interrupted: () => boolean): Promise<number> {
+  const made = sys.exec('ssh-keygen', ['-q', '-t', 'ed25519', '-C', `${agent} cloud signing`, '-N', '', '-f', key], { input: '' });
+  if (interrupted()) return stopped(io);
+  if (made.code !== 0) {
+    io.out(`✗ ssh-keygen failed: ${made.stderr.trim() || `exit ${made.code}`}`);
+    return 1;
+  }
+  const publicKey = sys.read(`${key}.pub`).trim();
+  const line = `${SIGNING_KEY_VAR}=${Buffer.from(`${sys.read(key).trim()}\n`).toString('base64')}`;
+  const posted = await sys.http(`${API}/user/ssh_signing_keys`, { method: 'POST', token, body: { title: CLOUD_KEY_TITLE, key: publicKey } });
+  const id = (posted.json as { id?: unknown } | null)?.id;
+  if (posted.status !== 201 || typeof id !== 'number') {
+    io.out(`✗ GitHub did not register the key as ${agent}'s signing key (HTTP ${posted.status}); nothing is on the clipboard`);
+    return 1;
+  }
+  let listed = false;
+  try {
+    listed = (await signingKeys(sys, agent, token)).includes(keyBody(publicKey));
+  } catch {
+    // fail-open: a list GitHub does not give counts as not listing it, and the key is deleted again.
+  }
+  if (interrupted()) {
+    await unregister(sys, io, token, id, 'stopped by Ctrl-C');
+    return 130;
+  }
+  if (!listed) {
+    await unregister(sys, io, token, id, 'GitHub does not list it');
+    return 1;
+  }
+  io.out(`✓ registered as ${agent}'s signing key "${CLOUD_KEY_TITLE}" (id ${id})`);
+  const copied = sys.exec('/usr/bin/pbcopy', [], { input: line });
+  if (copied.code !== 0) {
+    await unregister(sys, io, token, id, `the clipboard did not take the key (${copied.stderr.trim() || `exit ${copied.code}`})`);
+    return 1;
+  }
+  io.out(`✓ ${SIGNING_KEY_VAR}=… is on the clipboard`);
+  io.out(`  Paste it as one line into the cloud environment's variables: ${CLAUDE_CODE_WEB} → the environment's settings.`);
+  io.out(`  A new session there makes ${agent}'s commits its own; its first niyam line says so.`);
+  for (const other of others) {
+    io.out(`▲ ${agent} has another cloud signing key, added ${other.created.slice(0, 10)} (id ${other.id}); delete it once no environment uses it → ${KEYS_PAGE}, signed in as ${agent}`);
+  }
+  return 0;
+}
+
+function stopped(io: Output): number {
+  io.out('✗ stopped by Ctrl-C; nothing registered, and nothing on the clipboard');
+  return 130;
+}
+
+/** Deletes the key just registered, which no one holds, and says why. */
+async function unregister(sys: Sys, io: Output, token: string, id: number, why: string): Promise<void> {
+  let status = 0;
+  try {
+    ({ status } = await sys.http(`${API}/user/ssh_signing_keys/${id}`, { method: 'DELETE', token }));
+  } catch {
+    // fail-open: said below, with where to delete the key by hand.
+  }
+  io.out(
+    status === 204
+      ? `✗ ${why}, so the key was deleted from GitHub again; nothing is on the clipboard`
+      : `✗ ${why}, and deleting the key from GitHub again failed (HTTP ${status}) → delete signing key ${id} at ${KEYS_PAGE}`,
+  );
+}
+
+/** The agent's signing keys as its own list gives them, with their titles, or why they cannot be had. */
+async function listedKeys(sys: Sys, agent: string, token: string): Promise<{ keys: Listed[] } | { problem: string }> {
+  const { status, json } = await sys.http(`${API}/user/ssh_signing_keys?per_page=100`, { token });
+  if (status !== 200 || !Array.isArray(json)) return { problem: `GitHub answered HTTP ${status} when asked for ${agent}'s signing keys` };
+  return {
+    keys: json.flatMap((entry: unknown) => {
+      const { id, title, created_at: created } = (entry ?? {}) as { id?: unknown; title?: unknown; created_at?: unknown };
+      return typeof id === 'number' ? [{ id, title: typeof title === 'string' ? title : '', created: typeof created === 'string' ? created : '' }] : [];
+    }),
+  };
+}
