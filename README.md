@@ -610,9 +610,14 @@ workflow moves the slice. When a pull request from the repository opens or
 reopens, the shared workflow's Slice started job makes the same moves, under
 the same conditions, with a token from the board GitHub App. The client's
 workflow passes it the app's client id and private key as the
-`NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY` secrets. Without them, the job
-says so in one line and passes, as it does when the board refuses: the board
-never fails a pull request. When a pull request naming a slice merges into the default branch,
+`NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY` secrets. With `board` on,
+onboard writes them under the `niyam` job's secrets, the pull request job
+alone. Where the repository lacks either, its own or its organization's,
+onboard's by-hand list and its pull request say how to set up the app once
+per organization: organization Projects read and write and repository Issues
+read, installed on the repository. `niyam doctor` marks a missing one ▲.
+Without them, the job says so in one line and passes, as it does when the
+board refuses: the board never fails a pull request. When a pull request naming a slice merges into the default branch,
 the shared workflow comments on the slice, linking the pull request, and
 closes it, and the Project's Item closed workflow moves it to Done: a
 `Slice: #N` line is not one of GitHub's closing keywords, so GitHub does not

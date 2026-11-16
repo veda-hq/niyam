@@ -424,6 +424,47 @@ describe('doctor', () => {
     });
   });
 
+  describe('board app secrets (P-70)', () => {
+    const listed = (sys: FakeSys, own: string[], org: string[], status = 200): FakeSys => {
+      sys.route('GET', '/repos/example-org/example-app/actions/secrets?per_page=100&page=1', { status, json: { total_count: own.length, secrets: own.map((name) => ({ name })) } });
+      return sys.route('GET', '/repos/example-org/example-app/actions/organization-secrets?per_page=100&page=1', { status: 200, json: { total_count: org.length, secrets: org.map((name) => ({ name })) } });
+    };
+
+    it('says the secrets are there, counting the organisation’s', async () => {
+      const { code, out } = await check(listed(healthy(), ['NIYAM_BOARD_APP_KEY'], ['NIYAM_BOARD_APP_ID']));
+      assert.equal(code, 0);
+      assert.ok(marked(out, '✓').includes('✓  board app secrets'), out.join('\n'));
+    });
+
+    it('warns about a missing one, and still passes', async () => {
+      const { code, out } = await check(listed(healthy(), ['FIGMA_TOKEN'], ['NIYAM_BOARD_APP_ID']));
+      assert.equal(code, 0);
+      assert.deepEqual(marked(out, '▲'), [`▲  no NIYAM_BOARD_APP_KEY secret, so a slice moves to In Progress only from a desktop push → niyam onboard again, which says how to set up the board app`]);
+    });
+
+    it('says nothing where GitHub will not list them, for a personal repository, or with the board off', async () => {
+      const refused = listed(healthy(), [], [], 403);
+      const personal = listed(healthy(), [], []);
+      personal.ownerType = 'User';
+      const off = listed(healthy(), [], []);
+      off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
+      for (const sys of [refused, personal, off]) {
+        const { code, out } = await check(sys);
+        assert.equal(code, 0);
+        assert.ok(!out.some((line) => line.includes('board app')), out.join('\n'));
+      }
+    });
+
+    it('warns, never fails, when GitHub cannot be asked', async () => {
+      const sys = healthy();
+      const http = sys.http.bind(sys);
+      sys.http = (url, options) => (url.includes('/actions/') ? Promise.reject(new Error('rate limited')) : http(url, options));
+      const { code, out } = await check(sys);
+      assert.equal(code, 0);
+      assert.deepEqual(marked(out, '▲'), ['▲  board app secrets: cannot ask GitHub (rate limited) → niyam doctor again']);
+    });
+  });
+
   it('reports a thrown non-error from GitHub', async () => {
     const sys = healthy();
     sys.http = () => Promise.reject('down');

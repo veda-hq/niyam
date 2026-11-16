@@ -28,7 +28,8 @@ import { type Finding, closing, findingLines, heading, painter, tilde } from './
 import { exposure, exposureFindings, movedFindings, readDeclined, setAside } from './lockout.ts';
 import { CLOUD_SETUP_PATH, HOOKS_PATH, SARATHI_PATH } from './onboard-pull.ts';
 import { leftoverDir, leftoverToken } from './machine.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, missingAutoFixRules, sarathiRunner } from './onboard.ts';
+import { BOARD_SECRETS, GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, missingAutoFixRules, sarathiRunner } from './onboard.ts';
+import { secretNames } from './secrets.ts';
 import { isOrganisation } from './owner-login.ts';
 import { leftBehind } from './owner-step.ts';
 import { repoRoot } from './session-start.ts';
@@ -111,6 +112,7 @@ export async function doctor(sys: Sys, io: Output, named?: string): Promise<numb
       return registered ? { mark: '✓', text: 'signing key registered' } : { mark: '✗', text: 'signing key not registered', fix: MACHINE };
     }),
     ...(await typesFindings(sys, token)),
+    ...(await boardAppFindings(sys, token)),
   ];
 
   return report(sys, io, agent, [
@@ -160,32 +162,64 @@ function leftoverFindings(sys: Sys, store: TokenStore, agent: string): Finding[]
 }
 
 /**
+ * The repository doctor runs in and its settings, parsed, where they turn
+ * the board on and doctor has a token to ask GitHub with; else undefined.
+ */
+function boardRepo(sys: Sys, token: string | undefined): { slug: string; settings: unknown } | undefined {
+  try {
+    const found = repoAt(sys);
+    const path = `${found.root}/${SETTINGS_PATH}`;
+    if (!token || !sys.exists(path)) return undefined;
+    const settings = JSON.parse(sys.read(path)) as unknown;
+    return featuresIn(settings).includes('board') ? { slug: found.slug, settings } : undefined;
+  } catch {
+    // Outside a client's clone, or settings doctor cannot read: onboard says what is wrong with them.
+    return undefined;
+  }
+}
+
+/**
  * Whether the organisation's enabled issue types are the work model's, no
  * issue here holds another, and every open one here has one but the
  * Approvals issue: checked in a repository whose settings turn the board on,
  * in an organisation, since onboard keeps them so there.
  */
 async function typesFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
-  let slug: string;
-  let approvals: number | undefined;
-  try {
-    const found = repoAt(sys);
-    const path = `${found.root}/${SETTINGS_PATH}`;
-    if (!token || !sys.exists(path)) return [];
-    const settings = JSON.parse(sys.read(path)) as unknown;
-    if (!featuresIn(settings).includes('board')) return [];
-    slug = found.slug;
-    const named = (settings as { approvals?: unknown } | null)?.approvals;
-    approvals = typeof named === 'number' ? named : undefined;
-  } catch {
-    // Outside a client's clone, or settings doctor cannot read: onboard says what is wrong with them.
-    return [];
-  }
+  const here = boardRepo(sys, token);
+  if (!here || !token) return [];
+  const { slug, settings } = here;
+  const named = (settings as { approvals?: unknown } | null)?.approvals;
+  const approvals = typeof named === 'number' ? named : undefined;
   const org = slug.split('/')[0] as string;
   try {
     return (await isOrganisation(sys, org)) ? [await typesDrift(sys, token, org, slug, approvals)] : [];
   } catch (error) {
     return [{ mark: '✗', text: `issue types: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
+  }
+}
+
+/**
+ * Whether the repository has the board app's secrets, which the Slice started
+ * job moves a slice to In Progress with when its pull request opens (P-70):
+ * checked where the settings turn the board on, in an organisation. A missing
+ * one is worth fixing, never broken, since the desktop push still moves the
+ * board; secrets GitHub will not list say nothing.
+ */
+async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
+  const here = boardRepo(sys, token);
+  if (!here || !token) return [];
+  const { slug } = here;
+  try {
+    if (!(await isOrganisation(sys, slug.split('/')[0] as string))) return [];
+    const names = await secretNames(sys, slug, token);
+    if (names === undefined) return [];
+    const missing = BOARD_SECRETS.filter((name) => !names.includes(name));
+    return missing.length === 0
+      ? [{ mark: '✓', text: 'board app secrets' }]
+      : [{ mark: '▲', text: `no ${missing.join(' or ')} secret, so a slice moves to In Progress only from a desktop push`, fix: `${ONBOARD}, which says how to set up the board app` }];
+  } catch (error) {
+    // fail-open: a read that failed is the one ▲ here, as a missing secret breaks nothing.
+    return [{ mark: '▲', text: `board app secrets: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
   }
 }
 

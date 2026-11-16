@@ -2,6 +2,26 @@ import { API } from './agent.ts';
 import type { Sys } from './types.ts';
 
 /**
+ * The names of the Actions secrets `slug`'s workflows can read, its own and
+ * its organization's shared with it, as the account `token` sees them; never
+ * a value, which GitHub does not list. Undefined when GitHub will not list
+ * either, so a caller can tell "not set" from "cannot tell".
+ */
+export async function secretNames(sys: Sys, slug: string, token: string): Promise<string[] | undefined> {
+  const names: string[] = [];
+  for (const kind of ['secrets', 'organization-secrets']) {
+    for (let page = 1; ; page++) {
+      const listed = await sys.http(`${API}/repos/${slug}/actions/${kind}?per_page=100&page=${page}`, { token });
+      const secrets = (listed.json as { secrets?: unknown } | null)?.secrets;
+      if (listed.status !== 200 || !Array.isArray(secrets)) return undefined;
+      names.push(...secrets.flatMap((secret) => (typeof (secret as { name?: unknown } | null)?.name === 'string' ? [(secret as { name: string }).name] : [])));
+      if (secrets.length < 100) break;
+    }
+  }
+  return names;
+}
+
+/**
  * Sets the Actions secret `name` of `slug` to `value`, as the account `token`
  * is: GitHub takes a secret only sealed with the repository's Actions public
  * key, as a libsodium sealed box, so the value never reaches GitHub, or any
