@@ -39,7 +39,9 @@ import {
   openPull,
   remoteFile,
 } from './onboard-pull.ts';
-import { cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
+import { SIGNING_KEY_VAR, cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
+import { CLOUD_KEY_TITLE, cloudKeyRefusal, listedKeys, makeCloudKey, pasteLines } from './cloud-key.ts';
+import { detail } from './doc-numbers.ts';
 import { tagOnMain } from './release-tag.ts';
 import { secretNames, setSecret } from './secrets.ts';
 import { UPGRADE } from './upgrade.ts';
@@ -1246,7 +1248,9 @@ function planHead(paint: Paint, head: { from?: string | undefined; version: stri
  * agent. It prints that as one plan and asks once (`--yes` skips the
  * question, `--dry-run` stops at the plan); a no changes nothing. After the
  * yes, one browser sign-in as the owner serves every step that acts as the
- * owner, and each step shows as one line.
+ * owner, and each step shows as one line. Last, once the pull request is
+ * open, it makes the agent's cloud signing key when the agent has none
+ * (#417), a failure there only warning.
  */
 export async function onboard(sys: Sys, io: Output, args: readonly string[] = []): Promise<number> {
   const { named, features: chosen, add, yes, dryRun } = onboardArgs(args);
@@ -1684,6 +1688,24 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
       );
     }
   }
+  // The agent's cloud signing key (#417) is the agent's, not the repository's: one line serves every cloud
+  // environment it works in, so onboard makes one only when the agent's own list holds none, and the second repo
+  // onboarded leaves it alone. Where cloud-key would refuse, the owner runs it instead.
+  const keyByHand = `Once for ${agent}: in your own terminal on your Mac, run niyam cloud-key ${agent}, and paste the line it puts on the clipboard into each Claude cloud environment's variables.`;
+  const cloudKeys = await listedKeys(sys, agent, token).catch((error: unknown) => {
+    // fail-open: a list GitHub does not give is warned about below and makes no key.
+    return { problem: detail(error) };
+  });
+  let makeKey = false;
+  // A list GitHub does not give makes no key, which could be a second one: the warning says how to check.
+  if ('problem' in cloudKeys) warnings.push(`cloud signing key not checked (${cloudKeys.problem}); niyam cloud-key ${agent} makes one`);
+  else if (!cloudKeys.keys.some((one) => one.title === CLOUD_KEY_TITLE)) {
+    if (dryRun || cloudKeyRefusal(sys) !== undefined) byHand.push(keyByHand);
+    else {
+      cloud.push({ label: 'signing key', detail: `for ${agent}, on the clipboard` });
+      makeKey = true;
+    }
+  }
   let pullUrl: string | undefined;
   // Whether the pull request merges itself once its checks pass.
   let merging = false;
@@ -1772,11 +1794,32 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     }
     if (log.length > 0) notes.push(`- ${step.label}:`, ...log.map((line) => `  - ${line.trim().replace(/^[✓-] /, '')}`));
   }
+  // Last, once the pull request is open: a key that fails only warns, and nothing before it is undone.
+  // A Ctrl-C that stops the key ends the run as one does.
+  let exitCode = 0;
+  if (makeKey) {
+    let made = false;
+    try {
+      ({ ok: made } = await runStep(sys, io, paint, `cloud signing key for ${agent}`, async (out) => {
+        const code = await makeCloudKey(sys, out, agent, token);
+        if (code === 130) exitCode = 130;
+        return code === 0;
+      }));
+    } catch (error) {
+      // fail-open: the pull request is open and every step before stands; the key's failure is said and left by hand below.
+      io.err(`onboard: ${detail(error)}`);
+    }
+    if (made) byHand.unshift(`Now: ${SIGNING_KEY_VAR}=… is on the clipboard. ${pasteLines(agent, "each Claude cloud environment's").join(' ')}`);
+    else {
+      io.err(`onboard: ${agent} has no cloud signing key yet; everything before it is done`);
+      byHand.push(keyByHand);
+    }
+  }
   io.out(closing(paint, `${!pullUrl ? 'Done; no file changes, so no pull request.' : merging ? `${pullUrl}  ${queue !== undefined ? 'the merge queue merges it' : 'merges itself'} when checks pass` : `Merge ${pullUrl}`}`));
   io.out('');
   io.out('By hand:');
   for (const line of byHand) io.out(`  ${line}`);
-  return 0;
+  return exitCode;
 }
 
 /** How many times onboard asks GitHub about the test commit, waiting a little longer each time. */

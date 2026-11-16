@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { CLOUD_KEY_TITLE, cloudKey, cloudKeyArgs } from './cloud-key.ts';
+import { CLOUD_KEY_TITLE, cloudKey, cloudKeyArgs, cloudKeyRefusal, makeCloudKey } from './cloud-key.ts';
 import { AGENT, FakeSys, PRIVATE_KEY, PUBLIC_KEY, TOKEN, capture } from './fake.test.ts';
 import { run } from './run.ts';
 import type { ExecResult, HttpResult } from './types.ts';
@@ -179,6 +179,24 @@ describe('cloud-key', () => {
     const { code, out } = await key(stuck);
     assert.equal(code, 1);
     assert.equal(out.at(-1), '✗ could not delete /tmp/niyam-1, which holds the private key → rm -rf /tmp/niyam-1');
+  });
+
+  it("shares with onboard why it refuses, and its making of the key, which leaves the paste to onboard's own words (#417)", async () => {
+    for (const env of [{ NIYAM_AGENT: AGENT }, { CLAUDECODE: '1' }, { CLAUDE_CODE_REMOTE: 'true' }]) {
+      const sys = mac();
+      sys.env = { ...sys.env, ...env };
+      assert.equal(cloudKeyRefusal(sys), 'run it in your own terminal on your Mac, not in an agent session; it registers a key as the agent');
+    }
+    const linux = mac();
+    linux.platform = 'linux';
+    assert.match(cloudKeyRefusal(linux) ?? '', /macOS/);
+    assert.equal(cloudKeyRefusal(mac()), undefined);
+    const sys = mac();
+    const { io, out } = capture();
+    assert.equal(await makeCloudKey(sys, io, AGENT, TOKEN), 0);
+    assert.deepEqual(sys.clipboard, [LINE]);
+    assert.deepEqual(sys.chosen, [], 'asks nothing');
+    assert.deepEqual(out, [`✓ registered as ExampleBot's signing key "${CLOUD_KEY_TITLE}" (id 99)`, '✓ NIYAM_SIGNING_KEY=… is on the clipboard', '✓ deleted the key files']);
   });
 
   it('reads its arguments, and refuses others as bad usage', async () => {

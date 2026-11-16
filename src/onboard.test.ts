@@ -7,7 +7,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 
 import { BUILT_IN, Board, COPY_URL, OWNER_TOKEN, URL, repoJson, settledViews } from './fake-board.test.ts';
 import { FIELDS, ISSUE_TYPES, LABELS } from './board.ts';
-import { AGENT, AGENT_ID, FakeSys, HOME, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture } from './fake.test.ts';
+import { AGENT, AGENT_ID, FakeSys, HOME, PRIVATE_KEY, PUBLIC_KEY, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture } from './fake.test.ts';
 import { cloudRepoScript } from './cloud.ts';
 import { tarballName } from './names.ts';
 import { CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH } from './onboard-pull.ts';
@@ -2882,5 +2882,145 @@ describe('onboard never moves the pin backwards', () => {
     sys.route('GET', `${REPO}/contents/${WORKFLOW_PATH}?ref=main`, encoded(workflow('main', '0.0.1', false)));
     const { code } = await run(sys);
     assert.equal(code, 0);
+  });
+});
+
+describe("the agent's cloud signing key (#417)", () => {
+  const KEYS = '/user/ssh_signing_keys';
+  /** What onboard says to run where it makes no key itself. */
+  const KEY_BY_HAND = "Once for ExampleBot: in your own terminal on your Mac, run niyam cloud-key ExampleBot, and paste the line it puts on the clipboard into each Claude cloud environment's variables.";
+  const PASTE =
+    "Now: NIYAM_SIGNING_KEY=… is on the clipboard. Paste it as one line into each Claude cloud environment's variables: https://claude.ai/code → the environment's settings. A new session there makes ExampleBot's commits its own; its first niyam line says so.";
+
+  /** A fresh run for an agent whose signing keys are the Mac's alone; GitHub registers the new one as id 99, and the clipboard takes what it is given. */
+  function keyless(): FakeSys & { clipboard: string[] } {
+    const sys = Object.assign(fresh(), { clipboard: [] as string[] });
+    let added = false;
+    sys.route('GET', `${KEYS}?per_page=100`, { status: 200, json: [{ id: 1, title: 'niyam signing', key: 'ssh-ed25519 AAAAkey', created_at: '2026-10-01T00:00:00Z' }] });
+    sys.route('GET', KEYS, () => ({ status: 200, json: added ? [{ key: 'ssh-ed25519 AAAAmac' }, { key: PUBLIC_KEY }] : [{ key: 'ssh-ed25519 AAAAmac' }] }));
+    sys.route('POST', KEYS, () => {
+      added = true;
+      return { status: 201, json: { id: 99, title: 'niyam cloud signing', key: PUBLIC_KEY } };
+    });
+    sys.route('DELETE', `${KEYS}/99`, { status: 204, json: null });
+    sys.execOverride = ({ command, input }) => {
+      if (command !== '/usr/bin/pbcopy') return undefined;
+      sys.clipboard.push(input ?? '');
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    return sys;
+  }
+  // The machine key's own checks run ssh-keygen too; the cloud key's is the one with its comment.
+  const keygen = (sys: FakeSys): { args: readonly string[] } | undefined => sys.calls.find((call) => call.command === 'ssh-keygen' && call.args.includes('ExampleBot cloud signing'));
+  const keyMade = (sys: FakeSys): boolean => keygen(sys) !== undefined || sys.requests.some((request) => request.method === 'POST' && request.url.endsWith(KEYS));
+
+  it('plans one for an agent with none, and makes it last, after the pull request, with the one yes', async () => {
+    const sys = keyless();
+    const { code, out, err } = await run(sys);
+    assert.deepEqual(err, []);
+    assert.equal(code, 0);
+    assert.deepEqual(planned(out, 'Claude cloud'), ["claude.ai's GitHub: as ExampleBot", 'signing key: for ExampleBot, on the clipboard']);
+    assert.deepEqual(sys.chosen, ['Go ahead?'], 'one question');
+    assert.deepEqual(sys.spun.slice(-2), ['pull request', 'cloud signing key for ExampleBot']);
+    const urls = sys.requests.filter((request) => request.method === 'POST').map((request) => request.url);
+    assert.ok(urls.indexOf(`https://api.github.com${REPO}/pulls`) < urls.indexOf(`https://api.github.com${KEYS}`), 'the pull request opens first');
+    const posted = sys.requests.find((request) => request.method === 'POST' && request.url.endsWith(KEYS));
+    assert.deepEqual(posted?.body, { title: 'niyam cloud signing', key: PUBLIC_KEY });
+    assert.equal(posted?.token, TOKEN, "as the agent, with its stored token");
+    assert.deepEqual(sys.clipboard, [`NIYAM_SIGNING_KEY=${Buffer.from(`${PRIVATE_KEY}\n`).toString('base64')}`]);
+    assert.ok(!out.join('\n').includes(PRIVATE_KEY) && !out.join('\n').includes(Buffer.from(PRIVATE_KEY).toString('base64')), 'the key is never printed');
+    const folder = dirname(keygen(sys)?.args.at(-1) ?? '');
+    assert.ok(sys.removed.includes(folder) && ![...sys.files.keys()].some((path) => path.startsWith(`${folder}/`)), 'no key file left');
+    assert.ok(out.includes('◇  cloud signing key for ExampleBot'));
+    assert.equal(byHand(out)[0], PASTE, 'the paste comes first, while the clipboard holds it');
+    assert.ok(!byHand(out).includes(KEY_BY_HAND));
+  });
+
+  it('makes none, and says nothing about it, for an agent that has one, as on a second repo', async () => {
+    const sys = fresh();
+    sys.route('GET', `${KEYS}?per_page=100`, {
+      status: 200,
+      json: [
+        { id: 1, title: 'niyam signing', key: 'ssh-ed25519 AAAAkey', created_at: '2026-10-01T00:00:00Z' },
+        { id: 3, title: 'niyam cloud signing', key: 'ssh-ed25519 AAAAcloud', created_at: '2026-11-16T00:00:00Z' },
+      ],
+    });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(!keyMade(sys));
+    assert.ok(!out.some((line) => /signing key|cloud-key|NIYAM_SIGNING_KEY/.test(line)), out.join('\n'));
+    assert.ok(sys.requests.some((request) => request.url === `https://api.github.com${KEYS}?per_page=100` && request.token === TOKEN), "decided by the agent's own list");
+  });
+
+  it('plans none where cloud-key would refuse, naming it under By hand instead', async () => {
+    for (const env of [{ CLAUDECODE: '1' }, { CLAUDE_CODE_REMOTE: 'true' }]) {
+      const sys = keyless();
+      sys.env = { ...sys.env, ...env };
+      const { code, out } = await run(sys);
+      assert.equal(code, 0, JSON.stringify(env));
+      assert.deepEqual(planned(out, 'Claude cloud'), ["claude.ai's GitHub: as ExampleBot"]);
+      assert.ok(!keyMade(sys));
+      assert.equal(byHand(out).at(-1), KEY_BY_HAND);
+    }
+    const dry = keyless();
+    const { code, out } = await run(dry, ['example-owner', AGENT, '--dry-run']);
+    assert.equal(code, 0);
+    assert.deepEqual(planned(out, 'Claude cloud'), ["claude.ai's GitHub: as ExampleBot"]);
+    assert.ok(!keyMade(dry));
+    assert.ok(changedNothing(dry));
+  });
+
+  it('refuses a Mac with no token store before any plan, as before, where cloud-key would refuse too', async () => {
+    const sys = keyless();
+    sys.platform = 'linux';
+    const { code, err } = await run(sys);
+    assert.equal(code, 1);
+    assert.match(err[0] ?? '', /^onboard: this Mac is not set up for ExampleBot \(no token stored for ExampleBot\)/);
+    assert.ok(!keyMade(sys));
+  });
+
+  it('only warns when the key fails, leaving the pull request and everything before it in place', async () => {
+    const full = keyless();
+    full.execOverride = ({ command }) => (command === '/usr/bin/pbcopy' ? { code: 1, stdout: '', stderr: 'pbcopy: no pasteboard' } : undefined);
+    const { code, out, err } = await run(full);
+    assert.equal(code, 0);
+    assert.ok(opened(full), 'the pull request is open');
+    assert.ok(out.includes('■  cloud signing key for ExampleBot'), out.join('\n'));
+    assert.ok(out.includes('│  ✗ the clipboard did not take the key (pbcopy: no pasteboard), so the key was deleted from GitHub again; nothing is on the clipboard'));
+    assert.ok(full.requests.some((request) => request.method === 'DELETE' && request.url.endsWith(`${KEYS}/99`)));
+    assert.deepEqual(err, ['onboard: ExampleBot has no cloud signing key yet; everything before it is done']);
+    assert.ok(out.includes(`└  ${PULL_URL}  merges itself when checks pass`));
+    assert.equal(byHand(out).at(-1), KEY_BY_HAND);
+    assert.ok(!byHand(out).includes(PASTE));
+    // A step that throws is the same failure.
+    const offline = keyless();
+    const http = offline.http.bind(offline);
+    offline.http = (url, options): Promise<HttpResult> => (options?.method === 'POST' && url.endsWith(KEYS) ? Promise.reject(new Error('fetch failed')) : http(url, options));
+    const thrown = await run(offline);
+    assert.equal(thrown.code, 0);
+    assert.ok(opened(offline));
+    assert.deepEqual(thrown.err, ['onboard: fetch failed', 'onboard: ExampleBot has no cloud signing key yet; everything before it is done']);
+    assert.equal(byHand(thrown.out).at(-1), KEY_BY_HAND);
+    // A Ctrl-C there deletes the key again and ends the run as a Ctrl-C does, the pull request still open.
+    const stopped = keyless();
+    const fetch = stopped.http.bind(stopped);
+    stopped.http = (url, options): Promise<HttpResult> => {
+      if (options?.method === 'POST' && url.endsWith(KEYS)) stopped.interrupt();
+      return fetch(url, options);
+    };
+    const halted = await run(stopped);
+    assert.equal(halted.code, 130);
+    assert.ok(opened(stopped));
+    assert.ok(stopped.requests.some((request) => request.method === 'DELETE' && request.url.endsWith(`${KEYS}/99`)));
+    assert.equal(byHand(halted.out).at(-1), KEY_BY_HAND);
+  });
+
+  it('warns in the plan and makes none when GitHub does not list the keys, which could leave a second one', async () => {
+    const sys = keyless();
+    sys.route('GET', `${KEYS}?per_page=100`, { status: 403, json: null });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(out.includes("│  ! cloud signing key not checked (GitHub answered HTTP 403 when asked for ExampleBot's signing keys); niyam cloud-key ExampleBot makes one"), out.join('\n'));
+    assert.ok(!keyMade(sys));
   });
 });

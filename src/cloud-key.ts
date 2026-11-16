@@ -26,7 +26,7 @@ export function cloudKeyArgs(args: readonly string[]): { named?: string; yes?: t
 }
 
 /** A signing key GitHub lists for the agent, as its own list gives it. */
-interface Listed {
+export interface Listed {
   id: number;
   title: string;
   created: string;
@@ -47,13 +47,10 @@ interface Listed {
  */
 export async function cloudKey(sys: Sys, io: Output, args: readonly string[] = []): Promise<number> {
   const { named, yes } = cloudKeyArgs(args);
-  if (agentSession(sys) || sys.env.CLAUDE_CODE_REMOTE === 'true') {
-    io.err('cloud-key: run it in your own terminal on your Mac, not in an agent session; it registers a key as the agent');
-    return 1;
-  }
+  const refusal = cloudKeyRefusal(sys);
   const store = tokenStore(sys);
-  if (!store) {
-    io.err(`cloud-key: ${unsupported(sys)}`);
+  if (refusal !== undefined || !store) {
+    io.err(`cloud-key: ${refusal ?? unsupported(sys)}`);
     return 1;
   }
   const { login: agent } = await account(sys, agentFrom(sys, named));
@@ -85,7 +82,36 @@ export async function cloudKey(sys: Sys, io: Output, args: readonly string[] = [
       return 1;
     }
   }
+  return makeCloudKey(sys, io, agent, token, { others, paste: true });
+}
 
+/**
+ * Why cloud-key cannot run here, or undefined: in an agent session or a cloud
+ * session the token is not the owner's to use, and a machine with no token
+ * store holds no token to register the key with.
+ */
+export function cloudKeyRefusal(sys: Sys): string | undefined {
+  if (agentSession(sys) || sys.env.CLAUDE_CODE_REMOTE === 'true') return 'run it in your own terminal on your Mac, not in an agent session; it registers a key as the agent';
+  return tokenStore(sys) ? undefined : unsupported(sys);
+}
+
+/** What the owner does with the line on the clipboard: paste it into `where`'s variables, and what it does then. */
+export function pasteLines(agent: string, where = "the cloud environment's"): string[] {
+  return [
+    `Paste it as one line into ${where} variables: ${CLAUDE_CODE_WEB} → the environment's settings.`,
+    `A new session there makes ${agent}'s commits its own; its first niyam line says so.`,
+  ];
+}
+
+/**
+ * Makes the agent's cloud signing key in a private temporary folder,
+ * registers it, puts its line on the clipboard, and removes the folder, a
+ * Ctrl-C included; each step one line, the key never printed. `others` are
+ * the agent's cloud signing keys GitHub already lists, named for the owner
+ * to delete once unused; `paste` says what to do with the line, for a caller
+ * that does not say it itself. 0 once the line is on the clipboard.
+ */
+export async function makeCloudKey(sys: Sys, io: Output, agent: string, token: string, { others = [], paste = false }: { others?: readonly Listed[]; paste?: boolean } = {}): Promise<number> {
   const dir = sys.tempDir();
   let removed = false;
   const cleanUp = (): boolean => {
@@ -106,7 +132,7 @@ export async function cloudKey(sys: Sys, io: Output, args: readonly string[] = [
   });
   let code = 1;
   try {
-    code = await makeAndRegister(sys, io, agent, token, `${dir}/key`, others, () => interrupted);
+    code = await makeAndRegister(sys, io, { agent, token, key: `${dir}/key`, others, paste }, () => interrupted);
   } finally {
     off();
     if (cleanUp()) {
@@ -124,7 +150,12 @@ export async function cloudKey(sys: Sys, io: Output, args: readonly string[] = [
  * step one line. The key is read before it is registered, so a Ctrl-C that
  * removes the files leaves it to delete from GitHub again, which it is.
  */
-async function makeAndRegister(sys: Sys, io: Output, agent: string, token: string, key: string, others: Listed[], interrupted: () => boolean): Promise<number> {
+async function makeAndRegister(
+  sys: Sys,
+  io: Output,
+  { agent, token, key, others, paste }: { agent: string; token: string; key: string; others: readonly Listed[]; paste: boolean },
+  interrupted: () => boolean,
+): Promise<number> {
   const made = sys.exec('ssh-keygen', ['-q', '-t', 'ed25519', '-C', `${agent} cloud signing`, '-N', '', '-f', key], { input: '' });
   if (interrupted()) return stopped(io);
   if (made.code !== 0) {
@@ -160,8 +191,7 @@ async function makeAndRegister(sys: Sys, io: Output, agent: string, token: strin
     return 1;
   }
   io.out(`✓ ${SIGNING_KEY_VAR}=… is on the clipboard`);
-  io.out(`  Paste it as one line into the cloud environment's variables: ${CLAUDE_CODE_WEB} → the environment's settings.`);
-  io.out(`  A new session there makes ${agent}'s commits its own; its first niyam line says so.`);
+  if (paste) for (const line of pasteLines(agent)) io.out(`  ${line}`);
   for (const other of others) {
     io.out(`▲ ${agent} has another cloud signing key, added ${other.created.slice(0, 10)} (id ${other.id}); delete it once no environment uses it → ${KEYS_PAGE}, signed in as ${agent}`);
   }
@@ -189,7 +219,7 @@ async function unregister(sys: Sys, io: Output, token: string, id: number, why: 
 }
 
 /** The agent's signing keys as its own list gives them, with their titles, or why they cannot be had. */
-async function listedKeys(sys: Sys, agent: string, token: string): Promise<{ keys: Listed[] } | { problem: string }> {
+export async function listedKeys(sys: Sys, agent: string, token: string): Promise<{ keys: Listed[] } | { problem: string }> {
   const { status, json } = await sys.http(`${API}/user/ssh_signing_keys?per_page=100`, { token });
   if (status !== 200 || !Array.isArray(json)) return { problem: `GitHub answered HTTP ${status} when asked for ${agent}'s signing keys` };
   return {
