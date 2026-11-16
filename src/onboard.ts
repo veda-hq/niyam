@@ -21,6 +21,8 @@ import {
   tokenInfo,
 } from './agent.ts';
 import { setUpBoard } from './board.ts';
+import { BOARD_SECRETS, boardAppSteps, setUpBoardApp } from './board-app.ts';
+import { agentSession } from './push-identity.ts';
 import { type TypesPlan, typesDetail, typesLines, typesPlan } from './issue-types.ts';
 import { type OwnerToken, asOwner, isOrganisation, ownerScopes, signInOnce } from './owner-login.ts';
 import { appendToArray, removeElements, replaceValues, setMember } from './jsonedit.ts';
@@ -48,7 +50,7 @@ import { UPGRADE } from './upgrade.ts';
 import { isNewer, packageVersion } from './version.ts';
 import type { Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
-import { type Item, type Paint, closing, heading, painter, planLines, runStep } from './layout.ts';
+import { type Item, type Paint, byHandLines, closing, heading, painter, planLines, runStep } from './layout.ts';
 
 /** Where claude.ai connects the GitHub account its cloud sessions and routines work as. */
 export const CLAUDE_CODE_WEB = 'https://claude.ai/code';
@@ -509,27 +511,8 @@ const FIGMA_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOK
 /** The secrets every job passed before P-23, whether figma was on or not. */
 const OLDER_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}'];
 /** The board GitHub App's secrets, which the Slice started job makes its board token from (P-70). */
-export const BOARD_SECRETS = ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'] as const;
 const BOARD_SECRET_LINES = BOARD_SECRETS.map((name) => `      ${name}: \${{ secrets.${name} }}`);
-/** What each board app secret holds. */
-const BOARD_SECRET_HOLDS: Record<(typeof BOARD_SECRETS)[number], string> = { NIYAM_BOARD_APP_ID: 'client id', NIYAM_BOARD_APP_KEY: 'private key' };
-
-/**
- * The owner's steps, once per organization, to give `slug`'s Slice started
- * job the board app's token: make the app, install it, and set the secrets
- * `missing`. `unknown` when GitHub would not list the secrets, so they may be
- * set already.
- */
-export function boardAppSteps(slug: string, missing: readonly (typeof BOARD_SECRETS)[number][], unknown = false): string {
-  const org = slug.split('/')[0] as string;
-  const set = missing.map((name) => `its ${BOARD_SECRET_HOLDS[name]} as ${name}`).join(' and ');
-  return (
-    `${unknown ? `Unless ${slug} has the Actions secrets ${BOARD_SECRETS.join(' and ')} already, once` : 'Once'} for ${org}: ` +
-    `make a GitHub App with organization Projects read and write and repository Issues read at ${GITHUB_WEB}/organizations/${org}/settings/apps/new, ` +
-    `install it on ${slug}, and set ${set}, Actions secrets of the organization or of ${GITHUB_WEB}/${slug}/settings/secrets/actions. ` +
-    'Until then a slice moves to In Progress on the board only from a desktop push.'
-  );
-}
+export { BOARD_SECRETS, boardAppSteps };
 
 /** What the jobs pass the shared checks: the Figma secrets with figma on, and the board app's with board on. */
 export interface Passed {
@@ -1574,7 +1557,24 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   if (workflowNeeded && passed.board && (await byOrganisation())) {
     const names = await secretNames(sys, slug, token);
     const missing = BOARD_SECRETS.filter((name) => !names?.includes(name));
-    if (missing.length > 0) {
+    // The app is made from a manifest in the owner's browser (P-72): a run with no one at the terminal, or an agent's
+    // or a cloud session, leaves it by hand.
+    const browser = sys.tty && !agentSession(sys) && sys.env.CLAUDE_CODE_REMOTE !== 'true';
+    if (missing.length > 0 && browser) {
+      // An organisation's app already made is shared with the repository with no click.
+      github.push({ label: 'board app', detail: 'two clicks in the browser, if it is new' });
+      steps.push({
+        label: 'board app',
+        owner: true,
+        async run(out, mine) {
+          const left = await setUpBoardApp(sys, out, slug, mine as string);
+          byHand.push(...left);
+          later.push(...left);
+          // fail-open: what GitHub refused, or a click that did not come, is left by hand; the run goes on.
+          return true;
+        },
+      });
+    } else if (missing.length > 0) {
       const steps = boardAppSteps(slug, missing, names === undefined);
       byHand.push(steps);
       later.push(steps);
@@ -1815,10 +1815,8 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
       byHand.push(keyByHand);
     }
   }
+  for (const line of byHandLines(paint, byHand)) io.out(line);
   io.out(closing(paint, `${!pullUrl ? 'Done; no file changes, so no pull request.' : merging ? `${pullUrl}  ${queue !== undefined ? 'the merge queue merges it' : 'merges itself'} when checks pass` : `Merge ${pullUrl}`}`));
-  io.out('');
-  io.out('By hand:');
-  for (const line of byHand) io.out(`  ${line}`);
   return exitCode;
 }
 

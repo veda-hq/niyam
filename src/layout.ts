@@ -79,6 +79,42 @@ export function findingLines(paint: Paint, title: string, findings: Finding[]): 
   return [paint.dim('│'), `${paint.done('◇')}  ${title}`, ...findings.map((finding) => findingLine(paint, finding))];
 }
 
+/** How wide a by-hand step's lines are, bar and number included: the narrowest terminal people keep. */
+export const BY_HAND_WIDTH = 80;
+
+/** `text` in lines of at most `width`, broken at spaces; a word longer than that, such as a link, has a line of its own. */
+export function wrap(text: string, width: number): string[] {
+  const lines: string[] = [];
+  let line = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (line && line.length + 1 + word.length > width) {
+      lines.push(line);
+      line = word;
+    } else line = line ? `${line} ${word}` : word;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/**
+ * The ◇ By hand group, after a bar: each step numbered, wrapped behind the
+ * bar to BY_HAND_WIDTH, a bar between steps; nothing when there are none.
+ */
+export function byHandLines(paint: Paint, steps: readonly string[]): string[] {
+  if (steps.length === 0) return [];
+  const bar = paint.dim('│');
+  const lines = [bar, `${paint.warn('◇')}  By hand`];
+  steps.forEach((step, index) => {
+    const number = `${index + 1}.`;
+    const indent = '    '.length + number.length + 1;
+    const [first = '', ...rest] = wrap(step, BY_HAND_WIDTH - 1 - indent);
+    if (index > 0) lines.push(bar);
+    lines.push(`${bar}    ${paint.accent(number)} ${first}`, ...rest.map((line) => `${bar}${' '.repeat(indent)}${line}`));
+  });
+  lines.push(bar);
+  return lines;
+}
+
 /** The run's last line. */
 export function closing(paint: Paint, text: string): string {
   return `${paint.dim('└')}  ${text}`;

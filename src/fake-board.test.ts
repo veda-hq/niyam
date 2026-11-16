@@ -465,9 +465,13 @@ export class Board {
   }
 }
 
+/** The repository's id, as GitHub numbers it. */
+export const REPO_ID = 4201;
+
 /** The repository as GitHub describes it to someone who can push. */
 export function repoJson(organisation = true, branch = 'main'): Record<string, unknown> {
   return {
+    id: REPO_ID,
     node_id: 'R_1',
     name: 'example-app',
     default_branch: branch,

@@ -90,6 +90,26 @@ describe('realSys', () => {
     assert.equal(statSync(named).mode & 0o777, 0o700);
   });
 
+  it('serves GETs on 127.0.0.1 alone as the handler answers, until closed', async () => {
+    const seen: unknown[] = [];
+    const served = await sys.serve((request) => {
+      seen.push(request);
+      if (request.path === '/broken') return Promise.reject(new Error('broken'));
+      return Promise.resolve({ status: 302, headers: { location: 'https://example.com/next' }, body: 'moved' });
+    });
+    const base = `http://127.0.0.1:${served.port}`;
+    try {
+      const moved = await fetch(`${base}/made?code=c1&state=s1`, { redirect: 'manual' });
+      assert.deepEqual([moved.status, moved.headers.get('location'), moved.headers.get('cache-control'), await moved.text()], [302, 'https://example.com/next', 'no-store', 'moved']);
+      assert.deepEqual(seen, [{ path: '/made', query: { code: 'c1', state: 's1' } }]);
+      assert.equal((await fetch(`${base}/made`, { method: 'POST' })).status, 405, 'a GET alone');
+      assert.equal((await fetch(`${base}/broken`)).status, 500, 'a handler that fails answers 500');
+    } finally {
+      served.close();
+    }
+    await assert.rejects(fetch(`${base}/made`), 'nothing serves there once closed');
+  });
+
   it('calls a Ctrl-C handler instead of ending, until it is taken off', () => {
     const seen: string[] = [];
     const before = process.listenerCount('SIGINT');

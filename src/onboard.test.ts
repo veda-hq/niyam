@@ -128,10 +128,18 @@ function planned(out: string[], title: string): string[] {
   return items;
 }
 
-/** What the run left to do by hand, as it printed it last. */
+/** What the run left to do by hand, as it printed it last: each numbered step, its wrapped lines joined again. */
 function byHand(out: string[]): string[] {
-  const start = out.lastIndexOf('By hand:');
-  return start === -1 ? [] : out.slice(start + 1).map((line) => line.trim());
+  const start = out.lastIndexOf('◇  By hand');
+  if (start === -1) return [];
+  const steps: string[] = [];
+  for (const line of out.slice(start + 1)) {
+    if (!line.startsWith('│')) break;
+    const numbered = /^│ {4}\d+\. (.*)$/.exec(line)?.[1];
+    if (numbered !== undefined) steps.push(numbered);
+    else if (line.trim() !== '│') steps[steps.length - 1] += ` ${line.slice(1).trim()}`;
+  }
+  return steps;
 }
 
 /** The title and description of the pull request onboard opened, if it opened one. */
@@ -171,6 +179,8 @@ describe('onboard', () => {
       '│    auto-merge      when checks pass',
       '│',
       '◇  GitHub — one sign-in as example-owner',
+      // GitHub lists the agent no secrets here; the organisation has its board app, which onboard shares with no click.
+      '│    board app    two clicks in the browser, if it is new',
       '│    board        set up or check',
       '│    issue types  org-wide: add 5',
       '│      add        Work item, Slice, State, Decision, Brief',
@@ -188,24 +198,36 @@ describe('onboard', () => {
       '│  one-time code 1881-F156 (copied)',
       '│  approve it at https://github.com/login/device',
       '◇  Signed in as example-owner',
+      '◇  board app',
       '◇  board',
       '◇  pre-push hook',
       '◇  test commit Verified as ExampleBot',
       '◇  pull request',
-      `└  ${PULL_URL}  merges itself when checks pass`,
-      '',
-      'By hand:',
+      '│',
+      '◇  By hand',
       // A copy of the template has no Auto-add to project, which names a repository.
-      `  Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.`,
-      // GitHub lists no secrets here, so onboard cannot tell whether the board app's are set.
-      `  ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}`,
-      `  Once for example-org/example-app: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ExampleBot and the prompt below the line in https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
-      '  Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.',
+      '│    1. Once for the board: at',
+      `│       ${COPY_URL}/workflows, add the`,
+      '│       workflow Auto-add to project, for the repository example-org/example-app',
+      "│       with the filter is:issue is:open, which GitHub's API cannot; then niyam",
+      '│       board-audit lists the open issues still not on the board.',
+      '│',
+      '│    2. Once for example-org/example-app: in Claude Code, run /schedule and',
+      "│       create a weekly routine on it, with claude.ai's GitHub connected as",
+      '│       ExampleBot and the prompt below the line in',
+      `│       https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
+      '│',
+      '│    3. Once per claude.ai account: sign in at https://claude.ai/code and',
+      '│       connect GitHub as ExampleBot (or change it at',
+      '│       https://claude.ai/customize/connectors); skip it if done.',
+      '│',
+      `└  ${PULL_URL}  merges itself when checks pass`,
     ]);
+    assert.ok(out.every((line) => line.length <= 80 || !line.startsWith('│ ')), 'every by-hand line fits 80 columns');
     assert.deepEqual(sys.chosen, ['Go ahead?'], 'one question');
     assert.deepEqual(sys.opened, ['https://github.com/login/device'], 'the browser opens at the sign-in');
     assert.equal(sys.spinning, 0, 'every spinner stopped');
-    assert.deepEqual(sys.spun, ['board', 'pre-push hook', 'test commit Verified as ExampleBot', 'pull request']);
+    assert.deepEqual(sys.spun, ['board app', 'board', 'pre-push hook', 'test commit Verified as ExampleBot', 'pull request']);
     const git = sys.calls.filter((c) => c.command === 'git' && c.env);
     assert.deepEqual(git.map((c) => c.args.slice(0, 2).join(' ')), [
       'ls-remote https://github.com/example-org/example-app.git',
@@ -239,11 +261,16 @@ describe('onboard', () => {
     assert.match(body, /^- `\.github\/niyam\.json`: owner example-owner approves, agent ExampleBot builds, with identity, .* on$/m);
     assert.match(body, /^- `\.github\/workflows\/niyam\.yml`: write \.github\/workflows\/niyam\.yml, which runs the shared niyam checks$/m);
     // The long explanations the terminal no longer prints.
-    assert.ok(body.includes('\nDone at the terminal, outside this pull request:\n\n- board:\n  - issue types in example-org: Work item, Slice, State, Decision, Brief\n'), body);
+    assert.ok(
+      body.includes(
+        "\nDone at the terminal, outside this pull request:\n\n- board app:\n  - example-org's board app secrets shared with example-org/example-app\n  - example-org's board app installed on example-org/example-app\n- board:\n  - issue types in example-org: Work item, Slice, State, Decision, Brief\n",
+      ),
+      body,
+    );
     assert.ok(body.includes(`\n  - Project "example-app work": ${COPY_URL}\n  - fields: Step, Decision, Review date\n`), body);
     assert.ok(body.includes('\n- pre-push hook:\n  - wrote the pre-push git hook .git/hooks/pre-push, which checks an agent session pushes to GitHub as the agent, and the work rules\n'), body);
     assert.ok(body.includes('\n  - committer: ExampleBot; verified: true (valid)\n  - GitHub shows the test commit Verified by ExampleBot\n'), body);
-    assert.ok(body.includes(`\nLeft to do by hand:\n\n- Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.\n- ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}\n- The review routine: create a weekly Claude routine on example-org/example-app`), body);
+    assert.ok(body.includes(`\nLeft to do by hand:\n\n- Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.\n- The review routine: create a weekly Claude routine on example-org/example-app`), body);
     assert.ok(
       body.includes(
         `\n- Claude cloud sessions, once per claude.ai account: connect claude.ai's GitHub as ExampleBot. Each session with no niyam installs it from ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so there is nothing to paste; what niyam cloud-setup prints, put in the cloud environment's Setup script, makes sessions start faster, since Claude caches what a Setup script installs.\n`,
@@ -275,6 +302,9 @@ describe('onboard', () => {
     board.issueTypes = ISSUE_TYPES.map((t) => t.name);
     board.labels = LABELS.map((l) => l.name);
     board.project = { fields: [...BUILT_IN, ...FIELDS.map((f) => f.name)], linked: true, views: settledViews(), grouped: true };
+    // The organisation's board app secrets are shared with the repository already.
+    sys.route('GET', `${REPO}/actions/secrets?per_page=100&page=1`, { status: 200, json: { secrets: [] } });
+    sys.route('GET', `${REPO}/actions/organization-secrets?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }, { name: 'NIYAM_BOARD_APP_KEY' }] } });
     const { code, out } = await run(sys, []);
     assert.equal(code, 0);
     assert.deepEqual(sys.chosen, ['Go ahead?']);
@@ -1263,7 +1293,8 @@ describe('onboard', () => {
         const sys = fresh();
         change(sys);
         const { code, err } = await run(sys);
-        assert.deepEqual({ code, err }, { code: 1, err: [message, 'onboard: stopped at "board"; nothing after it was changed, and no pull request was opened'] });
+        // The board app is the first step that acts as the owner.
+        assert.deepEqual({ code, err }, { code: 1, err: [message, 'onboard: stopped at "board app"; nothing after it was changed, and no pull request was opened'] });
         assert.equal(sys.temps.length, 1);
         assert.deepEqual(sys.removed, sys.temps);
         assert.ok(!sys.requests.some((r) => /\/labels|\/issue-types|\/graphql$/.test(r.url) && (r.method !== 'GET' || r.token === OWNER_TOKEN)), 'the board is not touched');
@@ -2195,7 +2226,8 @@ describe('the plan and its one question', () => {
     sys.ghToken = undefined;
     const { out } = await run(sys);
     assert.ok(out.includes('│  authentication cancelled'), out.join('\n'));
-    assert.ok(out.includes('■  board'));
+    // The board app is the first step that acts as the owner.
+    assert.ok(out.includes('■  board app'));
   });
 
   it('works out the workflow once the agent can push, when the default branch is not known before', async () => {
@@ -2504,7 +2536,7 @@ describe('workflowUpdate', () => {
     assert.ok(inherited.kind === 'repin' && !inherited.board && inherited.text.includes('    secrets: inherit\n') && !inherited.text.includes('NIYAM_BOARD_APP_ID'));
   });
 
-  it("says how to set up the board app for the secrets the repository lacks, its own and its organization's counted, and nothing once both are set", async () => {
+  it("with no one at the terminal, says how to set up the board app for the secrets the repository lacks, its own and its organization's counted, and nothing once both are set", async () => {
     const BOTH = ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'] as const;
     assert.equal(
       boardAppSteps('example-org/example-app', BOTH),
@@ -2520,9 +2552,11 @@ describe('workflowUpdate', () => {
       [['NIYAM_BOARD_APP_KEY'], ['NIYAM_BOARD_APP_ID'], undefined],
     ] as const) {
       const sys = fresh();
+      sys.tty = false;
       secrets(sys, [...own], [...org]);
-      const { code, out } = await run(sys);
+      const { code, out } = await run(sys, ['example-owner', AGENT, '--yes']);
       assert.equal(code, 0);
+      assert.ok(!sys.requests.some((r) => r.url.includes('/orgs/example-org/actions/secrets')), 'no board app step');
       const lines = byHand(out).filter((line) => line.includes('GitHub App'));
       assert.deepEqual(lines, steps === undefined ? [] : [steps], `${own.join(',')} / ${org.join(',')}`);
       if (steps !== undefined) assert.ok(opened(sys)?.body.includes(`\n- ${steps}`), 'and in the pull request, left to do by hand');
@@ -2532,6 +2566,25 @@ describe('workflowUpdate', () => {
     const off = fresh();
     off.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
     assert.ok(!byHand((await run(off)).out).some((line) => line.includes('GitHub App')));
+  });
+
+  it('sets up the board app as the owner at the terminal, leaving by hand, in both places, only what GitHub refused, and going on', async () => {
+    const sys = fresh();
+    sys.route('GET', '/orgs/example-org/actions/secrets?per_page=100&page=1', { status: 403, json: { message: 'Must have admin rights' } });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(planned(out, 'GitHub').includes('board app: two clicks in the browser, if it is new'), out.join('\n'));
+    const left = `${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'])} onboard did not: GitHub would not list example-org's Actions secrets.`;
+    assert.ok(out.includes('◇  board app'), 'the step passes: the run goes on');
+    assert.ok(byHand(out).includes(left), out.join('\n'));
+    assert.ok(opened(sys)?.body.includes(`\n- ${left}`), 'and in the pull request, left to do by hand');
+    // An agent's or a cloud session cannot click in the owner's browser.
+    for (const env of [{ CLAUDECODE: '1' }, { CLAUDE_CODE_REMOTE: 'true' }]) {
+      const agent = fresh();
+      agent.env = env;
+      const { out: planOnly } = await run(agent, ['example-owner', AGENT, '--dry-run']);
+      assert.ok(!planned(planOnly, 'GitHub').some((item) => item.startsWith('board app')), JSON.stringify(env));
+    }
   });
 
   it("asks to pass, or stop passing, the board app's secrets", async () => {

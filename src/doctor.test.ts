@@ -439,7 +439,7 @@ describe('doctor', () => {
     it('warns about a missing one, and still passes', async () => {
       const { code, out } = await check(listed(healthy(), ['FIGMA_TOKEN'], ['NIYAM_BOARD_APP_ID']));
       assert.equal(code, 0);
-      assert.deepEqual(marked(out, '▲'), [`▲  no NIYAM_BOARD_APP_KEY secret, so a slice moves to In Progress only from a desktop push → niyam onboard again, which says how to set up the board app`]);
+      assert.deepEqual(marked(out, '▲'), [`▲  no NIYAM_BOARD_APP_KEY secret, so a slice moves to In Progress only from a desktop push → niyam onboard again, which sets up the board app`]);
     });
 
     it('says nothing where GitHub will not list them, for a personal repository, or with the board off', async () => {

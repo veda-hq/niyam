@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 
 import { launcherPath, launcherScript } from './agent.ts';
 import { ISSUE_TYPES } from './issue-types.ts';
-import type { ExecResult, HttpResult, Sys } from './types.ts';
+import type { ExecResult, HttpResult, ServeAnswer, ServeRequest, Sys } from './types.ts';
 import { packageVersion } from './version.ts';
 
 export const HOME = '/home/u';
@@ -109,6 +109,13 @@ export class FakeSys implements Sys {
     // No onboard pull request is open yet, from its branch or the one before P-56.
     this.route('GET', '/repos/example-org/example-app/pulls?state=open&head=example-org:niyam/onboard', { status: 200, json: [] });
     this.route('GET', '/repos/example-org/example-app/pulls?state=open&head=example-org:process-rules/onboard', { status: 200, json: [] });
+    // The organisation has its board app already, with its secrets shared with selected repositories and installed on
+    // all of them, unless a test routes them: onboard shares both with the repository, with no browser.
+    this.route('GET', '/orgs/example-org/actions/secrets?per_page=100&page=1', { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }, { name: 'NIYAM_BOARD_APP_KEY' }] } });
+    this.route('GET', '/orgs/example-org/installations?per_page=100&page=1', { status: 200, json: { installations: [{ id: 77, app_slug: 'niyam-board-example-org', repository_selection: 'all' }] } });
+    this.handlers.push((method, url) =>
+      method === 'PUT' && /\/orgs\/example-org\/actions\/secrets\/NIYAM_BOARD_APP_(ID|KEY)\/repositories\/\d+$/.test(url) ? { status: 204, json: null } : undefined,
+    );
     // The organisation's issue types are the work model's alone, unless a test routes them.
     this.route('GET', '/orgs/example-org/issue-types?per_page=100&page=1', {
       status: 200,
@@ -471,6 +478,32 @@ export class FakeSys implements Sys {
 
   open(url: string): void {
     this.opened.push(url);
+    this.browse(url);
+  }
+
+  /** What the browser does at each URL opened: by default, nothing. */
+  browse: (url: string) => void = () => {};
+  /** The pages served on 127.0.0.1, while they are; and how many times serving was closed. */
+  served: ((request: ServeRequest) => Promise<ServeAnswer>) | undefined;
+  servedClosed = 0;
+  /** The port the fake serves on. */
+  static readonly PORT = 47001;
+  serve(handle: (request: ServeRequest) => Promise<ServeAnswer>): Promise<{ port: number; close(): void }> {
+    this.served = handle;
+    return Promise.resolve({
+      port: FakeSys.PORT,
+      close: () => {
+        this.served = undefined;
+        this.servedClosed++;
+      },
+    });
+  }
+
+  /** A browser's GET of a page served on 127.0.0.1, by its URL. */
+  visit(url: string): Promise<ServeAnswer> {
+    const parsed = new URL(url);
+    if (!this.served) return Promise.resolve({ status: 0, body: 'nothing serves there' });
+    return this.served({ path: parsed.pathname, query: Object.fromEntries(parsed.searchParams) });
   }
 
   /** The Ctrl-C handlers on now; interrupt() calls them, as a Ctrl-C at the terminal does. */

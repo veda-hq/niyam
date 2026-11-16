@@ -2153,3 +2153,42 @@
     with no token store never gets that far: `onboard` refuses it first.
   - A list GitHub does not give makes no key, since there may be one
     already: the plan warns and names `niyam cloud-key <agent>`.
+- **2026-11-16 — Record: onboard makes the board app from a manifest
+  (P-72, Work item #430, slice #429).** Alok onboarded athya_mono and
+  asked "Why is there so much by hand work. Ideally there should be no work
+  by hand." P-71's by-hand board app step was a dozen fields and two
+  pastes. GitHub's manifest flow makes an app from a JSON manifest with one
+  click and hands the client id and private key back to the page it
+  redirects to. That turns P-71's rejected "onboard setting the secrets
+  itself" into the way it works.
+  - With board on in an organization's repository that cannot see both
+    secrets, and the owner at the terminal (not an agent's or a cloud
+    session), the plan names `board app`, an owner step. The owner's
+    sign-in already has `admin:org`.
+  - Where the organization has both secrets, onboard shares them with the
+    repository (they are `selected` secrets) and adds it to the
+    installation of the app whose slug starts `niyam-board`, with no
+    browser.
+  - Otherwise onboard serves two pages on 127.0.0.1 for the run alone. The
+    first posts the manifest to the organization's new-app page with a
+    random `state`. The manifest is named `niyam board <org>`, asks for
+    organization Projects write and Issues read, and has no webhook. The
+    second takes GitHub's redirect, refuses one without the run's `state`
+    or a second one, and turns the code into the app
+    (`POST /app-manifests/{code}/conversions`). It sets the client id and
+    key as organization secrets visible to the repository alone, then sends
+    the browser on to the install page. The key is never printed or
+    written to disk. onboard waits for the installation and adds the
+    repository to it when the owner chose selected repositories.
+  - Every wait is ten minutes. A click that does not come, or a step GitHub
+    refuses, leaves the rest by hand with the reason. The step still
+    passes, so the run and its pull request go on. Where an app was made
+    but its secrets could not be set, the key is gone, so the step left by
+    hand is to delete the app and run onboard again.
+  - "By hand:" became a `◇ By hand` group before the closing `└`: numbered
+    steps, wrapped to 80 columns, a link longer than a line on one of its
+    own.
+  - Rejected: secrets of the repository, which a second repository of the
+    organization could not get without the key again; and a `setup_url` to
+    learn of the install, which would stay on the app pointing at a closed
+    port.
