@@ -516,12 +516,11 @@ describe("pr-autocreate claude-hook and sarathi's Auto-fix list", () => {
       assert.equal((await stop()).code, 0);
     });
 
-    it('is quiet after a push too, and leaves its notes to go out', async () => {
+    it('is quiet after a push too', async () => {
       listOn();
       rows(row('on'));
       const got = await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: 's2' }));
-      assert.equal(got.code, 0);
-      assert.equal(got.out.length === 0 || !/Autofix must be ON/.test(context(got.out)), true);
+      assert.deepEqual(got, { code: 0, out: [], err: [] });
       assert.equal(existsSync(ack()), false);
     });
 
