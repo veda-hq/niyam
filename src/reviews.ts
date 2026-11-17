@@ -261,6 +261,58 @@ export async function watchReviews(sys: Sys, io: Output, slug: string, token: st
   }
 }
 
+/** The verdicts in routines/review.md, holds included: a comment by the agent starting with one is the review routine's trace. */
+const ROUTINE_VERDICT = /^\s*(?:Kept:|Settled:|Held for )/;
+/** How far back onboard looks for the routine's trace: three of its weekly runs. */
+export const TRACE_DAYS = 21;
+/** The pages of 100 comments onboard reads at most, newest first. */
+const TRACE_PAGES = 10;
+
+/** GitHub's timestamps: UTC, to the second or finer. */
+const INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
+
+/** A GitHub timestamp in milliseconds, or undefined for one that is not such a time, or names no real date. */
+function instant(text: string | undefined): number | undefined {
+  const parts = INSTANT.exec(text ?? '');
+  if (!parts) return undefined;
+  const [year, month, day, hour, minute, second] = parts.slice(1, 7).map(Number) as [number, number, number, number, number, number];
+  const time = Date.UTC(year, month - 1, day, hour, minute, second);
+  // Date.UTC rolls 30 February into March: a time that does not read back the same was never a date.
+  return new Date(time).toISOString().slice(0, 19) === (text as string).slice(0, 19) ? time : undefined;
+}
+
+interface RepoComment {
+  body?: string;
+  user?: { login?: string } | null;
+  issue_url?: string;
+  created_at?: string;
+}
+
+/**
+ * The review routine's newest verdict on `slug` in the last three weeks, as
+ * the issue it is on and its date, or undefined when there is none: onboard
+ * cannot read Claude's routines, so a verdict by the agent is how it sees the
+ * routine runs. Reads at most ten pages of the repository's issue comments,
+ * newest first; throws where GitHub refuses them.
+ */
+export async function routineTrace(sys: Sys, slug: string, agent: string, token: string): Promise<{ number: number; date: string } | undefined> {
+  const cutoff = sys.now().getTime() - TRACE_DAYS * DAY_MS;
+  const since = new Date(cutoff).toISOString();
+  for (let page = 1; page <= TRACE_PAGES; page++) {
+    const { status, json } = await sys.http(`${API}/repos/${slug}/issues/comments?since=${since}&sort=created&direction=desc&per_page=100&page=${page}`, { token });
+    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot list ${slug}'s issue comments (HTTP ${status})`);
+    for (const comment of json as RepoComment[]) {
+      // `since` is by last update: an older verdict edited lately is not a recent run.
+      const created = instant(comment.created_at);
+      const number = Number(/\/issues\/(\d+)$/.exec(comment.issue_url ?? '')?.[1]);
+      if (created === undefined || created < cutoff || !Number.isInteger(number)) continue;
+      if (anyLogin([agent], comment.user?.login ?? undefined) && ROUTINE_VERDICT.test(comment.body ?? '')) return { number, date: (comment.created_at as string).slice(0, 10) };
+    }
+    if (json.length < 100) return undefined;
+  }
+  return undefined;
+}
+
 /**
  * Removes `veto` labels the routine added more than a week ago: the owner's
  * window to reverse that decision has closed. Part of the weekly job.

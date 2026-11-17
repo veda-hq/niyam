@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { AGENT, FakeSys, ROOT, capture } from './fake.test.ts';
-import { expireVetoes, reviewsDue, textHash, watchReviews } from './reviews.ts';
+import { expireVetoes, reviewsDue, routineTrace, textHash, watchReviews } from './reviews.ts';
 
 const SLUG = 'example-org/example-app';
 const DECISIONS = `/repos/${SLUG}/issues?state=open&type=Decision&per_page=100`;
@@ -486,5 +486,62 @@ describe('watchReviews', () => {
     const { io, out } = capture();
     await watchReviews(sys, io, SLUG, 'ghs_run', SETTINGS);
     assert.deepEqual(out, ['#20: the review routine gave its verdict; removed needs-owner']);
+  });
+});
+
+describe('routineTrace', () => {
+  // NOW is 2026-10-30T12:00:00Z: three weeks back.
+  const page = (n: number) => `/repos/${SLUG}/issues/comments?since=2026-10-09T12:00:00.000Z&sort=created&direction=desc&per_page=100&page=${n}`;
+  const comment = (number: number, body: string, login = AGENT, created_at = '2026-10-28T06:00:00Z') => ({
+    body,
+    user: { login },
+    issue_url: `https://api.github.com/repos/${SLUG}/issues/${number}`,
+    created_at,
+  });
+  const filler = (count: number) => Array.from({ length: count }, (_, i) => comment(900 + i, 'Thanks, merged.', 'someone'));
+
+  it("finds the agent's newest verdict, a hold included, in any case of its login", async () => {
+    const sys = new FakeSys();
+    sys.route('GET', page(1), { status: 200, json: filler(100) });
+    sys.route('GET', page(2), { status: 200, json: [comment(3045, 'Held for example-owner: it spends money', AGENT.toLowerCase(), '2026-10-27T06:00:00Z'), comment(12, 'Kept: still holds.')] });
+    assert.deepEqual(await routineTrace(sys, SLUG, AGENT, 'ghp_agent'), { number: 3045, date: '2026-10-27' });
+    assert.equal(sys.requests[0]?.token, 'ghp_agent');
+  });
+
+  it("sees no routine in anyone else's verdict, the agent's other comments, or a verdict older than three weeks edited lately", async () => {
+    const sys = new FakeSys();
+    sys.route('GET', page(1), {
+      status: 200,
+      json: [
+        comment(5, 'Kept: I checked it myself.', 'example-owner'),
+        comment(6, 'I kept this one in mind.'),
+        comment(7, 'Settled: done long ago.', AGENT, '2026-10-01T06:00:00Z'),
+        { body: 'Kept: no issue named.', user: { login: AGENT }, created_at: '2026-10-28T06:00:00Z' },
+        comment(8, 'Kept: on no real day.', AGENT, '2026-10-32T06:00:00Z'),
+        comment(9, 'Kept: at no time GitHub gives.', AGENT, 'yesterday'),
+      ],
+    });
+    assert.equal(await routineTrace(sys, SLUG, AGENT, 'ghp_agent'), undefined);
+  });
+
+  it('reads no more than ten pages', async () => {
+    const sys = new FakeSys();
+    for (let n = 1; n <= 11; n++) sys.route('GET', page(n), { status: 200, json: n === 11 ? [comment(1, 'Kept: late.')] : filler(100) });
+    assert.equal(await routineTrace(sys, SLUG, AGENT, 'ghp_agent'), undefined);
+    assert.equal(sys.requests.length, 10);
+  });
+
+  it('throws where GitHub refuses the comments', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', page(1), { status: 403, json: { message: 'Resource not accessible' } });
+    await assert.rejects(routineTrace(sys, SLUG, AGENT, 'ghp_agent'), /cannot list example-org\/example-app's issue comments \(HTTP 403\)/);
+  });
+
+  it('throws where the request fails', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', page(1), () => {
+      throw new Error('fetch failed');
+    });
+    await assert.rejects(routineTrace(sys, SLUG, AGENT, 'ghp_agent'), /fetch failed/);
   });
 });
