@@ -620,9 +620,12 @@ describe('doctor in a Claude cloud session', () => {
     // session-start unsets the key's variable once it uses it: still set, it could not.
     const unused = cloud();
     unused.env = { ...unused.env, GIT_AUTHOR_NAME: 'Claude', GIT_AUTHOR_EMAIL: 'noreply@anthropic.com', NIYAM_SIGNING_KEY: 'a2V5' };
-    assert.deepEqual(marked((await check(unused)).out, '▲'), [
+    const { code, out } = await check(unused);
+    assert.equal(code, 0, 'a warning only');
+    assert.deepEqual(marked(out, '▲'), [
       "▲  NIYAM_SIGNING_KEY is set, but session-start could not use it, so this session's commits are Claude's → a new session; its first niyam line says why",
     ]);
+    assert.ok(unused.calls.every((call) => call.command !== 'apt-get' && call.command !== 'ssh-keygen'), 'signing needs no ssh-keygen, so doctor looks for none');
     const other = cloud();
     other.env = { ...other.env, GIT_AUTHOR_EMAIL: noreplyEmail(7, 'OtherBot') };
     assert.match(marked((await check(other)).out, '▲')[0] ?? '', /commits are Claude's/, "another account's address is not the agent's");

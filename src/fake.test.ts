@@ -1,5 +1,5 @@
 import { tarballName } from './names.ts';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 
 import { launcherPath, launcherScript } from './agent.ts';
 import { ISSUE_TYPES } from './issue-types.ts';
@@ -15,6 +15,39 @@ export const PUBLIC_KEY = 'ssh-ed25519 AAAAkey ExampleBot signing';
 /** The fake's private key file: `ssh-keygen -y` derives the public half from it. */
 export const PRIVATE_KEY = 'private:ssh-ed25519 AAAAkey';
 export const TOKEN = 'ghp_good';
+
+function sshField(value: Buffer | string): Buffer {
+  const bytes = typeof value === 'string' ? Buffer.from(value, 'latin1') : value;
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(bytes.length);
+  return Buffer.concat([length, bytes]);
+}
+
+/**
+ * A new unencrypted ed25519 key as an OpenSSH private key file, made in Node
+ * at test time, so no key is kept in the repository: its text and public line.
+ */
+export function openSshKey(comment = 'test'): { pem: string; publicLine: string } {
+  const { privateKey } = generateKeyPairSync('ed25519');
+  const jwk = privateKey.export({ format: 'jwk' });
+  const seed = Buffer.from(jwk.d ?? '', 'base64url');
+  const pub = Buffer.from(jwk.x ?? '', 'base64url');
+  const blob = Buffer.concat([sshField('ssh-ed25519'), sshField(pub)]);
+  const check = randomBytes(4);
+  let secret = Buffer.concat([check, check, sshField('ssh-ed25519'), sshField(pub), sshField(Buffer.concat([seed, pub])), sshField(comment)]);
+  const padding: number[] = [];
+  for (let i = 1; (secret.length + padding.length) % 8 !== 0; i += 1) padding.push(i);
+  secret = Buffer.concat([secret, Buffer.from(padding)]);
+  const one = Buffer.alloc(4);
+  one.writeUInt32BE(1);
+  const data = Buffer.concat([Buffer.from('openssh-key-v1\0', 'latin1'), sshField('none'), sshField('none'), sshField(''), one, sshField(blob), sshField(secret)]).toString('base64');
+  // The label is built, so the source holds no key-shaped text for secret scanners; the key itself is made fresh each run.
+  const label = ['OPENSSH', 'PRIVATE', 'KEY'].join(' ');
+  return {
+    pem: `-----BEGIN ${label}-----\n${data.match(/.{1,70}/g)?.join('\n') ?? ''}\n-----END ${label}-----\n`,
+    publicLine: `ssh-ed25519 ${blob.toString('base64')}`,
+  };
+}
 /** What GitHub answers about a classic token with every needed scope. */
 export const CLASSIC = {
   'x-oauth-scopes': 'repo, workflow, read:org, project, write:ssh_signing_key',
