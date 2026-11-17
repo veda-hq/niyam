@@ -180,7 +180,15 @@ any Markdown emphasis, or names an owner login, with or without `@`) must
 link a published page (`https://claude.ai/artifact/…` or
 `https://claude.ai/code/artifact/…`) and fit 500 characters; otherwise it is
 refused, naming the rule and the fix: publish the page, then post the
-question, the link and how to answer. A body the guard cannot read in full
+question, the link and how to answer. In auto mode the classifier refuses
+the publish as communication unless the repo's `.claude/settings.json`
+allows it, so `onboard` adds `mcp__claude-artifacts__publish_version`,
+`mcp__claude-artifacts__publish_files` and
+`mcp__claude-artifacts__edit_version` to its `permissions.allow` (none
+where `mcp__claude-artifacts` or `mcp__claude-artifacts__*` allows the whole
+server), and `doctor` warns (`▲`) about each one an onboarded repo's file
+lacks. A new page is private to its owner; a republish to a page already
+shared changes what its readers see, with no prompt. A body the guard cannot read in full
 (a variable, a command substitution other than `cat`) is judged by what it
 spells out; where that asks the owner, or the body opens with the unknown
 part, it is refused with how to write it so the guard can read it; so is a comment with no body in the command, which gh would take from an editor, a prompt or the browser. Commands inside `$(…)`, backquotes and `sh -c` are read too. `propose`
@@ -388,16 +396,27 @@ on any platform without a token store, `niyam env` prints the lock alone.
    only a sign-in could tell which of the settings' owners runs it, a dry
    run asks you to name the owner. Without a terminal, `onboard` refuses
    unless given `--yes` or `--dry-run`. After the yes it shows one line per step, a
-   spinner while it works, and ends with the pull request and a short "By
-   hand:" list of what GitHub's and Claude's APIs cannot do. Each line there
-   is one sentence on standard output saying the whole step: how often (now,
-   once for the repository, once per claude.ai account), what to do, and its
-   link. A first onboarding with the review routine ends:
+   spinner while it works, then a "By hand" group of what GitHub's and
+   Claude's APIs cannot do, and last the pull request. Each step there is
+   numbered and wrapped to 80 characters, where a link too long for a line
+   takes one of its own and may run past it. Each says the whole step: how
+   often (now, once for the repository, once per claude.ai account), what
+   to do, and its link where it has one. A first onboarding with the review
+   routine ends:
 
    ```
-   By hand:
-     Once for owner/repo: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as AGENT and the prompt below the line in https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
-     Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as AGENT (or change it at https://claude.ai/customize/connectors); skip it if done.
+   │
+   ◇  By hand
+   │    1. Once for owner/repo: in Claude Code, run /schedule and create a
+   │       weekly routine on it, with claude.ai's GitHub connected as AGENT and
+   │       the prompt below the line in
+   │       https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
+   │
+   │    2. Once per claude.ai account: sign in at https://claude.ai/code and
+   │       connect GitHub as AGENT (or change it at
+   │       https://claude.ai/customize/connectors); skip it if done.
+   │
+   └  https://github.com/owner/repo/pull/12  merges itself when checks pass
    ```
 
    It writes `.github/niyam.json`, adds to `.claude/settings.json`
@@ -408,8 +427,11 @@ on any platform without a token store, `niyam env` prints the lock alone.
    `.claude/sarathi.json`, below), and `permissions.allow` rules
    for `niyam review-thread` (replacing the rule under the old command) and for
    the app's `mcp__ccd_pr__bind_pr`, `mcp__ccd_pr__get_status` and
-   `mcp__ccd_pr__set_monitor`, which turn Auto-fix on (a rerun adds only
-   the ones missing), and
+   `mcp__ccd_pr__set_monitor`, which turn Auto-fix on, and for
+   `mcp__claude-artifacts__publish_version`, `publish_files` and
+   `edit_version`, which publish the page an ask to the owner links (a
+   rerun adds only the ones missing; a file allowing a whole server gets
+   none of its rules), and
    writes `.github/workflows/niyam.yml`, which calls this repository's
    shared checks (`.github/workflows/checks.yml`) from two jobs: `niyam`
    on pull requests and pushes, read-only, and `niyam-weekly` on the
@@ -629,9 +651,18 @@ workflow passes it the app's client id and private key as the
 `NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY` secrets. With `board` on,
 onboard writes them under the `niyam` job's secrets, the pull request job
 alone. Where the repository lacks either, its own or its organization's,
-onboard's by-hand list and its pull request say how to set up the app once
-per organization: organization Projects read and write and repository Issues
-read, installed on the repository. `niyam doctor` marks a missing one ▲.
+and the owner runs onboard at their own terminal, onboard sets the app up as
+the owner. If the organization has the app's secrets, onboard shares them,
+and the app's installation, with the repository, with no click. If it does
+not, the browser opens on GitHub's new-app page with the app filled in
+(`niyam board <org>`, organization Projects read and write and Issues read,
+no webhook). The owner clicks Create; onboard gets the client id and private
+key back from GitHub on 127.0.0.1 and sets them as organization secrets
+visible to the repository. The browser goes on to the install page, and the
+owner clicks Install. The key is never printed or written to disk. Without a
+terminal, in an agent's or a cloud session, or where GitHub refuses a step,
+the by-hand list and the pull request say what is left. `niyam doctor` marks
+a missing secret ▲.
 Without them, the job says so in one line and passes, as it does when the
 board refuses: the board never fails a pull request. When a pull request naming a slice merges into the default branch,
 the shared workflow comments on the slice, linking the pull request, and
@@ -946,7 +977,11 @@ repeats that call at every `wrap_up` until the app confirms Auto-fix. The
 ToolSearch step, the `<pr-created>` tag and `bind_pr` stay: without them the
 app refuses `set_monitor` for a pull request a hook opened. When the row
 cannot be written, or the session id cannot name a list, the whole
-instruction goes out.
+instruction goes out. With `"autofixList": true`, a pull request whose latest
+state on the list is `on` (folded as sarathi does: `warned` rows skipped,
+`opened` only adding the pull request) gets no instruction at all, and no
+ack, so an `off` later is told at a later Stop. `opened`, `refused`, `off`,
+or a list that cannot be read, gets the instruction as above.
 
 **Started work runs to merge.** `niyam keep-going`, Claude Code's Stop hook,
 sends a session back while its branch has commits the base lacks and its
@@ -1345,28 +1380,35 @@ Once `session-start` confirms the login as the agent, it does four things:
 - checks that its signature verifies as that key's.
 
 Only then does it add the agent's author and committer variables and SSH
-signing, with `gpg.ssh.program` set back from the platform's own program to
-`ssh-keygen`, all together to `CLAUDE_ENV_FILE`. It also unsets the key's
+signing, all together to `CLAUDE_ENV_FILE`. `gpg.ssh.program` goes from the
+platform's own program to niyam's signer, `niyam ssh-sign`, through a small
+script next to the session's files. The hosted image has no `ssh-keygen`, so
+niyam reads the key and makes git's SSH signatures in Node. They are the same
+signatures `ssh-keygen -Y sign` makes, and it checks the probe's signature in
+Node too. The key must be an ed25519 key with no passphrase, as `cloud-key`
+makes. `niyam ssh-sign` only signs, so `git log --show-signature` in the
+session cannot check signatures; GitHub does. It also unsets the key's
 variable there, so commands do not carry it in their environment.
 
 When any step fails, nothing is set and the commits stay Claude's, which PR
 identity passes. Steps that can fail: no key, one that is not an OpenSSH
-private key, a key GitHub does not list, a lookup the proxy refuses, or a
-probe that does not verify. The session's line says why and the session
-works on as the agent. A commit claiming the agent without the agent's
-signature would fail PR identity, so it is all or nothing.
+private key or not an ed25519 one with no passphrase, a key GitHub does not
+list, a lookup the proxy refuses, or a probe that does not verify. The
+session's line says why and the session works on as the agent. A commit
+claiming the agent without the agent's signature would fail PR identity, so
+it is all or nothing. Nothing is installed: signing needs no `ssh-keygen`, no
+network and no root, so no Setup script line either.
 
 `niyam onboard` makes the key the first time it runs for an agent that has
 none (see Adopting above), so all that is left is the paste. To make one
 yourself, as when the line was lost, run `niyam cloud-key [agent]` in your own
 terminal on the Mac `niyam machine` set up for the agent (`--yes` skips its
 one question). One line serves every cloud environment the agent works in.
-`onboard` and `cloud-key` make the key alike, in four steps:
+`onboard` and `cloud-key` make the key alike, in three steps:
 
-- makes a new ed25519 key in a private temporary folder, for the agent's cloud sessions alone, apart from the Mac's signing key, so it can be revoked on its own;
+- makes a new ed25519 key in memory, with niyam's own code rather than `ssh-keygen`, never writing it to disk; it is for the agent's cloud sessions alone, apart from the Mac's signing key, so it can be revoked on its own;
 - registers it as the agent's signing key, titled `niyam cloud signing`, with the token `machine` stored, and checks GitHub lists it;
-- puts `NIYAM_SIGNING_KEY=<the private key, base64>` on the clipboard, never on the screen;
-- deletes the files, at a Ctrl-C too.
+- puts `NIYAM_SIGNING_KEY=<the private key, base64>` on the clipboard, never on the screen.
 
 Paste the line into the cloud environment's variables (https://claude.ai/code →
 the environment's settings). Claude Code has no API for them, so this step stays
@@ -1486,7 +1528,7 @@ installs it, since the Setup script does not: both are `✓`. GitHub
 checks that the account the proxy acts as is one of the settings' agents,
 and that `session-start` gave the session that identity (`✗` otherwise:
 `gh` and git stay locked out). This repo lists hooks that reach GitHub
-outside `as-agent` and the Auto-fix rules missing, as on a Mac. It installs nothing; on Linux outside a
+outside `as-agent` and the Auto-fix and artifact rules missing, as on a Mac. It installs nothing; on Linux outside a
 cloud session, `doctor` still refuses.
 
 ### Owner steps
@@ -1582,7 +1624,7 @@ tag and the commit. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.24/veda-hq-niyam-0.6.24.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.26/veda-hq-niyam-0.6.26.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release

@@ -5,6 +5,7 @@ import { agentSession } from './push-identity.ts';
 import { tokenStore, unsupported } from './token-store.ts';
 import type { Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
+import { newKey, privateKeyText, publicLine } from './sshsig.ts';
 
 /** The title the cloud signing keys have on GitHub, so the agent's can be told apart from a Mac's. */
 export const CLOUD_KEY_TITLE = 'niyam cloud signing';
@@ -34,11 +35,11 @@ export interface Listed {
 
 /**
  * Sets up the agent's cloud signing key from the owner's Mac (#405): a new
- * ed25519 key, in a private temporary folder, registered as the agent's
- * signing key with the token `machine` stored, titled CLOUD_KEY_TITLE; once
- * GitHub lists it, `NIYAM_SIGNING_KEY=<the private key, base64>` goes on the
- * clipboard, for the cloud environment's variables, and the folder is
- * removed, a Ctrl-C included. The key is never printed. When the clipboard
+ * ed25519 key, made in memory and never written to disk (#437), registered as
+ * the agent's signing key with the token `machine` stored, titled
+ * CLOUD_KEY_TITLE; once GitHub lists it, `NIYAM_SIGNING_KEY=<the private key,
+ * base64>` goes on the clipboard, for the cloud environment's variables. The
+ * key is never printed. When the clipboard
  * does not take it, the key just registered is deleted again, since no one
  * holds it. It names the agent's other cloud signing keys, for the owner to
  * delete one no environment uses; it deletes none itself. Refuses in an agent
@@ -104,66 +105,37 @@ export function pasteLines(agent: string, where = "the cloud environment's"): st
 }
 
 /**
- * Makes the agent's cloud signing key in a private temporary folder,
- * registers it, puts its line on the clipboard, and removes the folder, a
- * Ctrl-C included; each step one line, the key never printed. `others` are
- * the agent's cloud signing keys GitHub already lists, named for the owner
- * to delete once unused; `paste` says what to do with the line, for a caller
- * that does not say it itself. 0 once the line is on the clipboard.
+ * Makes the agent's cloud signing key in memory with niyam's own code (#437),
+ * never on disk, registers it, and puts its line on the clipboard; each step
+ * one line, the key never printed. A Ctrl-C once it is registered deletes it
+ * from GitHub again. `others` are the agent's cloud signing keys GitHub
+ * already lists, named for the owner to delete once unused; `paste` says what
+ * to do with the line, for a caller that does not say it itself. 0 once the
+ * line is on the clipboard.
  */
 export async function makeCloudKey(sys: Sys, io: Output, agent: string, token: string, { others = [], paste = false }: { others?: readonly Listed[]; paste?: boolean } = {}): Promise<number> {
-  const dir = sys.tempDir();
-  let removed = false;
-  const cleanUp = (): boolean => {
-    if (!removed) {
-      try {
-        sys.remove(dir);
-      } catch {
-        // fail-open: said below, with the command that removes it.
-      }
-      removed = !sys.exists(dir);
-    }
-    return removed;
-  };
   let interrupted = false;
   const off = sys.onInterrupt(() => {
     interrupted = true;
-    cleanUp();
   });
-  let code = 1;
   try {
-    code = await makeAndRegister(sys, io, { agent, token, key: `${dir}/key`, others, paste }, () => interrupted);
+    return await makeAndRegister(sys, io, { agent, token, others, paste }, () => interrupted);
   } finally {
     off();
-    if (cleanUp()) {
-      io.out('✓ deleted the key files');
-    } else {
-      io.out(`✗ could not delete ${dir}, which holds the private key → rm -rf ${dir}`);
-      code = 1;
-    }
   }
-  return code;
 }
 
-/**
- * Makes the key at `key`, registers it, and puts it on the clipboard; each
- * step one line. The key is read before it is registered, so a Ctrl-C that
- * removes the files leaves it to delete from GitHub again, which it is.
- */
+/** Makes the key, registers it, and puts it on the clipboard; each step one line. */
 async function makeAndRegister(
   sys: Sys,
   io: Output,
-  { agent, token, key, others, paste }: { agent: string; token: string; key: string; others: readonly Listed[]; paste: boolean },
+  { agent, token, others, paste }: { agent: string; token: string; others: readonly Listed[]; paste: boolean },
   interrupted: () => boolean,
 ): Promise<number> {
-  const made = sys.exec('ssh-keygen', ['-q', '-t', 'ed25519', '-C', `${agent} cloud signing`, '-N', '', '-f', key], { input: '' });
-  if (interrupted()) return stopped(io);
-  if (made.code !== 0) {
-    io.out(`✗ ssh-keygen failed: ${made.stderr.trim() || `exit ${made.code}`}`);
-    return 1;
-  }
-  const publicKey = sys.read(`${key}.pub`).trim();
-  const line = `${SIGNING_KEY_VAR}=${Buffer.from(`${sys.read(key).trim()}\n`).toString('base64')}`;
+  const comment = `${agent} cloud signing`;
+  const key = newKey();
+  const publicKey = `${publicLine(key)} ${comment}`;
+  const line = `${SIGNING_KEY_VAR}=${Buffer.from(privateKeyText(key, comment)).toString('base64')}`;
   const posted = await sys.http(`${API}/user/ssh_signing_keys`, { method: 'POST', token, body: { title: CLOUD_KEY_TITLE, key: publicKey } });
   const id = (posted.json as { id?: unknown } | null)?.id;
   if (posted.status !== 201 || typeof id !== 'number') {
@@ -196,11 +168,6 @@ async function makeAndRegister(
     io.out(`▲ ${agent} has another cloud signing key, added ${other.created.slice(0, 10)} (id ${other.id}); delete it once no environment uses it → ${KEYS_PAGE}, signed in as ${agent}`);
   }
   return 0;
-}
-
-function stopped(io: Output): number {
-  io.out('✗ stopped by Ctrl-C; nothing registered, and nothing on the clipboard');
-  return 130;
 }
 
 /** Deletes the key just registered, which no one holds, and says why. */

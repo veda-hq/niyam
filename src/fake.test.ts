@@ -2,8 +2,9 @@ import { tarballName } from './names.ts';
 import { createHash } from 'node:crypto';
 
 import { launcherPath, launcherScript } from './agent.ts';
+import { newKey, privateKeyText, publicLine, readPrivateKey } from './sshsig.ts';
 import { ISSUE_TYPES } from './issue-types.ts';
-import type { ExecResult, HttpResult, Sys } from './types.ts';
+import type { ExecResult, HttpResult, ServeAnswer, ServeRequest, Sys } from './types.ts';
 import { packageVersion } from './version.ts';
 
 export const HOME = '/home/u';
@@ -15,6 +16,71 @@ export const PUBLIC_KEY = 'ssh-ed25519 AAAAkey ExampleBot signing';
 /** The fake's private key file: `ssh-keygen -y` derives the public half from it. */
 export const PRIVATE_KEY = 'private:ssh-ed25519 AAAAkey';
 export const TOKEN = 'ghp_good';
+
+/**
+ * The key a `NIYAM_SIGNING_KEY=<base64>` clipboard line holds, read back as
+ * session-start reads it: its text and public line, or why it is no key.
+ */
+export function keyOnClipboard(line: string | undefined): { text: string; publicLine: string } | { problem: string } {
+  const [name, value] = (line ?? '').split(/=(.*)/s);
+  if (name !== 'NIYAM_SIGNING_KEY') return { problem: `the line sets ${name || 'nothing'}` };
+  const text = Buffer.from(value ?? '', 'base64').toString('utf8');
+  const read = readPrivateKey(text);
+  return 'problem' in read ? read : { text, publicLine: publicLine(read) };
+}
+
+/**
+ * Every write to the fake's disk from now on, removed later or not: each
+ * file written, appended to, replaced or claimed, with what it held, and
+ * each folder made, a temporary one included. A check on the files left at the end misses a write undone.
+ */
+export function diskWrites(sys: FakeSys): { path: string; data?: string }[] {
+  const writes: { path: string; data?: string }[] = [];
+  const write = sys.write.bind(sys);
+  const append = sys.append.bind(sys);
+  const replace = sys.replace.bind(sys);
+  const claim = sys.claim.bind(sys);
+  const mkdir = sys.mkdir.bind(sys);
+  const tempDir = sys.tempDir.bind(sys);
+  sys.write = (path, data, mode): void => {
+    writes.push({ path, data });
+    write(path, data, mode);
+  };
+  sys.append = (path, data): void => {
+    writes.push({ path, data });
+    append(path, data);
+  };
+  sys.replace = (path, data): void => {
+    writes.push({ path, data });
+    replace(path, data);
+  };
+  // A claim that finds the file there already creates nothing.
+  sys.claim = (path): boolean => {
+    const claimed = claim(path);
+    if (claimed) writes.push({ path });
+    return claimed;
+  };
+  sys.mkdir = (path): void => {
+    writes.push({ path });
+    mkdir(path);
+  };
+  sys.tempDir = (prefix): string => {
+    const path = tempDir(prefix);
+    writes.push({ path });
+    return path;
+  };
+  return writes;
+}
+
+/**
+ * A new unencrypted ed25519 key as an OpenSSH private key file, made in Node
+ * at test time, so no key is kept in the repository: its text and public line.
+ */
+export function openSshKey(comment = 'test'): { pem: string; publicLine: string } {
+  // niyam's own writer (#437), which sshsig.test.ts checks against real ssh-keygen.
+  const key = newKey();
+  return { pem: privateKeyText(key, comment), publicLine: publicLine(key) };
+}
 /** What GitHub answers about a classic token with every needed scope. */
 export const CLASSIC = {
   'x-oauth-scopes': 'repo, workflow, read:org, project, write:ssh_signing_key',
@@ -109,6 +175,15 @@ export class FakeSys implements Sys {
     // No onboard pull request is open yet, from its branch or the one before P-56.
     this.route('GET', '/repos/example-org/example-app/pulls?state=open&head=example-org:niyam/onboard', { status: 200, json: [] });
     this.route('GET', '/repos/example-org/example-app/pulls?state=open&head=example-org:process-rules/onboard', { status: 200, json: [] });
+    // The organisation has its board app already, with its secrets shared with selected repositories and installed on
+    // all of them, unless a test routes them: onboard shares both with the repository, with no browser.
+    this.route('GET', '/orgs/example-org/actions/secrets?per_page=100&page=1', { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }, { name: 'NIYAM_BOARD_APP_KEY' }] } });
+    // The repository has no secrets of its own, unless a test routes them.
+    this.route('GET', '/repos/example-org/example-app/actions/secrets?per_page=100&page=1', { status: 200, json: { secrets: [] } });
+    this.route('GET', '/orgs/example-org/installations?per_page=100&page=1', { status: 200, json: { installations: [{ id: 77, app_slug: 'niyam-board-example-org', repository_selection: 'all' }] } });
+    this.handlers.push((method, url) =>
+      method === 'PUT' && /\/orgs\/example-org\/actions\/secrets\/NIYAM_BOARD_APP_(ID|KEY)\/repositories\/\d+$/.test(url) ? { status: 204, json: null } : undefined,
+    );
     // The organisation's issue types are the work model's alone, unless a test routes them.
     this.route('GET', '/orgs/example-org/issue-types?per_page=100&page=1', {
       status: 200,
@@ -471,6 +546,32 @@ export class FakeSys implements Sys {
 
   open(url: string): void {
     this.opened.push(url);
+    this.browse(url);
+  }
+
+  /** What the browser does at each URL opened: by default, nothing. */
+  browse: (url: string) => void = () => {};
+  /** The pages served on 127.0.0.1, while they are; and how many times serving was closed. */
+  served: ((request: ServeRequest) => Promise<ServeAnswer>) | undefined;
+  servedClosed = 0;
+  /** The port the fake serves on. */
+  static readonly PORT = 47001;
+  serve(handle: (request: ServeRequest) => Promise<ServeAnswer>): Promise<{ port: number; close(): void }> {
+    this.served = handle;
+    return Promise.resolve({
+      port: FakeSys.PORT,
+      close: () => {
+        this.served = undefined;
+        this.servedClosed++;
+      },
+    });
+  }
+
+  /** A browser's GET of a page served on 127.0.0.1, by its URL. */
+  visit(url: string): Promise<ServeAnswer> {
+    const parsed = new URL(url);
+    if (!this.served) return Promise.resolve({ status: 0, body: 'nothing serves there' });
+    return this.served({ path: parsed.pathname, query: Object.fromEntries(parsed.searchParams) });
   }
 
   /** The Ctrl-C handlers on now; interrupt() calls them, as a Ctrl-C at the terminal does. */

@@ -7,7 +7,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 
 import { BUILT_IN, Board, COPY_URL, OWNER_TOKEN, URL, repoJson, settledViews } from './fake-board.test.ts';
 import { FIELDS, ISSUE_TYPES, LABELS } from './board.ts';
-import { AGENT, AGENT_ID, FakeSys, HOME, PRIVATE_KEY, PUBLIC_KEY, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture } from './fake.test.ts';
+import { AGENT, AGENT_ID, FakeSys, HOME, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture, diskWrites, keyOnClipboard } from './fake.test.ts';
 import { cloudRepoScript } from './cloud.ts';
 import { tarballName } from './names.ts';
 import { CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH } from './onboard-pull.ts';
@@ -15,7 +15,7 @@ import type { HttpResult } from './types.ts';
 import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
@@ -53,7 +53,7 @@ const SESSION_ENTRY = { hooks: [{ type: 'command', command: HOOK_COMMAND }] };
 const GUARD_ENTRY = { matcher: 'Bash', hooks: [{ type: 'command', command: GUARD_COMMAND }] };
 /** The Claude Code settings this release writes into an empty project. */
 /** The rules onboard allows, in the order it adds them. */
-const ALLOW = [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES];
+const ALLOW = [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES];
 const CLAUDE = { hooks: { SessionStart: [SESSION_ENTRY], PreToolUse: [GUARD_ENTRY] }, env: BASE_ENV, permissions: { allow: ALLOW } };
 const VERIFIED = {
   status: 200,
@@ -128,10 +128,18 @@ function planned(out: string[], title: string): string[] {
   return items;
 }
 
-/** What the run left to do by hand, as it printed it last. */
+/** What the run left to do by hand, as it printed it last: each numbered step, its wrapped lines joined again. */
 function byHand(out: string[]): string[] {
-  const start = out.lastIndexOf('By hand:');
-  return start === -1 ? [] : out.slice(start + 1).map((line) => line.trim());
+  const start = out.lastIndexOf('◇  By hand');
+  if (start === -1) return [];
+  const steps: string[] = [];
+  for (const line of out.slice(start + 1)) {
+    if (!line.startsWith('│')) break;
+    const numbered = /^│ {4}\d+\. (.*)$/.exec(line)?.[1];
+    if (numbered !== undefined) steps.push(numbered);
+    else if (line.trim() !== '│') steps[steps.length - 1] += ` ${line.slice(1).trim()}`;
+  }
+  return steps;
 }
 
 /** The title and description of the pull request onboard opened, if it opened one. */
@@ -171,6 +179,8 @@ describe('onboard', () => {
       '│    auto-merge      when checks pass',
       '│',
       '◇  GitHub — one sign-in as example-owner',
+      // GitHub lists the agent no secrets here; the organisation has its board app, which onboard shares with no click.
+      '│    board app    two clicks in the browser, if it is new',
       '│    board        set up or check',
       '│    issue types  org-wide: add 5',
       '│      add        Work item, Slice, State, Decision, Brief',
@@ -188,24 +198,36 @@ describe('onboard', () => {
       '│  one-time code 1881-F156 (copied)',
       '│  approve it at https://github.com/login/device',
       '◇  Signed in as example-owner',
+      '◇  board app',
       '◇  board',
       '◇  pre-push hook',
       '◇  test commit Verified as ExampleBot',
       '◇  pull request',
-      `└  ${PULL_URL}  merges itself when checks pass`,
-      '',
-      'By hand:',
+      '│',
+      '◇  By hand',
       // A copy of the template has no Auto-add to project, which names a repository.
-      `  Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.`,
-      // GitHub lists no secrets here, so onboard cannot tell whether the board app's are set.
-      `  ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}`,
-      `  Once for example-org/example-app: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ExampleBot and the prompt below the line in https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
-      '  Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.',
+      '│    1. Once for the board: at',
+      `│       ${COPY_URL}/workflows, add the`,
+      '│       workflow Auto-add to project, for the repository example-org/example-app',
+      "│       with the filter is:issue is:open, which GitHub's API cannot; then niyam",
+      '│       board-audit lists the open issues still not on the board.',
+      '│',
+      '│    2. Once for example-org/example-app: in Claude Code, run /schedule and',
+      "│       create a weekly routine on it, with claude.ai's GitHub connected as",
+      '│       ExampleBot and the prompt below the line in',
+      `│       https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
+      '│',
+      '│    3. Once per claude.ai account: sign in at https://claude.ai/code and',
+      '│       connect GitHub as ExampleBot (or change it at',
+      '│       https://claude.ai/customize/connectors); skip it if done.',
+      '│',
+      `└  ${PULL_URL}  merges itself when checks pass`,
     ]);
+    assert.ok(out.every((line) => line.length <= 80 || !line.startsWith('│ ')), 'every by-hand line fits 80 columns');
     assert.deepEqual(sys.chosen, ['Go ahead?'], 'one question');
     assert.deepEqual(sys.opened, ['https://github.com/login/device'], 'the browser opens at the sign-in');
     assert.equal(sys.spinning, 0, 'every spinner stopped');
-    assert.deepEqual(sys.spun, ['board', 'pre-push hook', 'test commit Verified as ExampleBot', 'pull request']);
+    assert.deepEqual(sys.spun, ['board app', 'board', 'pre-push hook', 'test commit Verified as ExampleBot', 'pull request']);
     const git = sys.calls.filter((c) => c.command === 'git' && c.env);
     assert.deepEqual(git.map((c) => c.args.slice(0, 2).join(' ')), [
       'ls-remote https://github.com/example-org/example-app.git',
@@ -239,11 +261,16 @@ describe('onboard', () => {
     assert.match(body, /^- `\.github\/niyam\.json`: owner example-owner approves, agent ExampleBot builds, with identity, .* on$/m);
     assert.match(body, /^- `\.github\/workflows\/niyam\.yml`: write \.github\/workflows\/niyam\.yml, which runs the shared niyam checks$/m);
     // The long explanations the terminal no longer prints.
-    assert.ok(body.includes('\nDone at the terminal, outside this pull request:\n\n- board:\n  - issue types in example-org: Work item, Slice, State, Decision, Brief\n'), body);
+    assert.ok(
+      body.includes(
+        "\nDone at the terminal, outside this pull request:\n\n- board app:\n  - example-org's board app secrets shared with example-org/example-app\n  - example-org's board app installed on example-org/example-app\n- board:\n  - issue types in example-org: Work item, Slice, State, Decision, Brief\n",
+      ),
+      body,
+    );
     assert.ok(body.includes(`\n  - Project "example-app work": ${COPY_URL}\n  - fields: Step, Decision, Review date\n`), body);
     assert.ok(body.includes('\n- pre-push hook:\n  - wrote the pre-push git hook .git/hooks/pre-push, which checks an agent session pushes to GitHub as the agent, and the work rules\n'), body);
     assert.ok(body.includes('\n  - committer: ExampleBot; verified: true (valid)\n  - GitHub shows the test commit Verified by ExampleBot\n'), body);
-    assert.ok(body.includes(`\nLeft to do by hand:\n\n- Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.\n- ${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'], true)}\n- The review routine: create a weekly Claude routine on example-org/example-app`), body);
+    assert.ok(body.includes(`\nLeft to do by hand:\n\n- Once for the board: at ${COPY_URL}/workflows, add the workflow Auto-add to project, for the repository example-org/example-app with the filter is:issue is:open, which GitHub's API cannot; then niyam board-audit lists the open issues still not on the board.\n- The review routine: create a weekly Claude routine on example-org/example-app`), body);
     assert.ok(
       body.includes(
         `\n- Claude cloud sessions, once per claude.ai account: connect claude.ai's GitHub as ExampleBot. Each session with no niyam installs it from ${CLOUD_SETUP_PATH}, which onboard keeps at the pin, so there is nothing to paste; what niyam cloud-setup prints, put in the cloud environment's Setup script, makes sessions start faster, since Claude caches what a Setup script installs.\n`,
@@ -275,6 +302,9 @@ describe('onboard', () => {
     board.issueTypes = ISSUE_TYPES.map((t) => t.name);
     board.labels = LABELS.map((l) => l.name);
     board.project = { fields: [...BUILT_IN, ...FIELDS.map((f) => f.name)], linked: true, views: settledViews(), grouped: true };
+    // The organisation's board app secrets are shared with the repository already.
+    sys.route('GET', `${REPO}/actions/secrets?per_page=100&page=1`, { status: 200, json: { secrets: [] } });
+    sys.route('GET', `${REPO}/actions/organization-secrets?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }, { name: 'NIYAM_BOARD_APP_KEY' }] } });
     const { code, out } = await run(sys, []);
     assert.equal(code, 0);
     assert.deepEqual(sys.chosen, ['Go ahead?']);
@@ -602,7 +632,8 @@ describe('onboard', () => {
             "add the PreToolUse hook that refuses gh and git's remote commands outside the agent identity; " +
             `set GH_TOKEN, GITHUB_TOKEN and ${Object.keys(BASE_ENV).length - 2} more in env, so GitHub is locked out until session-start gives the agent identity; ` +
             'allow niyam review-thread without a prompt, so agent sessions answer review threads on their own pull requests; ' +
-            `allow ${AUTO_FIX_RULES.join(', ')} without a prompt, so agent sessions turn Auto-fix on for their own pull requests\n`,
+            `allow ${AUTO_FIX_RULES.join(', ')} without a prompt, so agent sessions turn Auto-fix on for their own pull requests; ` +
+            `allow ${ARTIFACT_RULES.join(', ')} without a prompt, so agent sessions publish the page an ask to the owner links\n`,
         ),
         opened(sys)?.body,
       );
@@ -634,21 +665,21 @@ describe('onboard', () => {
   });
 
   it("adds the review-thread rule to the client's own allow list once", () => {
-    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES], deny: ['Read(.env)'] } }));
-    assert.deepEqual(JSON.parse(text).permissions, { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES, REVIEW_THREAD_RULE], deny: ['Read(.env)'] });
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES, ...ARTIFACT_RULES], deny: ['Read(.env)'] } }));
+    assert.deepEqual(JSON.parse(text).permissions, { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES, ...ARTIFACT_RULES, REVIEW_THREAD_RULE], deny: ['Read(.env)'] });
     assert.deepEqual(changes, ['allow niyam review-thread without a prompt, so agent sessions answer review threads on their own pull requests']);
     assert.deepEqual(labels, ['review rule']);
     assert.deepEqual(claudeSettings(text).changes, []);
   });
 
   it('replaces the review-thread rule under the old command in its place, and leaves both where both are there', () => {
-    const before = JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', OLDER_REVIEW_THREAD_RULE, ...AUTO_FIX_RULES] } });
+    const before = JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', OLDER_REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES] } });
     const { text, changes, labels } = claudeSettings(before);
-    assert.deepEqual(JSON.parse(text).permissions.allow, ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES]);
+    assert.deepEqual(JSON.parse(text).permissions.allow, ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES]);
     assert.deepEqual(changes, [`replace ${OLDER_REVIEW_THREAD_RULE} with ${REVIEW_THREAD_RULE}, the CLI's own name`]);
     assert.deepEqual(labels, ['review rule']);
     assert.equal(REVIEW_THREAD_RULE, 'Bash(niyam review-thread *)');
-    const both = JSON.stringify({ ...CLAUDE, permissions: { allow: [OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, ...AUTO_FIX_RULES] } });
+    const both = JSON.stringify({ ...CLAUDE, permissions: { allow: [OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES] } });
     assert.deepEqual(claudeSettings(both), { text: both, changes: [], labels: [] });
   });
 
@@ -660,26 +691,51 @@ describe('onboard', () => {
     assert.deepEqual(claudeSettings(text).changes, []);
   });
 
-  it('leaves a file that already allows the Auto-fix rules as it is', () => {
-    const before = `${JSON.stringify({ ...CLAUDE, permissions: { allow: [...AUTO_FIX_RULES, 'Bash(pnpm test)', REVIEW_THREAD_RULE], ask: ['Bash(git push *)'] } }, null, 2)}\n`;
+  it('leaves a file that already allows the Auto-fix and artifact rules as it is', () => {
+    const before = `${JSON.stringify({ ...CLAUDE, permissions: { allow: [...AUTO_FIX_RULES, 'Bash(pnpm test)', REVIEW_THREAD_RULE, ...ARTIFACT_RULES], ask: ['Bash(git push *)'] } }, null, 2)}\n`;
     assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [] });
   });
 
   it('adds no Auto-fix rule where the whole pull request server is allowed', () => {
     for (const server of ['mcp__ccd_pr', 'mcp__ccd_pr__*']) {
-      assert.deepEqual(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, server] } })).changes, [], server);
+      assert.deepEqual(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, server, ...ARTIFACT_RULES] } })).changes, [], server);
     }
-    assert.ok(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, 'mcp__ccd_pr_*'] } })).labels.includes('Auto-fix rules'));
+    assert.ok(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, 'mcp__ccd_pr_*', ...ARTIFACT_RULES] } })).labels.includes('Auto-fix rules'));
   });
 
   it("adds only the Auto-fix rules a file lacks, after the client's own", () => {
-    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status'] } }));
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status', ...ARTIFACT_RULES] } }));
     assert.deepEqual(JSON.parse(text).permissions, {
-      allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status', 'mcp__ccd_pr__bind_pr', 'mcp__ccd_pr__set_monitor'],
+      allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status', ...ARTIFACT_RULES, 'mcp__ccd_pr__bind_pr', 'mcp__ccd_pr__set_monitor'],
     });
     assert.deepEqual(changes, ['allow mcp__ccd_pr__bind_pr, mcp__ccd_pr__set_monitor without a prompt, so agent sessions turn Auto-fix on for their own pull requests']);
     assert.deepEqual(labels, ['Auto-fix rules']);
     assert.deepEqual(claudeSettings(text).changes, []);
+  });
+
+  it("adds only the artifact rules a file lacks, after the client's own", () => {
+    assert.deepEqual(ARTIFACT_RULES, ['mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__edit_version']);
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files'] } }));
+    assert.deepEqual(JSON.parse(text).permissions, {
+      allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__edit_version'],
+    });
+    assert.deepEqual(changes, ['allow mcp__claude-artifacts__publish_version, mcp__claude-artifacts__edit_version without a prompt, so agent sessions publish the page an ask to the owner links']);
+    assert.deepEqual(labels, ['artifact rules']);
+    assert.deepEqual(claudeSettings(text).changes, []);
+  });
+
+  it('adds no artifact rule where the whole artifacts server is allowed', () => {
+    for (const server of ['mcp__claude-artifacts', 'mcp__claude-artifacts__*']) {
+      assert.deepEqual(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, server] } })).changes, [], server);
+    }
+    assert.ok(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts_*'] } })).labels.includes('artifact rules'));
+  });
+
+  it('says allow rules when it adds the Auto-fix and artifact rules together', () => {
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE] } }));
+    assert.deepEqual(JSON.parse(text).permissions.allow, ALLOW);
+    assert.equal(changes.length, 2, changes.join('\n'));
+    assert.deepEqual(labels, ['allow rules']);
   });
 
   it('refuses an env that is not an object, and a file that is not one', () => {
@@ -1263,7 +1319,8 @@ describe('onboard', () => {
         const sys = fresh();
         change(sys);
         const { code, err } = await run(sys);
-        assert.deepEqual({ code, err }, { code: 1, err: [message, 'onboard: stopped at "board"; nothing after it was changed, and no pull request was opened'] });
+        // The board app is the first step that acts as the owner.
+        assert.deepEqual({ code, err }, { code: 1, err: [message, 'onboard: stopped at "board app"; nothing after it was changed, and no pull request was opened'] });
         assert.equal(sys.temps.length, 1);
         assert.deepEqual(sys.removed, sys.temps);
         assert.ok(!sys.requests.some((r) => /\/labels|\/issue-types|\/graphql$/.test(r.url) && (r.method !== 'GET' || r.token === OWNER_TOKEN)), 'the board is not touched');
@@ -2195,7 +2252,8 @@ describe('the plan and its one question', () => {
     sys.ghToken = undefined;
     const { out } = await run(sys);
     assert.ok(out.includes('│  authentication cancelled'), out.join('\n'));
-    assert.ok(out.includes('■  board'));
+    // The board app is the first step that acts as the owner.
+    assert.ok(out.includes('■  board app'));
   });
 
   it('works out the workflow once the agent can push, when the default branch is not known before', async () => {
@@ -2504,7 +2562,7 @@ describe('workflowUpdate', () => {
     assert.ok(inherited.kind === 'repin' && !inherited.board && inherited.text.includes('    secrets: inherit\n') && !inherited.text.includes('NIYAM_BOARD_APP_ID'));
   });
 
-  it("says how to set up the board app for the secrets the repository lacks, its own and its organization's counted, and nothing once both are set", async () => {
+  it("with no one at the terminal, says how to set up the board app for the secrets the repository lacks, its own and its organization's counted, and nothing once both are set", async () => {
     const BOTH = ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'] as const;
     assert.equal(
       boardAppSteps('example-org/example-app', BOTH),
@@ -2520,9 +2578,11 @@ describe('workflowUpdate', () => {
       [['NIYAM_BOARD_APP_KEY'], ['NIYAM_BOARD_APP_ID'], undefined],
     ] as const) {
       const sys = fresh();
+      sys.tty = false;
       secrets(sys, [...own], [...org]);
-      const { code, out } = await run(sys);
+      const { code, out } = await run(sys, ['example-owner', AGENT, '--yes']);
       assert.equal(code, 0);
+      assert.ok(!sys.requests.some((r) => r.url.includes('/orgs/example-org/actions/secrets')), 'no board app step');
       const lines = byHand(out).filter((line) => line.includes('GitHub App'));
       assert.deepEqual(lines, steps === undefined ? [] : [steps], `${own.join(',')} / ${org.join(',')}`);
       if (steps !== undefined) assert.ok(opened(sys)?.body.includes(`\n- ${steps}`), 'and in the pull request, left to do by hand');
@@ -2532,6 +2592,25 @@ describe('workflowUpdate', () => {
     const off = fresh();
     off.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
     assert.ok(!byHand((await run(off)).out).some((line) => line.includes('GitHub App')));
+  });
+
+  it('sets up the board app as the owner at the terminal, leaving by hand, in both places, only what GitHub refused, and going on', async () => {
+    const sys = fresh();
+    sys.route('GET', '/orgs/example-org/actions/secrets?per_page=100&page=1', { status: 403, json: { message: 'Must have admin rights' } });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(planned(out, 'GitHub').includes('board app: two clicks in the browser, if it is new'), out.join('\n'));
+    const left = `${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'])} onboard did not: GitHub would not list example-org's Actions secrets.`;
+    assert.ok(out.includes('◇  board app'), 'the step passes: the run goes on');
+    assert.ok(byHand(out).includes(left), out.join('\n'));
+    assert.ok(opened(sys)?.body.includes(`\n- ${left}`), 'and in the pull request, left to do by hand');
+    // An agent's or a cloud session cannot click in the owner's browser.
+    for (const env of [{ CLAUDECODE: '1' }, { CLAUDE_CODE_REMOTE: 'true' }]) {
+      const agent = fresh();
+      agent.env = env;
+      const { out: planOnly } = await run(agent, ['example-owner', AGENT, '--dry-run']);
+      assert.ok(!planned(planOnly, 'GitHub').some((item) => item.startsWith('board app')), JSON.stringify(env));
+    }
   });
 
   it("asks to pass, or stop passing, the board app's secrets", async () => {
@@ -2895,12 +2974,13 @@ describe("the agent's cloud signing key (#417)", () => {
   /** A fresh run for an agent whose signing keys are the Mac's alone; GitHub registers the new one as id 99, and the clipboard takes what it is given. */
   function keyless(): FakeSys & { clipboard: string[] } {
     const sys = Object.assign(fresh(), { clipboard: [] as string[] });
-    let added = false;
+    let added: string | undefined;
     sys.route('GET', `${KEYS}?per_page=100`, { status: 200, json: [{ id: 1, title: 'niyam signing', key: 'ssh-ed25519 AAAAkey', created_at: '2026-10-01T00:00:00Z' }] });
-    sys.route('GET', KEYS, () => ({ status: 200, json: added ? [{ key: 'ssh-ed25519 AAAAmac' }, { key: PUBLIC_KEY }] : [{ key: 'ssh-ed25519 AAAAmac' }] }));
-    sys.route('POST', KEYS, () => {
-      added = true;
-      return { status: 201, json: { id: 99, title: 'niyam cloud signing', key: PUBLIC_KEY } };
+    sys.route('GET', KEYS, () => ({ status: 200, json: [{ key: 'ssh-ed25519 AAAAmac' }, ...(added ? [{ key: added }] : [])] }));
+    sys.handlers.push((method, url, body) => {
+      if (method !== 'POST' || url !== `https://api.github.com${KEYS}`) return undefined;
+      added = (body as { key: string }).key;
+      return { status: 201, json: { id: 99, title: 'niyam cloud signing', key: added } };
     });
     sys.route('DELETE', `${KEYS}/99`, { status: 204, json: null });
     sys.execOverride = ({ command, input }) => {
@@ -2910,12 +2990,15 @@ describe("the agent's cloud signing key (#417)", () => {
     };
     return sys;
   }
-  // The machine key's own checks run ssh-keygen too; the cloud key's is the one with its comment.
-  const keygen = (sys: FakeSys): { args: readonly string[] } | undefined => sys.calls.find((call) => call.command === 'ssh-keygen' && call.args.includes('ExampleBot cloud signing'));
-  const keyMade = (sys: FakeSys): boolean => keygen(sys) !== undefined || sys.requests.some((request) => request.method === 'POST' && request.url.endsWith(KEYS));
+  const keyMade = (sys: FakeSys): boolean => sys.requests.some((request) => request.method === 'POST' && request.url.endsWith(KEYS));
 
   it('plans one for an agent with none, and makes it last, after the pull request, with the one yes', async () => {
     const sys = keyless();
+    const writes = diskWrites(sys);
+    // The same run for an agent that has its key, which makes none: the key step must add no write to disk.
+    const keyed = fresh();
+    const keyedWrites = diskWrites(keyed);
+    await run(keyed);
     const { code, out, err } = await run(sys);
     assert.deepEqual(err, []);
     assert.equal(code, 0);
@@ -2924,13 +3007,17 @@ describe("the agent's cloud signing key (#417)", () => {
     assert.deepEqual(sys.spun.slice(-2), ['pull request', 'cloud signing key for ExampleBot']);
     const urls = sys.requests.filter((request) => request.method === 'POST').map((request) => request.url);
     assert.ok(urls.indexOf(`https://api.github.com${REPO}/pulls`) < urls.indexOf(`https://api.github.com${KEYS}`), 'the pull request opens first');
+    const onClipboard = keyOnClipboard(sys.clipboard[0]);
+    assert.ok(!('problem' in onClipboard), JSON.stringify(onClipboard));
+    assert.equal(sys.clipboard.length, 1);
     const posted = sys.requests.find((request) => request.method === 'POST' && request.url.endsWith(KEYS));
-    assert.deepEqual(posted?.body, { title: 'niyam cloud signing', key: PUBLIC_KEY });
+    assert.deepEqual(posted?.body, { title: 'niyam cloud signing', key: `${onClipboard.publicLine} ExampleBot cloud signing` });
     assert.equal(posted?.token, TOKEN, "as the agent, with its stored token");
-    assert.deepEqual(sys.clipboard, [`NIYAM_SIGNING_KEY=${Buffer.from(`${PRIVATE_KEY}\n`).toString('base64')}`]);
-    assert.ok(!out.join('\n').includes(PRIVATE_KEY) && !out.join('\n').includes(Buffer.from(PRIVATE_KEY).toString('base64')), 'the key is never printed');
-    const folder = dirname(keygen(sys)?.args.at(-1) ?? '');
-    assert.ok(sys.removed.includes(folder) && ![...sys.files.keys()].some((path) => path.startsWith(`${folder}/`)), 'no key file left');
+    assert.ok(!out.join('\n').includes((sys.clipboard[0] ?? '').slice(20, 60)) && !out.join('\n').includes(onClipboard.text.split('\n')[1] ?? ''), 'the key is never printed');
+    assert.ok(!sys.calls.some((call) => call.command === 'ssh-keygen' && call.args.includes('ExampleBot cloud signing')), 'made in memory, with no ssh-keygen (#437)');
+    assert.ok(!writes.some((write) => write.data?.includes(onClipboard.text.split('\n')[1] ?? '')), 'the key is written to no file, even for a moment');
+    assert.ok(keyedWrites.length > 0, 'the record sees the writes the other steps make');
+    assert.equal(writes.length, keyedWrites.length, 'the key step writes nothing to disk and makes no folder');
     assert.ok(out.includes('◇  cloud signing key for ExampleBot'));
     assert.equal(byHand(out)[0], PASTE, 'the paste comes first, while the clipboard holds it');
     assert.ok(!byHand(out).includes(KEY_BY_HAND));

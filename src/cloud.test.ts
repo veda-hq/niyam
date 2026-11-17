@@ -4,6 +4,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { noreplyEmail, pathsFor } from './agent.ts';
 import { realSys } from './sys.ts';
@@ -221,9 +222,17 @@ describe('cloudSetupSnippet', () => {
     after(() => rmSync(dir, { recursive: true, force: true }));
     const then = 'echo "repo setup ran"\nexit 0\n';
 
-    /** Runs the snippet, then the repo's own setup, from `cwd`, as the Setup script runs from the folder holding the clone. */
-    function setup(cwd: string) {
-      const result = spawnSync('bash', ['-c', `${snippet}${then}`], { cwd, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+    /** The homes the snippet searches, beside the folder it runs from. */
+    const HOMES = ' /home/*/*/"$file" /root/*/"$file"';
+    /**
+     * Runs the snippet, then the repo's own setup, from `cwd`, as the Setup script runs from the folder holding the
+     * clone. Its homes are under `machine`, a folder the test made, so it never finds a real clone, such as a cloud
+     * session's own at /home/user/<repo>, whose install would replace this machine's niyam (#428).
+     */
+    function setup(cwd: string, machine = join(dir, 'no-homes')) {
+      const hermetic = snippet.replace(HOMES, ` ${machine}/home/*/*/"$file" ${machine}/root/*/"$file"`);
+      assert.notEqual(hermetic, snippet, 'the snippet searches the homes the test moves');
+      const result = spawnSync('bash', ['-c', `${hermetic}${then}`], { cwd, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
       return { status: result.status, stdout: result.stdout, stderr: result.stderr };
     }
 
@@ -238,6 +247,16 @@ describe('cloudSetupSnippet', () => {
       const home = join(dir, 'home');
       clone(join(home, 'example-app'));
       assert.deepEqual(setup(home), { status: 0, stdout: RAN, stderr: '' });
+    });
+
+    it("runs it from a clone in a user's home or root's, as a cloud session's, wherever the Setup script starts", () => {
+      for (const home of ['home/user', 'root']) {
+        const machine = join(dir, `machine-${home.replace('/', '-')}`);
+        clone(join(machine, home, 'example-app'));
+        const elsewhere = join(machine, 'elsewhere');
+        mkdirSync(elsewhere);
+        assert.deepEqual(setup(elsewhere, machine), { status: 0, stdout: RAN, stderr: '' }, home);
+      }
     });
 
     it('runs it from the clone itself', () => {
@@ -275,8 +294,8 @@ describe('cloudSetupSnippet', () => {
   });
 });
 
-describe('cloudSigning, with real git and ssh-keygen', () => {
-  it("signs a real commit as the agent's key, over the platform's signing, with the agent as author and committer, and gives nothing for a key GitHub does not list or no key", async () => {
+describe('cloudSigning, with real git, and real ssh-keygen only to check it', () => {
+  it("signs a real commit as the agent's key with no ssh-keygen, over the platform's signing, with the agent as author and committer, and gives nothing for a key GitHub does not list or no key", async () => {
     const dir = mkdtempSync(join(tmpdir(), 'niyam-cloud-signing-'));
     try {
       await signsInClone(dir);
@@ -315,27 +334,37 @@ async function signsInClone(dir: string): Promise<void> {
     ] as const) run('git', ['config', key, value]);
   }
   const agentPub = readFileSync(`${dir}/agent.pub`, 'utf8');
+  // The hosted image has no ssh-keygen (#425): one that says it ran and fails stands first on PATH while niyam signs.
+  mkdirSync(`${dir}/no-keygen`);
+  writeFileSync(`${dir}/no-keygen/ssh-keygen`, `#!/bin/sh\necho "$@" >> "${dir}/keygen-ran"\nexit 127\n`, { mode: 0o755 });
+  const cloudEnv = { ...gitEnv, PATH: `${dir}/no-keygen:${gitEnv.PATH}` };
   const sysWith = (listed: string, key = readFileSync(`${dir}/agent`).toString('base64')): Sys => ({
     ...realSys(),
     home: `${dir}/home`,
-    env: { ...gitEnv, [SIGNING_KEY_VAR]: key },
+    env: { ...cloudEnv, [SIGNING_KEY_VAR]: key },
+    runtime: { node: process.execPath, cli: fileURLToPath(new URL('./cli.ts', import.meta.url)) },
     http: () => Promise.resolve({ status: 200, json: [{ key: listed }], headers: {} }),
   });
 
   const signing = await cloudSigning(sysWith(agentPub), `${dir}/repo`, AGENT, AGENT_ID);
   assert.ok('vars' in signing, JSON.stringify(signing));
-  const env = { ...gitEnv, ...Object.fromEntries(signing.vars) };
+  const env = { ...cloudEnv, ...Object.fromEntries(signing.vars) };
   run('git', ['commit', '-q', '--allow-empty', '-m', 'work'], env);
   const commit = run('git', ['cat-file', 'commit', 'HEAD'], env).stdout;
   assert.match(commit, /^author ExampleBot <42\+ExampleBot@users\.noreply\.github\.com> /m);
   assert.match(commit, /^committer ExampleBot <42\+ExampleBot@users\.noreply\.github\.com> /m);
+  assert.equal(existsSync(`${dir}/keygen-ran`), false, 'no ssh-keygen ran to sign or check the probe');
+  // Real ssh-keygen, as GitHub checks it, verifies what niyam's signer made.
   writeFileSync(`${dir}/agent-signers`, `${noreplyEmail(AGENT_ID, AGENT)} ${agentPub}`);
-  run('git', ['-c', `gpg.ssh.allowedSignersFile=${dir}/agent-signers`, 'verify-commit', 'HEAD'], env);
+  run('git', ['-c', 'gpg.ssh.program=ssh-keygen', '-c', `gpg.ssh.allowedSignersFile=${dir}/agent-signers`, 'verify-commit', 'HEAD']);
   assert.equal(lstatSync(pathsFor(`${dir}/home`, AGENT).key).mode & 0o777, 0o600, 'the key is private');
 
   const other = readFileSync(`${dir}/platform.pub`, 'utf8');
   assert.match(JSON.stringify(await cloudSigning(sysWith(other), `${dir}/repo`, AGENT, AGENT_ID)), /GitHub does not list NIYAM_SIGNING_KEY's public half as one of ExampleBot's signing keys/);
   assert.match(JSON.stringify(await cloudSigning(sysWith(agentPub, 'bm90IGEga2V5'), `${dir}/repo`, AGENT, AGENT_ID)), /NIYAM_SIGNING_KEY is not an OpenSSH private key/);
+  const platformKey = readFileSync(`${dir}/platform`).toString('base64');
+  const platformSigning = await cloudSigning(sysWith(agentPub, platformKey), `${dir}/repo`, AGENT, AGENT_ID);
+  assert.match(JSON.stringify(platformSigning), /GitHub does not list NIYAM_SIGNING_KEY's public half/, 'another key than the one GitHub lists');
 }
 
 describe('cloudSetup', () => {

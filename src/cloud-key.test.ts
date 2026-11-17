@@ -2,14 +2,12 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { CLOUD_KEY_TITLE, cloudKey, cloudKeyArgs, cloudKeyRefusal, makeCloudKey } from './cloud-key.ts';
-import { AGENT, FakeSys, PRIVATE_KEY, PUBLIC_KEY, TOKEN, capture } from './fake.test.ts';
+import { AGENT, FakeSys, TOKEN, capture, diskWrites, keyOnClipboard } from './fake.test.ts';
 import { run } from './run.ts';
 import type { ExecResult, HttpResult } from './types.ts';
 
 const LIST = 'https://api.github.com/user/ssh_signing_keys?per_page=100';
 const ADD = '/user/ssh_signing_keys';
-/** The clipboard's line: the fake's private key, base64, as the cloud environment's variable. */
-const LINE = `NIYAM_SIGNING_KEY=${Buffer.from(`${PRIVATE_KEY}\n`).toString('base64')}`;
 
 /**
  * The owner's Mac, set up by `machine` for the agent, whose list on GitHub
@@ -19,13 +17,14 @@ const LINE = `NIYAM_SIGNING_KEY=${Buffer.from(`${PRIVATE_KEY}\n`).toString('base
 function mac(others: { id: number; title: string; created_at: string }[] = []): FakeSys & { clipboard: string[] } {
   const sys = Object.assign(new FakeSys().ready(), { clipboard: [] as string[] });
   sys.answers = ['yes'];
-  let added = false;
+  let added: string | undefined;
   sys.route('GET', LIST, { status: 200, json: [{ id: 1, title: 'niyam signing', key: 'ssh-ed25519 AAAAmac', created_at: '2026-10-01T00:00:00Z' }, ...others] });
-  // The fake's ssh-keygen writes PUBLIC_KEY, so the Mac key is another body and the new one shows only once added.
-  sys.route('GET', ADD, () => ({ status: 200, json: added ? [{ key: 'ssh-ed25519 AAAAmac' }, { key: PUBLIC_KEY }] : [{ key: 'ssh-ed25519 AAAAmac' }] }));
-  sys.route('POST', ADD, () => {
-    added = true;
-    return { status: 201, json: { id: 99, title: CLOUD_KEY_TITLE, key: PUBLIC_KEY } };
+  // The new key shows in the list only once it is added.
+  sys.route('GET', ADD, () => ({ status: 200, json: [{ key: 'ssh-ed25519 AAAAmac' }, ...(added ? [{ key: added }] : [])] }));
+  sys.handlers.push((method, url, body) => {
+    if (method !== 'POST' || url !== `https://api.github.com${ADD}`) return undefined;
+    added = (body as { key: string }).key;
+    return { status: 201, json: { id: 99, title: CLOUD_KEY_TITLE, key: added } };
   });
   sys.route('DELETE', `${ADD}/99`, { status: 204, json: null });
   sys.execOverride = ({ command, input }): ExecResult | undefined => {
@@ -42,27 +41,34 @@ async function key(sys: FakeSys, args: string[] = []): Promise<{ code: number; o
 }
 
 describe('cloud-key', () => {
-  it('registers a new key as the agent, puts it on the clipboard as the variable, and deletes the files', async () => {
+  it('makes a new key in memory, registers it as the agent, and puts it on the clipboard as the variable, writing no file (#437)', async () => {
     const sys = mac();
+    const writes = diskWrites(sys);
     const { code, out, err } = await key(sys);
     assert.equal(code, 0, err.join('\n'));
     assert.deepEqual(sys.chosen, ['Go ahead?']);
-    const made = sys.calls.find((call) => call.command === 'ssh-keygen');
-    assert.deepEqual(made?.args, ['-q', '-t', 'ed25519', '-C', 'ExampleBot cloud signing', '-N', '', '-f', '/tmp/niyam-1/key']);
+    assert.ok(!sys.calls.some((call) => call.command === 'ssh-keygen'), 'no ssh-keygen');
+    assert.deepEqual(writes, [], 'nothing written to disk at any point, the key included, nor any folder made');
+    const onClipboard = keyOnClipboard(sys.clipboard[0]);
+    assert.ok(!('problem' in onClipboard), JSON.stringify(onClipboard));
+    assert.equal(sys.clipboard.length, 1);
     const posted = sys.requests.find((request) => request.method === 'POST');
-    assert.deepEqual(posted?.body, { title: CLOUD_KEY_TITLE, key: PUBLIC_KEY });
+    assert.deepEqual(posted?.body, { title: CLOUD_KEY_TITLE, key: `${onClipboard.publicLine} ExampleBot cloud signing` }, "the clipboard's key is the one registered");
     assert.equal(posted?.token, TOKEN, "the agent's stored token");
-    assert.deepEqual(sys.clipboard, [LINE]);
-    assert.ok(!out.join('\n').includes(Buffer.from(PRIVATE_KEY).toString('base64')) && !out.join('\n').includes(PRIVATE_KEY), 'the key is never printed');
-    assert.ok(sys.removed.includes('/tmp/niyam-1'));
-    assert.ok(![...sys.files.keys()].some((path) => path.startsWith('/tmp/niyam-1')), 'no key file left');
+    assert.ok(onClipboard.text.includes('OPENSSH PRIVATE KEY'));
+    const printed = out.join('\n');
+    assert.ok(!printed.includes(onClipboard.text.split('\n')[1] ?? '') && !printed.includes((sys.clipboard[0] ?? '').slice(20, 60)), 'the key is never printed');
     assert.deepEqual(out.slice(2), [
       `✓ registered as ExampleBot's signing key "${CLOUD_KEY_TITLE}" (id 99)`,
       '✓ NIYAM_SIGNING_KEY=… is on the clipboard',
       "  Paste it as one line into the cloud environment's variables: https://claude.ai/code → the environment's settings.",
       "  A new session there makes ExampleBot's commits its own; its first niyam line says so.",
-      '✓ deleted the key files',
     ]);
+    const again = mac();
+    assert.equal((await key(again)).code, 0);
+    assert.equal(again.clipboard.length, 1);
+    assert.ok(!('problem' in keyOnClipboard(again.clipboard[0])));
+    assert.notEqual(again.clipboard[0], sys.clipboard[0], 'a new key each run');
   });
 
   it("names the agent's other cloud signing keys to delete once unused, deleting none", async () => {
@@ -132,13 +138,9 @@ describe('cloud-key', () => {
     stuck.route('GET', ADD, { status: 200, json: [] });
     stuck.route('DELETE', `${ADD}/99`, { status: 500, json: null });
     assert.ok((await key(stuck)).out.includes('✗ GitHub does not list it, and deleting the key from GitHub again failed (HTTP 500) → delete signing key 99 at https://github.com/settings/keys'));
-    for (const sys of [unlisted, full, stuck]) assert.ok(sys.removed.includes('/tmp/niyam-1'), 'the files go whatever happened');
   });
 
-  it('says what failed when ssh-keygen or the registration fails, with nothing on the clipboard', async () => {
-    const broken = mac();
-    broken.execOverride = ({ command }) => (command === 'ssh-keygen' ? { code: 1, stdout: '', stderr: 'no space' } : undefined);
-    assert.ok((await key(broken)).out.includes('✗ ssh-keygen failed: no space'));
+  it('says what failed when the registration fails, with nothing on the clipboard', async () => {
     const refused = mac();
     refused.route('POST', ADD, { status: 422, json: { message: 'key is already in use' } });
     const { code, out } = await key(refused);
@@ -147,7 +149,7 @@ describe('cloud-key', () => {
     assert.deepEqual(refused.clipboard, []);
   });
 
-  it('removes the files at a Ctrl-C, deleting the key from GitHub again, and fails, naming the folder, when they cannot be removed', async () => {
+  it('deletes the key from GitHub again at a Ctrl-C once it is registered, with nothing on the clipboard', async () => {
     const sys = mac();
     const http = sys.http.bind(sys);
     sys.http = (url, options): Promise<HttpResult> => {
@@ -156,29 +158,10 @@ describe('cloud-key', () => {
     };
     const late = await key(sys);
     assert.equal(late.code, 130);
-    assert.ok(sys.removed.includes('/tmp/niyam-1'), 'the Ctrl-C handler removed the folder');
     assert.ok(late.out.includes('✗ stopped by Ctrl-C, so the key was deleted from GitHub again; nothing is on the clipboard'));
+    assert.ok(sys.requests.some((request) => request.method === 'DELETE' && request.url.endsWith('/user/ssh_signing_keys/99')));
     assert.deepEqual(sys.clipboard, []);
-    const early = mac();
-    early.execOverride = ({ command, args }) => {
-      if (command !== 'ssh-keygen') return undefined;
-      early.files.set(args.at(-1) ?? '', PRIVATE_KEY);
-      early.files.set(`${args.at(-1) ?? ''}.pub`, PUBLIC_KEY);
-      early.interrupt();
-      return { code: 0, stdout: '', stderr: '' };
-    };
-    const first = await key(early);
-    assert.equal(first.code, 130);
-    assert.ok(first.out.includes('✗ stopped by Ctrl-C; nothing registered, and nothing on the clipboard'));
-    assert.ok(!early.requests.some((request) => request.method === 'POST'));
-    const stuck = mac();
-    stuck.remove = (path) => {
-      stuck.removed.push(path);
-    };
-    stuck.files.set('/tmp/niyam-1', '');
-    const { code, out } = await key(stuck);
-    assert.equal(code, 1);
-    assert.equal(out.at(-1), '✗ could not delete /tmp/niyam-1, which holds the private key → rm -rf /tmp/niyam-1');
+    assert.deepEqual(sys.interrupts, [], 'its Ctrl-C handler is off again');
   });
 
   it("shares with onboard why it refuses, and its making of the key, which leaves the paste to onboard's own words (#417)", async () => {
@@ -194,9 +177,9 @@ describe('cloud-key', () => {
     const sys = mac();
     const { io, out } = capture();
     assert.equal(await makeCloudKey(sys, io, AGENT, TOKEN), 0);
-    assert.deepEqual(sys.clipboard, [LINE]);
+    assert.ok(!('problem' in keyOnClipboard(sys.clipboard[0])));
     assert.deepEqual(sys.chosen, [], 'asks nothing');
-    assert.deepEqual(out, [`✓ registered as ExampleBot's signing key "${CLOUD_KEY_TITLE}" (id 99)`, '✓ NIYAM_SIGNING_KEY=… is on the clipboard', '✓ deleted the key files']);
+    assert.deepEqual(out, [`✓ registered as ExampleBot's signing key "${CLOUD_KEY_TITLE}" (id 99)`, '✓ NIYAM_SIGNING_KEY=… is on the clipboard']);
   });
 
   it('reads its arguments, and refuses others as bad usage', async () => {

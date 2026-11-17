@@ -195,6 +195,33 @@ export function realSys(): Sys {
     open(url) {
       spawnSync('open', [url]);
     },
+    serve(handle) {
+      const server = http.createServer((request, response) => {
+        const answer = (status: number, headers: Record<string, string> = {}, body = ''): void => {
+          response.writeHead(status, { 'cache-control': 'no-store', ...headers });
+          response.end(body);
+        };
+        if (request.method !== 'GET') return answer(405, { allow: 'GET' });
+        const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+        handle({ path: url.pathname, query: Object.fromEntries(url.searchParams) }).then(
+          ({ status, headers, body }) => answer(status, headers, body),
+          () => answer(500),
+        );
+      });
+      return new Promise((done, fail) => {
+        server.once('error', fail);
+        server.listen(0, '127.0.0.1', () => {
+          const { port } = server.address() as { port: number };
+          done({
+            port,
+            close() {
+              server.closeAllConnections();
+              server.close();
+            },
+          });
+        });
+      });
+    },
     onInterrupt(handler) {
       process.on('SIGINT', handler);
       return () => {

@@ -21,6 +21,8 @@ import {
   tokenInfo,
 } from './agent.ts';
 import { setUpBoard } from './board.ts';
+import { BOARD_SECRETS, boardAppSteps, setUpBoardApp } from './board-app.ts';
+import { agentSession } from './push-identity.ts';
 import { type TypesPlan, typesDetail, typesLines, typesPlan } from './issue-types.ts';
 import { type OwnerToken, asOwner, isOrganisation, ownerScopes, signInOnce } from './owner-login.ts';
 import { appendToArray, removeElements, replaceValues, setMember } from './jsonedit.ts';
@@ -48,7 +50,7 @@ import { UPGRADE } from './upgrade.ts';
 import { isNewer, packageVersion } from './version.ts';
 import type { Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
-import { type Item, type Paint, closing, heading, painter, planLines, runStep } from './layout.ts';
+import { type Item, type Paint, byHandLines, closing, heading, painter, planLines, runStep } from './layout.ts';
 
 /** Where claude.ai connects the GitHub account its cloud sessions and routines work as. */
 export const CLAUDE_CODE_WEB = 'https://claude.ai/code';
@@ -258,13 +260,39 @@ export const AUTO_FIX_RULES = ['mcp__ccd_pr__bind_pr', 'mcp__ccd_pr__get_status'
 const PR_SERVER_RULES = ['mcp__ccd_pr', 'mcp__ccd_pr__*'];
 
 /**
- * Which of AUTO_FIX_RULES a settings file's `permissions.allow` lacks, in
- * their order: none when it allows the whole server.
+ * The permission rules that let agent sessions publish the claude.ai page
+ * every ask to the owner links (`Needs you:`, `Proposal:`, `niyam propose
+ * --page`): a new page, one from files, and a change to one. Without them
+ * the auto-mode classifier refuses the calls as communication. A new page
+ * is private to its owner, but a republish (`publish_version` or
+ * `edit_version` with a slug) to a page already shared with an organisation
+ * or the public changes what its readers see, with no prompt: a cost the
+ * owner accepted on veda-hq/niyam#432. Claude Code skips an `mcp__` allow
+ * rule with arguments, so no rule here can limit them to private pages.
  */
-export function missingAutoFixRules(settings: unknown): string[] {
+export const ARTIFACT_RULES = ['mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__edit_version'] as const;
+
+/** The rules that allow every tool of the artifacts server, ARTIFACT_RULES among them. */
+const ARTIFACT_SERVER_RULES = ['mcp__claude-artifacts', 'mcp__claude-artifacts__*'];
+
+/**
+ * Which of `rules` a settings file's `permissions.allow` lacks, in their
+ * order: none when it allows the whole server, by one of `server`.
+ */
+function missingRules(settings: unknown, rules: readonly string[], server: string[]): string[] {
   const allow = (settings as { permissions?: { allow?: unknown } } | null)?.permissions?.allow;
-  if (Array.isArray(allow) && allow.some((rule) => PR_SERVER_RULES.includes(rule as string))) return [];
-  return AUTO_FIX_RULES.filter((rule) => !Array.isArray(allow) || !allow.includes(rule));
+  if (Array.isArray(allow) && allow.some((rule) => server.includes(rule as string))) return [];
+  return rules.filter((rule) => !Array.isArray(allow) || !allow.includes(rule));
+}
+
+/** Which of AUTO_FIX_RULES a settings file's `permissions.allow` lacks. */
+export function missingAutoFixRules(settings: unknown): string[] {
+  return missingRules(settings, AUTO_FIX_RULES, PR_SERVER_RULES);
+}
+
+/** Which of ARTIFACT_RULES a settings file's `permissions.allow` lacks. */
+export function missingArtifactRules(settings: unknown): string[] {
+  return missingRules(settings, ARTIFACT_RULES, ARTIFACT_SERVER_RULES);
 }
 
 /** The hook commands older releases wrote, which onboard replaces with this release's. */
@@ -509,27 +537,8 @@ const FIGMA_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOK
 /** The secrets every job passed before P-23, whether figma was on or not. */
 const OLDER_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}'];
 /** The board GitHub App's secrets, which the Slice started job makes its board token from (P-70). */
-export const BOARD_SECRETS = ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'] as const;
 const BOARD_SECRET_LINES = BOARD_SECRETS.map((name) => `      ${name}: \${{ secrets.${name} }}`);
-/** What each board app secret holds. */
-const BOARD_SECRET_HOLDS: Record<(typeof BOARD_SECRETS)[number], string> = { NIYAM_BOARD_APP_ID: 'client id', NIYAM_BOARD_APP_KEY: 'private key' };
-
-/**
- * The owner's steps, once per organization, to give `slug`'s Slice started
- * job the board app's token: make the app, install it, and set the secrets
- * `missing`. `unknown` when GitHub would not list the secrets, so they may be
- * set already.
- */
-export function boardAppSteps(slug: string, missing: readonly (typeof BOARD_SECRETS)[number][], unknown = false): string {
-  const org = slug.split('/')[0] as string;
-  const set = missing.map((name) => `its ${BOARD_SECRET_HOLDS[name]} as ${name}`).join(' and ');
-  return (
-    `${unknown ? `Unless ${slug} has the Actions secrets ${BOARD_SECRETS.join(' and ')} already, once` : 'Once'} for ${org}: ` +
-    `make a GitHub App with organization Projects read and write and repository Issues read at ${GITHUB_WEB}/organizations/${org}/settings/apps/new, ` +
-    `install it on ${slug}, and set ${set}, Actions secrets of the organization or of ${GITHUB_WEB}/${slug}/settings/secrets/actions. ` +
-    'Until then a slice moves to In Progress on the board only from a desktop push.'
-  );
-}
+export { BOARD_SECRETS, boardAppSteps };
 
 /** What the jobs pass the shared checks: the Figma secrets with figma on, and the board app's with board on. */
 export interface Passed {
@@ -972,7 +981,7 @@ export interface SarathiEdit {
 /**
  * The client's Claude Code settings with this release's hooks and lock: each
  * entry an older release wrote swapped where it stands, a missing one added,
- * the lock's variables set in `env`, and REVIEW_THREAD_RULE and AUTO_FIX_RULES allowed. Every edit is made in the text, so
+ * the lock's variables set in `env`, and REVIEW_THREAD_RULE, AUTO_FIX_RULES and ARTIFACT_RULES allowed. Every edit is made in the text, so
  * the rest of the file keeps its layout. Says what changed, for the question.
  *
  * Where the project keeps `.claude/sarathi.json` (`sarathiBefore`) and the
@@ -1116,8 +1125,14 @@ export function claudeSettings(before: string | undefined, sarathiBefore?: strin
     if (lacking.length > 0) {
       changes.push(`allow ${lacking.join(', ')} without a prompt, so agent sessions turn Auto-fix on for their own pull requests`);
     }
-    // One word for both, so the plan's line stays short.
-    if (review || renamed.replaced > 0 || lacking.length > 0) labels.push(!(review || renamed.replaced > 0) ? 'Auto-fix rules' : lacking.length === 0 ? 'review rule' : 'allow rules');
+    const unpublished = missingArtifactRules(parsed());
+    for (const rule of unpublished) text = appendToArray(text, ['permissions'], 'allow', rule);
+    if (unpublished.length > 0) {
+      changes.push(`allow ${unpublished.join(', ')} without a prompt, so agent sessions publish the page an ask to the owner links`);
+    }
+    // One group's own word, or one word for several, so the plan's line stays short.
+    const groups = [review || renamed.replaced > 0 ? 'review rule' : '', lacking.length > 0 ? 'Auto-fix rules' : '', unpublished.length > 0 ? 'artifact rules' : ''].filter(Boolean);
+    if (groups.length > 0) labels.push(groups.length === 1 ? groups[0]! : 'allow rules');
   } catch (error) {
     throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
   }
@@ -1574,7 +1589,24 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   if (workflowNeeded && passed.board && (await byOrganisation())) {
     const names = await secretNames(sys, slug, token);
     const missing = BOARD_SECRETS.filter((name) => !names?.includes(name));
-    if (missing.length > 0) {
+    // The app is made from a manifest in the owner's browser (P-72): a run with no one at the terminal, or an agent's
+    // or a cloud session, leaves it by hand.
+    const browser = sys.tty && !agentSession(sys) && sys.env.CLAUDE_CODE_REMOTE !== 'true';
+    if (missing.length > 0 && browser) {
+      // An organisation's app already made is shared with the repository with no click.
+      github.push({ label: 'board app', detail: 'two clicks in the browser, if it is new' });
+      steps.push({
+        label: 'board app',
+        owner: true,
+        async run(out, mine) {
+          const left = await setUpBoardApp(sys, out, slug, mine as string);
+          byHand.push(...left);
+          later.push(...left);
+          // fail-open: what GitHub refused, or a click that did not come, is left by hand; the run goes on.
+          return true;
+        },
+      });
+    } else if (missing.length > 0) {
       const steps = boardAppSteps(slug, missing, names === undefined);
       byHand.push(steps);
       later.push(steps);
@@ -1815,10 +1847,8 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
       byHand.push(keyByHand);
     }
   }
+  for (const line of byHandLines(paint, byHand)) io.out(line);
   io.out(closing(paint, `${!pullUrl ? 'Done; no file changes, so no pull request.' : merging ? `${pullUrl}  ${queue !== undefined ? 'the merge queue merges it' : 'merges itself'} when checks pass` : `Merge ${pullUrl}`}`));
-  io.out('');
-  io.out('By hand:');
-  for (const line of byHand) io.out(`  ${line}`);
   return exitCode;
 }
 
