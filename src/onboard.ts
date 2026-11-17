@@ -288,6 +288,8 @@ export interface RuleNeeds {
   leftOut: string[];
   /** The file's deny rules that override them, in the file's order. */
   deniedBy: string[];
+  /** Those of `deniedBy` that override a rule in `leftOut`, in the file's order. */
+  leftOutBy: string[];
 }
 
 /**
@@ -321,9 +323,11 @@ function ruleNeeds(settings: unknown, rules: readonly string[], server: string[]
   const bare = server[0]!;
   const deniedBy = deny.filter((by) => rules.some((rule) => deniesTool(by, rule, bare)));
   const denied = rules.filter((rule) => deny.some((by) => deniesTool(by, rule, bare)));
-  if (allow.some((rule) => server.includes(rule))) return { missing: [], denied, leftOut: [], deniedBy };
+  if (allow.some((rule) => server.includes(rule))) return { missing: [], denied, leftOut: [], deniedBy, leftOutBy: [] };
   const lacking = rules.filter((rule) => !allow.includes(rule));
-  return { missing: lacking.filter((rule) => !denied.includes(rule)), denied, leftOut: lacking.filter((rule) => denied.includes(rule)), deniedBy };
+  const leftOut = lacking.filter((rule) => denied.includes(rule));
+  const leftOutBy = deniedBy.filter((by) => leftOut.some((rule) => deniesTool(by, rule, bare)));
+  return { missing: lacking.filter((rule) => !denied.includes(rule)), denied, leftOut, deniedBy, leftOutBy };
 }
 
 /** Which of AUTO_FIX_RULES a settings file lacks, and which its deny rules override. */
@@ -343,7 +347,7 @@ export function artifactRuleNeeds(settings: unknown): RuleNeeds {
  */
 function deniedLines(needs: RuleNeeds, rules: readonly string[], group: string): string[] {
   if (needs.leftOut.length === 0) return [];
-  return [`${needs.leftOut.length === rules.length ? group : needs.leftOut.join(', ')} left out: ${HOOKS_PATH} denies ${needs.deniedBy.join(', ')}`];
+  return [`${needs.leftOut.length === rules.length ? group : needs.leftOut.join(', ')} left out: ${HOOKS_PATH} denies ${needs.leftOutBy.join(', ')}`];
 }
 
 /** The hook commands older releases wrote, which onboard replaces with this release's. */

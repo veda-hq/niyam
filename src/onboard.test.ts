@@ -778,6 +778,9 @@ describe('onboard', () => {
     const some = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files'], deny: ['mcp__claude-artifacts'] } }));
     assert.deepEqual(some.changes, []);
     assert.deepEqual(some.denied, ['mcp__claude-artifacts__publish_version, mcp__claude-artifacts__edit_version left out: .claude/settings.json denies mcp__claude-artifacts']);
+    // A deny behind a tool the file allows already is not named as a cause.
+    const causes = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files'], deny: ['mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__edit_version'] } }));
+    assert.deepEqual(causes.denied, ['mcp__claude-artifacts__edit_version left out: .claude/settings.json denies mcp__claude-artifacts__edit_version']);
     const whole = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts'], deny: ['mcp__claude-artifacts__edit_version'] } });
     assert.deepEqual(claudeSettings(whole), { text: whole, changes: [], labels: [] }, 'the whole server allowed: nothing would be added');
   });
