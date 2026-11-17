@@ -8,7 +8,7 @@ import { describe, it } from 'node:test';
 import { capture, openSshKey } from './fake.test.ts';
 import { run } from './run.ts';
 import { signerScript, sshSign } from './ssh-sign.ts';
-import { commitSignature, publicLine, readPrivateKey, signMessage, signatureProblem } from './sshsig.ts';
+import { commitSignature, newKey, privateKeyText, publicLine, readPrivateKey, signMessage, signatureProblem } from './sshsig.ts';
 
 /** Runs real ssh-keygen in `dir`, failing the test on a non-zero exit unless `fails`. */
 function keygen(dir: string, args: string[], input?: Buffer | string, fails = false): { stdout: string; stderr: string } {
@@ -62,6 +62,23 @@ describe('sshsig, against real ssh-keygen', () => {
       assert.equal(signatureProblem(theirs, message, 'file', publicLine(key)), 'it is for the namespace "git", not "file"');
       assert.equal(signatureProblem(theirs, message, 'git', openSshKey().publicLine), 'another key made it');
       assert.equal(signatureProblem('not one', message, 'git', publicLine(key)), 'it is not an SSH signature');
+    });
+  });
+
+  it('writes a key, made in memory, that ssh-keygen reads with its comment and signs with (#437)', () => {
+    inTemp((dir) => {
+      const key = newKey();
+      const text = privateKeyText(key, 'ExampleBot cloud signing');
+      assert.match(text, /^-----BEGIN OPENSSH PRIVATE KEY-----\n(?:.{70}\n)*.{1,70}\n-----END OPENSSH PRIVATE KEY-----\n$/);
+      writeFileSync(join(dir, 'made'), text, { mode: 0o600 });
+      assert.match(keygen(dir, ['-l', '-f', 'made']).stdout, /^256 SHA256:\S+ ExampleBot cloud signing \(ED25519\)\n$/);
+      assert.equal(keygen(dir, ['-y', '-f', 'made']).stdout.trim().split(' ').slice(0, 2).join(' '), publicLine(key));
+      const message = Buffer.from('payload\n');
+      writeFileSync(join(dir, 'message'), message);
+      keygen(dir, ['-Y', 'sign', '-n', 'git', '-f', 'made', 'message']);
+      assert.equal(signatureProblem(readFileSync(join(dir, 'message.sig'), 'utf8'), message, 'git', publicLine(key)), undefined);
+      assert.deepEqual(readPrivateKey(text), key);
+      assert.notDeepEqual(newKey().seed, key.seed, 'a new key each time');
     });
   });
 

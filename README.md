@@ -1389,12 +1389,11 @@ none (see Adopting above), so all that is left is the paste. To make one
 yourself, as when the line was lost, run `niyam cloud-key [agent]` in your own
 terminal on the Mac `niyam machine` set up for the agent (`--yes` skips its
 one question). One line serves every cloud environment the agent works in.
-`onboard` and `cloud-key` make the key alike, in four steps:
+`onboard` and `cloud-key` make the key alike, in three steps:
 
-- makes a new ed25519 key in a private temporary folder, for the agent's cloud sessions alone, apart from the Mac's signing key, so it can be revoked on its own;
+- makes a new ed25519 key in memory, with niyam's own code rather than `ssh-keygen`, never writing it to disk; it is for the agent's cloud sessions alone, apart from the Mac's signing key, so it can be revoked on its own;
 - registers it as the agent's signing key, titled `niyam cloud signing`, with the token `machine` stored, and checks GitHub lists it;
-- puts `NIYAM_SIGNING_KEY=<the private key, base64>` on the clipboard, never on the screen;
-- deletes the files, at a Ctrl-C too.
+- puts `NIYAM_SIGNING_KEY=<the private key, base64>` on the clipboard, never on the screen.
 
 Paste the line into the cloud environment's variables (https://claude.ai/code →
 the environment's settings). Claude Code has no API for them, so this step stays

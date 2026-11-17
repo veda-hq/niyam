@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto';
 
 import { errorDetail } from './error-detail.ts';
 
@@ -102,6 +102,33 @@ export function readPrivateKey(text: string): Ed25519Key | { problem: string } {
 /** The key's public half as a line of an authorized_keys file, with no comment. */
 export function publicLine(key: Pick<Ed25519Key, 'publicKey'>): string {
   return `${ED25519} ${publicBlob(key.publicKey).toString('base64')}`;
+}
+
+/** A new ed25519 key pair from Node's crypto, held in memory alone (#437). */
+export function newKey(): Ed25519Key {
+  const { privateKey } = generateKeyPairSync('ed25519');
+  const { d, x } = privateKey.export({ format: 'jwk' });
+  return { seed: Buffer.from(d as string, 'base64url'), publicKey: Buffer.from(x as string, 'base64url') };
+}
+
+function uint32(value: number): Buffer {
+  const bytes = Buffer.alloc(4);
+  bytes.writeUInt32BE(value);
+  return bytes;
+}
+
+/**
+ * `key` as an unencrypted OpenSSH private key file's text, as `ssh-keygen -N ''`
+ * writes one (PROTOCOL.key), with `comment`: what `readPrivateKey` and
+ * ssh-keygen read back.
+ */
+export function privateKeyText(key: Ed25519Key, comment: string): string {
+  const check = randomBytes(4);
+  const secret = Buffer.concat([check, check, field(ED25519), field(key.publicKey), field(Buffer.concat([key.seed, key.publicKey])), field(Buffer.from(comment, 'utf8'))]);
+  // Padded to the cipher's block size, 8 with none, by the bytes 1, 2, 3, … as OpenSSH pads it.
+  const padding = Buffer.from(Array.from({ length: (8 - (secret.length % 8)) % 8 }, (_, i) => i + 1));
+  const body = Buffer.concat([Buffer.from(KEY_MAGIC, 'latin1'), field('none'), field('none'), field(''), uint32(1), field(publicBlob(key.publicKey)), field(Buffer.concat([secret, padding]))]).toString('base64');
+  return `${PEM_BEGIN}\n${body.match(/.{1,70}/g)?.join('\n') ?? ''}\n${PEM_END}\n`;
 }
 
 function base64url(bytes: Buffer): string {
