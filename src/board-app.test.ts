@@ -103,6 +103,15 @@ describe('the board app', () => {
   describe('made from the manifest', () => {
     it('sets its client id and key as organization secrets for the repository alone, sends the browser to install it, and adds the repository to it', async () => {
       const { sys, browser, pair } = await noApp();
+      // Everything written to disk, kept though a file is removed after.
+      const written: string[] = [];
+      for (const method of ['write', 'append', 'replace'] as const) {
+        const original = sys[method].bind(sys);
+        sys[method] = (path: string, data: string, mode?: number) => {
+          written.push(path, data);
+          original(path, data, mode);
+        };
+      }
       const { io, out } = capture();
       assert.deepEqual(await setUpBoardApp(sys, io, SLUG, OWNER), []);
       assert.deepEqual(sys.opened, [`http://127.0.0.1:${FakeSys.PORT}/start`]);
@@ -118,7 +127,7 @@ describe('the board app', () => {
       assert.deepEqual([id.body.visibility, id.body.selected_repository_ids, id.body.key_id, id.token], ['selected', [REPO_ID], 'org-key', OWNER]);
       assert.ok(!JSON.stringify(sys.requests.map((r) => r.body)).includes('MIIexample'), 'the key never goes out in the clear');
       assert.ok(!out.join('\n').includes('MIIexample'), 'nor is it printed');
-      assert.ok(![...sys.files.values()].some((text) => text.includes('MIIexample')), 'nor written to disk');
+      assert.ok(![...sys.files.values(), ...written].some((text) => text.includes('MIIexample')), 'nor written to disk, even to a file removed after');
       assert.ok(sys.requests.some((r) => r.method === 'PUT' && r.url.endsWith(`/user/installations/91/repositories/${REPO_ID}`)));
       assert.deepEqual(out, [`✓ made the board app ${APP.slug} and set NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY, shared with ${SLUG}`, `✓ installed the board app on ${SLUG}`]);
     });
@@ -270,6 +279,7 @@ describe('the board app', () => {
     for (const { sys } of [shadowed, half]) {
       assert.deepEqual(sys.opened, [], 'no browser');
       assert.ok(!sys.requests.some((r) => r.method === 'PUT'), 'no secret changed');
+      assert.ok(!sys.requests.some((r) => r.method === 'POST'), 'no app made');
     }
   });
 

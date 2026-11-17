@@ -84,9 +84,9 @@ export const BY_HAND_WIDTH = 80;
 
 /**
  * `text` in lines of at most `width` characters, broken at spaces; a word
- * longer than that, such as a link, has a line of its own. It counts
- * characters, not a terminal's columns: the steps it wraps are niyam's own
- * English, links and names, with no wide characters.
+ * longer than that, such as a link, has a line of its own. `width` is a
+ * count of UTF-16 code units, not of a terminal's columns, so a line with
+ * wide characters (in a path or a name) can run past it.
  */
 export function wrap(text: string, width: number): string[] {
   const lines: string[] = [];
