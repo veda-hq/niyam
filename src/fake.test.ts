@@ -23,10 +23,36 @@ export const TOKEN = 'ghp_good';
  */
 export function keyOnClipboard(line: string | undefined): { text: string; publicLine: string } | { problem: string } {
   const [name, value] = (line ?? '').split(/=(.*)/s);
-  if (name !== 'NIYAM_SIGNING_KEY') return { problem: `the line sets ${name ?? 'nothing'}` };
+  if (name !== 'NIYAM_SIGNING_KEY') return { problem: `the line sets ${name || 'nothing'}` };
   const text = Buffer.from(value ?? '', 'base64').toString('utf8');
   const read = readPrivateKey(text);
   return 'problem' in read ? read : { text, publicLine: publicLine(read) };
+}
+
+/**
+ * Every write to the fake's disk from now on, removed later or not: each
+ * file written with what it held, and each folder made, a temporary one
+ * included. A check on the files left at the end misses a write undone.
+ */
+export function diskWrites(sys: FakeSys): { path: string; data?: string }[] {
+  const writes: { path: string; data?: string }[] = [];
+  const write = sys.write.bind(sys);
+  const mkdir = sys.mkdir.bind(sys);
+  const tempDir = sys.tempDir.bind(sys);
+  sys.write = (path, data, mode): void => {
+    writes.push({ path, data });
+    write(path, data, mode);
+  };
+  sys.mkdir = (path): void => {
+    writes.push({ path });
+    mkdir(path);
+  };
+  sys.tempDir = (prefix): string => {
+    const path = tempDir(prefix);
+    writes.push({ path });
+    return path;
+  };
+  return writes;
 }
 
 /**

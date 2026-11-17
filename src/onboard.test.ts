@@ -7,7 +7,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 
 import { BUILT_IN, Board, COPY_URL, OWNER_TOKEN, URL, repoJson, settledViews } from './fake-board.test.ts';
 import { FIELDS, ISSUE_TYPES, LABELS } from './board.ts';
-import { AGENT, AGENT_ID, FakeSys, HOME, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture, keyOnClipboard } from './fake.test.ts';
+import { AGENT, AGENT_ID, FakeSys, HOME, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture, diskWrites, keyOnClipboard } from './fake.test.ts';
 import { cloudRepoScript } from './cloud.ts';
 import { tarballName } from './names.ts';
 import { CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH } from './onboard-pull.ts';
@@ -2915,6 +2915,11 @@ describe("the agent's cloud signing key (#417)", () => {
 
   it('plans one for an agent with none, and makes it last, after the pull request, with the one yes', async () => {
     const sys = keyless();
+    const writes = diskWrites(sys);
+    // The same run for an agent that has its key, which makes none: the key step must add no write to disk.
+    const keyed = fresh();
+    const keyedWrites = diskWrites(keyed);
+    await run(keyed);
     const { code, out, err } = await run(sys);
     assert.deepEqual(err, []);
     assert.equal(code, 0);
@@ -2931,7 +2936,9 @@ describe("the agent's cloud signing key (#417)", () => {
     assert.equal(posted?.token, TOKEN, "as the agent, with its stored token");
     assert.ok(!out.join('\n').includes((sys.clipboard[0] ?? '').slice(20, 60)) && !out.join('\n').includes(onClipboard.text.split('\n')[1] ?? ''), 'the key is never printed');
     assert.ok(!sys.calls.some((call) => call.command === 'ssh-keygen' && call.args.includes('ExampleBot cloud signing')), 'made in memory, with no ssh-keygen (#437)');
-    assert.ok(![...sys.files.values()].some((text) => text.includes(onClipboard.text.split('\n')[1] ?? '')), 'the key is in no file');
+    assert.ok(!writes.some((write) => write.data?.includes(onClipboard.text.split('\n')[1] ?? '')), 'the key is written to no file, even for a moment');
+    assert.ok(keyedWrites.length > 0, 'the record sees the writes the other steps make');
+    assert.equal(writes.length, keyedWrites.length, 'the key step writes nothing to disk and makes no folder');
     assert.ok(out.includes('◇  cloud signing key for ExampleBot'));
     assert.equal(byHand(out)[0], PASTE, 'the paste comes first, while the clipboard holds it');
     assert.ok(!byHand(out).includes(KEY_BY_HAND));

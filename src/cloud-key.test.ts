@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { CLOUD_KEY_TITLE, cloudKey, cloudKeyArgs, cloudKeyRefusal, makeCloudKey } from './cloud-key.ts';
-import { AGENT, FakeSys, TOKEN, capture, keyOnClipboard } from './fake.test.ts';
+import { AGENT, FakeSys, TOKEN, capture, diskWrites, keyOnClipboard } from './fake.test.ts';
 import { run } from './run.ts';
 import type { ExecResult, HttpResult } from './types.ts';
 
@@ -43,13 +43,12 @@ async function key(sys: FakeSys, args: string[] = []): Promise<{ code: number; o
 describe('cloud-key', () => {
   it('makes a new key in memory, registers it as the agent, and puts it on the clipboard as the variable, writing no file (#437)', async () => {
     const sys = mac();
-    const files = new Map(sys.files);
+    const writes = diskWrites(sys);
     const { code, out, err } = await key(sys);
     assert.equal(code, 0, err.join('\n'));
     assert.deepEqual(sys.chosen, ['Go ahead?']);
     assert.ok(!sys.calls.some((call) => call.command === 'ssh-keygen'), 'no ssh-keygen');
-    assert.deepEqual(sys.files, files, 'no file written, the key included');
-    assert.deepEqual(sys.dirs, [], 'no folder made');
+    assert.deepEqual(writes, [], 'nothing written to disk at any point, the key included, nor any folder made');
     const onClipboard = keyOnClipboard(sys.clipboard[0]);
     assert.ok(!('problem' in onClipboard), JSON.stringify(onClipboard));
     assert.equal(sys.clipboard.length, 1);
@@ -66,7 +65,9 @@ describe('cloud-key', () => {
       "  A new session there makes ExampleBot's commits its own; its first niyam line says so.",
     ]);
     const again = mac();
-    await key(again);
+    assert.equal((await key(again)).code, 0);
+    assert.equal(again.clipboard.length, 1);
+    assert.ok(!('problem' in keyOnClipboard(again.clipboard[0])));
     assert.notEqual(again.clipboard[0], sys.clipboard[0], 'a new key each run');
   });
 
