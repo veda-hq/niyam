@@ -1,11 +1,11 @@
-import { API, account, agentFrom, checkToken, keyBody, signingKeys, tokenInfo } from './agent.ts';
+import { API, SETTINGS_PATH, account, agentFrom, checkToken, keyBody, signingKeys, tokenInfo } from './agent.ts';
 import { SIGNING_KEY_VAR } from './cloud.ts';
 import { CLAUDE_CODE_WEB } from './onboard.ts';
 import { agentSession } from './push-identity.ts';
 import { tokenStore, unsupported } from './token-store.ts';
 import type { Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
-import { newKey, privateKeyText, publicLine } from './sshsig.ts';
+import { type Ed25519Key, newKey, privateKeyText, publicLine } from './sshsig.ts';
 
 /** The title the cloud signing keys have on GitHub, so the agent's can be told apart from a Mac's. */
 export const CLOUD_KEY_TITLE = 'niyam cloud signing';
@@ -31,6 +31,8 @@ export interface Listed {
   id: number;
   title: string;
   created: string;
+  /** Its public half, "type body", as onboard pins it. */
+  key: string;
 }
 
 /**
@@ -83,7 +85,18 @@ export async function cloudKey(sys: Sys, io: Output, args: readonly string[] = [
       return 1;
     }
   }
-  return makeCloudKey(sys, io, agent, token, { others, paste: true });
+  const made = await makeCloudKey(sys, io, agent, token, { others, paste: true });
+  if (made === 0) io.out(`  ${repinLine(agent)}`);
+  return made;
+}
+
+/**
+ * What a key made outside onboard still needs: a cloud session checks the key
+ * against the ones the repo's settings pin, since its proxy cannot read the
+ * agent's list on GitHub (#447), and onboard writes the pin.
+ */
+export function repinLine(agent: string): string {
+  return `Then run niyam onboard in each repository ${agent} works in: it pins the key in ${SETTINGS_PATH}, which cloud sessions check it against.`;
 }
 
 /**
@@ -110,16 +123,23 @@ export function pasteLines(agent: string, where = "the cloud environment's"): st
  * one line, the key never printed. A Ctrl-C once it is registered deletes it
  * from GitHub again. `others` are the agent's cloud signing keys GitHub
  * already lists, named for the owner to delete once unused; `paste` says what
- * to do with the line, for a caller that does not say it itself. 0 once the
- * line is on the clipboard.
+ * to do with the line, for a caller that does not say it itself. `key` is
+ * one made already, as onboard makes it to pin it in the pull request before
+ * it is registered (#447). 0 once the line is on the clipboard.
  */
-export async function makeCloudKey(sys: Sys, io: Output, agent: string, token: string, { others = [], paste = false }: { others?: readonly Listed[]; paste?: boolean } = {}): Promise<number> {
+export async function makeCloudKey(
+  sys: Sys,
+  io: Output,
+  agent: string,
+  token: string,
+  { others = [], paste = false, key = newKey() }: { others?: readonly Listed[]; paste?: boolean; key?: Ed25519Key } = {},
+): Promise<number> {
   let interrupted = false;
   const off = sys.onInterrupt(() => {
     interrupted = true;
   });
   try {
-    return await makeAndRegister(sys, io, { agent, token, others, paste }, () => interrupted);
+    return await makeAndRegister(sys, io, { agent, token, others, paste, key }, () => interrupted);
   } finally {
     off();
   }
@@ -129,11 +149,10 @@ export async function makeCloudKey(sys: Sys, io: Output, agent: string, token: s
 async function makeAndRegister(
   sys: Sys,
   io: Output,
-  { agent, token, others, paste }: { agent: string; token: string; others: readonly Listed[]; paste: boolean },
+  { agent, token, others, paste, key }: { agent: string; token: string; others: readonly Listed[]; paste: boolean; key: Ed25519Key },
   interrupted: () => boolean,
 ): Promise<number> {
   const comment = `${agent} cloud signing`;
-  const key = newKey();
   const publicKey = `${publicLine(key)} ${comment}`;
   const line = `${SIGNING_KEY_VAR}=${Buffer.from(privateKeyText(key, comment)).toString('base64')}`;
   const posted = await sys.http(`${API}/user/ssh_signing_keys`, { method: 'POST', token, body: { title: CLOUD_KEY_TITLE, key: publicKey } });
@@ -191,8 +210,10 @@ export async function listedKeys(sys: Sys, agent: string, token: string): Promis
   if (status !== 200 || !Array.isArray(json)) return { problem: `GitHub answered HTTP ${status} when asked for ${agent}'s signing keys` };
   return {
     keys: json.flatMap((entry: unknown) => {
-      const { id, title, created_at: created } = (entry ?? {}) as { id?: unknown; title?: unknown; created_at?: unknown };
-      return typeof id === 'number' ? [{ id, title: typeof title === 'string' ? title : '', created: typeof created === 'string' ? created : '' }] : [];
+      const { id, title, created_at: created, key } = (entry ?? {}) as { id?: unknown; title?: unknown; created_at?: unknown; key?: unknown };
+      return typeof id === 'number'
+        ? [{ id, title: typeof title === 'string' ? title : '', created: typeof created === 'string' ? created : '', key: typeof key === 'string' ? keyBody(key) : '' }]
+        : [];
     }),
   };
 }

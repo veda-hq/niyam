@@ -2,6 +2,7 @@ import { AGENT_VAR, CLI, CONFIG_DIR, PRODUCT } from './names.ts';
 import {
   API,
   BASE_ENV,
+  CLOUD_SIGNING_KEYS,
   SETTINGS_PATH,
   account,
   agentHere,
@@ -18,6 +19,7 @@ import {
   repoAt,
   sameLogin,
   sessionEnv,
+  settingsIn,
   tokenInfo,
 } from './agent.ts';
 import { setUpBoard } from './board.ts';
@@ -43,6 +45,7 @@ import {
 } from './onboard-pull.ts';
 import { SIGNING_KEY_VAR, cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
 import { CLOUD_KEY_TITLE, cloudKeyRefusal, listedKeys, makeCloudKey, pasteLines } from './cloud-key.ts';
+import { newKey, publicLine } from './sshsig.ts';
 import { detail } from './doc-numbers.ts';
 import { tagOnMain } from './release-tag.ts';
 import { secretNames, setSecret } from './secrets.ts';
@@ -1723,7 +1726,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   // The agent's cloud signing key (#417) is the agent's, not the repository's: one line serves every cloud
   // environment it works in, so onboard makes one only when the agent's own list holds none, and the second repo
   // onboarded leaves it alone. Where cloud-key would refuse, the owner runs it instead.
-  const keyByHand = `Once for ${agent}: in your own terminal on your Mac, run niyam cloud-key ${agent}, and paste the line it puts on the clipboard into each Claude cloud environment's variables.`;
+  const keyByHand = `Once for ${agent}: in your own terminal on your Mac, run niyam cloud-key ${agent}, paste the line it puts on the clipboard into each Claude cloud environment's variables, then run niyam onboard here again, which pins the key in ${SETTINGS_PATH}.`;
   const cloudKeys = await listedKeys(sys, agent, token).catch((error: unknown) => {
     // fail-open: a list GitHub does not give is warned about below and makes no key.
     return { problem: detail(error) };
@@ -1736,6 +1739,33 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     else {
       cloud.push({ label: 'signing key', detail: `for ${agent}, on the clipboard` });
       makeKey = true;
+    }
+  }
+  // A cloud session's proxy cannot read the agent's signing keys (#447), so the settings pin its cloud signing keys
+  // as GitHub lists them now, with the one this run makes: made here, so the pull request pins it, and registered
+  // last, as before. One that then fails to register reaches no clipboard, so no environment holds it; a later run
+  // drops it once GitHub does not list it. A list GitHub does not give leaves the pin as it is.
+  const fresh = makeKey ? newKey() : undefined;
+  if (!('problem' in cloudKeys)) {
+    const keys = [...cloudKeys.keys.filter((one) => one.title === CLOUD_KEY_TITLE && one.key !== '').map((one) => one.key), ...(fresh ? [publicLine(fresh)] : [])];
+    const text = fileAt(SETTINGS_PATH);
+    let pins: Record<string, string[]> | undefined;
+    try {
+      pins = text === undefined ? undefined : { ...settingsIn(text).cloudSigningKeys };
+    } catch (error) {
+      // fail-open: the pin stays as it is, and the plan says why.
+      warnings.push(`cloud signing keys not pinned (${detail(error)})`);
+    }
+    if (text !== undefined && pins !== undefined) {
+      const name = Object.keys(pins).find((login) => sameLogin(login, agent)) ?? agent;
+      if (keys.join('\n') !== (pins[name] ?? []).join('\n')) {
+        if (keys.length > 0) pins[name] = keys;
+        else delete pins[name];
+        const what = keys.length > 0 ? `pin ${agent}'s cloud signing ${keys.length === 1 ? 'key' : 'keys'}, which cloud sessions check theirs against` : `drop ${agent}'s cloud signing keys, which GitHub no longer lists`;
+        // Written where it stands, the rest of the file as it is.
+        change(SETTINGS_PATH, setMember(text, [], CLOUD_SIGNING_KEYS, pins), what);
+        settingsItem(what);
+      }
     }
   }
   let pullUrl: string | undefined;
@@ -1833,7 +1863,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     let made = false;
     try {
       ({ ok: made } = await runStep(sys, io, paint, `cloud signing key for ${agent}`, async (out) => {
-        const code = await makeCloudKey(sys, out, agent, token);
+        const code = await makeCloudKey(sys, out, agent, token, fresh ? { key: fresh } : {});
         if (code === 130) exitCode = 130;
         return code === 0;
       }));
@@ -1843,7 +1873,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     }
     if (made) byHand.unshift(`Now: ${SIGNING_KEY_VAR}=… is on the clipboard. ${pasteLines(agent, "each Claude cloud environment's").join(' ')}`);
     else {
-      io.err(`onboard: ${agent} has no cloud signing key yet; everything before it is done`);
+      io.err(`onboard: ${agent} has no cloud signing key yet; everything before it is done, and no environment holds the key the pull request pins`);
       byHand.push(keyByHand);
     }
   }

@@ -446,14 +446,18 @@ on any platform without a token store, `niyam env` prints the lock alone.
    GitHub as the agent, once per claude.ai account. When the agent has no
    signing key on GitHub titled `niyam cloud signing`, the plan's Claude
    cloud group also lists one, "signing key  for AGENT, on the clipboard":
-   as its last step, after the pull request opens, `onboard` makes it as
+   as its last step, after the pull request opens, `onboard` registers it as
    `niyam cloud-key` does (below), and "By hand:" starts with the paste
-   into each cloud environment's variables. The key is the agent's, not the
-   repository's, so onboarding a second repository finds it and says nothing
-   about it. A key that fails only warns, leaving the pull request and every
-   step before it in place, and "By hand:" names `niyam cloud-key <agent>`
-   instead; so does a run where `cloud-key` would refuse, in a Claude Code
-   or cloud session. A dry run plans no key. Where the
+   into each cloud environment's variables. It makes the key in memory when
+   it plans, so the pull request's `.github/niyam.json` pins the key's
+   public half among the agent's cloud signing keys, which cloud sessions
+   check theirs against (see Claude cloud sessions below). The key is the
+   agent's, not the repository's, so onboarding a second repository finds
+   it, pins it there and makes none. A key that fails only warns, leaving
+   the pull request and every step before it in place; no environment holds
+   the key it pins. "By hand:" then names `niyam cloud-key <agent>` and
+   another `onboard` run instead; so does a run where `cloud-key` would
+   refuse, in a Claude Code or cloud session. A dry run plans no key. Where the
    repo still has `.github/process-rules/cloud-setup.sh`, which releases up
    to 0.6.10 wrote beside it, the pull request deletes it, but only where it
    leaves `.github/niyam/cloud-setup.sh` (one the run could not write, as
@@ -1375,7 +1379,7 @@ address and signed with that key.
 Once `session-start` confirms the login as the agent, it does four things:
 
 - reads the account's id from the same GitHub answer;
-- writes the key to the agent's key file (`~/.ssh/<agent>_signing`, mode 0600) and checks GitHub lists its public half as one of the agent's signing keys;
+- checks its public half is one of the agent's cloud signing keys the repo's `.github/niyam.json` pins, then writes the key to the agent's key file (`~/.ssh/<agent>_signing`, mode 0600);
 - makes a probe commit object, on no branch, with exactly the settings the session will get;
 - checks that its signature verifies as that key's.
 
@@ -1390,20 +1394,43 @@ makes. `niyam ssh-sign` only signs, so `git log --show-signature` in the
 session cannot check signatures; GitHub does. It also unsets the key's
 variable there, so commands do not carry it in their environment.
 
+**The pin.** A cloud session cannot ask GitHub which signing keys the agent
+has: the proxy refuses every `users/…` path, and the session's API calls
+can reach only the repositories attached to it (veda-hq/niyam#447). So
+`onboard`, run on your Mac, asks GitHub instead. It writes the agent's
+cloud signing keys, those titled `niyam cloud signing`, into the settings
+as `"cloudSigningKeys"`, by agent, without their comments:
+
+```json
+{ "owner": "example-owner", "agent": "ExampleBot",
+  "cloudSigningKeys": { "ExampleBot": ["ssh-ed25519 AAAA…"] } }
+```
+
+`session-start` checks the session's key against that list. Each
+`onboard` run writes it again from GitHub's list, so a key made or deleted
+since then needs an `onboard` run in each repository the agent works in.
+The plan names the change ("pin AGENT's cloud signing key"), and a run
+whose list GitHub does not give leaves the pin as it is. A key the pin
+still names after it was deleted from GitHub is caught only after the
+push: its commits fail PR identity until `onboard` runs again.
+
 When any step fails, nothing is set and the commits stay Claude's, which PR
 identity passes. Steps that can fail: no key, one that is not an OpenSSH
-private key or not an ed25519 one with no passphrase, a key GitHub does not
-list, a lookup the proxy refuses, or a probe that does not verify. The
+private key or not an ed25519 one with no passphrase, settings that pin no
+cloud signing key for the agent, a key they do not pin, or a probe that
+does not verify. The
 session's line says why and the session works on as the agent. A commit
 claiming the agent without the agent's signature would fail PR identity, so
 it is all or nothing. Nothing is installed: signing needs no `ssh-keygen`, no
 network and no root, so no Setup script line either.
 
 `niyam onboard` makes the key the first time it runs for an agent that has
-none (see Adopting above), so all that is left is the paste. To make one
-yourself, as when the line was lost, run `niyam cloud-key [agent]` in your own
-terminal on the Mac `niyam machine` set up for the agent (`--yes` skips its
-one question). One line serves every cloud environment the agent works in.
+none (see Adopting above), and its pull request pins it, so all that is
+left is the paste. To make one yourself, as when the line was lost, run
+`niyam cloud-key [agent]` in your own terminal on the Mac `niyam machine`
+set up for the agent (`--yes` skips its one question), then `niyam onboard`
+in each repository the agent works in, which pins it; `cloud-key` says so.
+One line serves every cloud environment the agent works in.
 `onboard` and `cloud-key` make the key alike, in three steps:
 
 - makes a new ed25519 key in memory, with niyam's own code rather than `ssh-keygen`, never writing it to disk; it is for the agent's cloud sessions alone, apart from the Mac's signing key, so it can be revoked on its own;
@@ -1428,7 +1455,8 @@ command its sessions run. Claude's settings warn against keeping secrets
 there. Whoever holds the key can sign commits that GitHub shows as Verified
 for the agent, though pushing still needs the agent's GitHub connection,
 which PR identity checks. To revoke the key, delete it from the agent's
-signing keys.
+signing keys, then run `niyam onboard` in each repository, which drops it
+from the pin.
 
 **Trailers and hooks.** The cloud image's git config sets Claude's identity
 and signing and nothing else: no `core.hooksPath`, no hooks, no trailers.
