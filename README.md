@@ -388,16 +388,27 @@ on any platform without a token store, `niyam env` prints the lock alone.
    only a sign-in could tell which of the settings' owners runs it, a dry
    run asks you to name the owner. Without a terminal, `onboard` refuses
    unless given `--yes` or `--dry-run`. After the yes it shows one line per step, a
-   spinner while it works, and ends with the pull request and a short "By
-   hand:" list of what GitHub's and Claude's APIs cannot do. Each line there
-   is one sentence on standard output saying the whole step: how often (now,
-   once for the repository, once per claude.ai account), what to do, and its
-   link. A first onboarding with the review routine ends:
+   spinner while it works, then a "By hand" group of what GitHub's and
+   Claude's APIs cannot do, and last the pull request. Each step there is
+   numbered and wrapped to 80 characters, where a link too long for a line
+   takes one of its own and may run past it. Each says the whole step: how
+   often (now, once for the repository, once per claude.ai account), what
+   to do, and its link where it has one. A first onboarding with the review
+   routine ends:
 
    ```
-   By hand:
-     Once for owner/repo: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as AGENT and the prompt below the line in https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
-     Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as AGENT (or change it at https://claude.ai/customize/connectors); skip it if done.
+   │
+   ◇  By hand
+   │    1. Once for owner/repo: in Claude Code, run /schedule and create a
+   │       weekly routine on it, with claude.ai's GitHub connected as AGENT and
+   │       the prompt below the line in
+   │       https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
+   │
+   │    2. Once per claude.ai account: sign in at https://claude.ai/code and
+   │       connect GitHub as AGENT (or change it at
+   │       https://claude.ai/customize/connectors); skip it if done.
+   │
+   └  https://github.com/owner/repo/pull/12  merges itself when checks pass
    ```
 
    It writes `.github/niyam.json`, adds to `.claude/settings.json`
@@ -629,9 +640,18 @@ workflow passes it the app's client id and private key as the
 `NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY` secrets. With `board` on,
 onboard writes them under the `niyam` job's secrets, the pull request job
 alone. Where the repository lacks either, its own or its organization's,
-onboard's by-hand list and its pull request say how to set up the app once
-per organization: organization Projects read and write and repository Issues
-read, installed on the repository. `niyam doctor` marks a missing one ▲.
+and the owner runs onboard at their own terminal, onboard sets the app up as
+the owner. If the organization has the app's secrets, onboard shares them,
+and the app's installation, with the repository, with no click. If it does
+not, the browser opens on GitHub's new-app page with the app filled in
+(`niyam board <org>`, organization Projects read and write and Issues read,
+no webhook). The owner clicks Create; onboard gets the client id and private
+key back from GitHub on 127.0.0.1 and sets them as organization secrets
+visible to the repository. The browser goes on to the install page, and the
+owner clicks Install. The key is never printed or written to disk. Without a
+terminal, in an agent's or a cloud session, or where GitHub refuses a step,
+the by-hand list and the pull request say what is left. `niyam doctor` marks
+a missing secret ▲.
 Without them, the job says so in one line and passes, as it does when the
 board refuses: the board never fails a pull request. When a pull request naming a slice merges into the default branch,
 the shared workflow comments on the slice, linking the pull request, and

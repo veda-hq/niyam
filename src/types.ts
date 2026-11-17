@@ -19,6 +19,19 @@ export interface HttpResult {
   headers?: Record<string, string>;
 }
 
+/** A GET a page served on 127.0.0.1 got: its path, and its query by name. */
+export interface ServeRequest {
+  path: string;
+  query: Record<string, string>;
+}
+
+/** The answer to a ServeRequest. */
+export interface ServeAnswer {
+  status: number;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
 /** Everything a command touches outside its own memory; tests pass a fake. */
 export interface Sys {
   env: Readonly<Record<string, string | undefined>>;
@@ -104,6 +117,11 @@ export interface Sys {
     line: (text: string) => void,
   ): Promise<number>;
   open(url: string): void;
+  /**
+   * Serves `handle` over HTTP on 127.0.0.1 alone, at a port the system picks,
+   * until close(): each GET's path and query, answered as `handle` says.
+   */
+  serve(handle: (request: ServeRequest) => Promise<ServeAnswer>): Promise<{ port: number; close(): void }>;
   /**
    * Calls `handler` at each Ctrl-C (SIGINT) instead of the CLI ending there,
    * until the returned function takes it off.

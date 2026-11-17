@@ -216,7 +216,7 @@ async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Fi
     const missing = BOARD_SECRETS.filter((name) => !names.includes(name));
     return missing.length === 0
       ? [{ mark: '✓', text: 'board app secrets' }]
-      : [{ mark: '▲', text: `no ${missing.join(' or ')} secret, so a slice moves to In Progress only from a desktop push`, fix: `${ONBOARD}, which says how to set up the board app` }];
+      : [{ mark: '▲', text: `no ${missing.join(' or ')} secret, so a slice moves to In Progress only from a desktop push`, fix: `${ONBOARD} at your own terminal, which sets up the board app` }];
   } catch (error) {
     // fail-open: a read that failed is the one ▲ here, as a missing secret breaks nothing.
     return [{ mark: '▲', text: `board app secrets: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
