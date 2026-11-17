@@ -1,5 +1,5 @@
 #!/bin/bash
-# niyam 0.6.26 for Claude cloud sessions: Node 24.21.0 and the CLI, as niyam on PATH.
+# niyam 0.7.0 for Claude cloud sessions: Node 24.21.0 and the CLI, as niyam on PATH.
 # niyam onboard writes this file at the version .github/workflows/niyam.yml pins, and writes it again on every run.
 # The SessionStart hook runs it when a session has no niyam, session-start when it has another release,
 # and the Setup script when it holds what niyam cloud-setup prints. Change it by running onboard, not by hand.
@@ -15,9 +15,9 @@ if [ "$("$bin" --version 2>/dev/null)" != "v$node" ]; then
   tar -xJ -f "$dir/node.tar.xz" -C "$dir"
   rm "$dir/node.tar.xz"
 fi
-curl -fsSL --connect-timeout 10 --max-time 120 -o "$dir/niyam.tgz" https://github.com/veda-hq/niyam/releases/download/v0.6.26/veda-hq-niyam-0.6.26.tgz
-echo "82791b169a2945134033987ae48c5731efbd883c3cedb54dd398ef0b2f40f2bd  $dir/niyam.tgz" | sha256sum -c --quiet -
-cli="$dir/cli-0.6.26"
+curl -fsSL --connect-timeout 10 --max-time 120 -o "$dir/niyam.tgz" https://github.com/veda-hq/niyam/releases/download/v0.7.0/veda-hq-niyam-0.7.0.tgz
+echo "7b58971f100bbdb5f1938a20e7e67bb20da60d0c4544353f7103f3abd09a9d98  $dir/niyam.tgz" | sha256sum -c --quiet -
+cli="$dir/cli-0.7.0"
 rm -rf "$cli"
 mkdir -p "$cli"
 tar -xz -f "$dir/niyam.tgz" -C "$cli"

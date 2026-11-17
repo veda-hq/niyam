@@ -6,5 +6,10 @@
     "pr-identity",
     "board",
     "work-rules"
-  ]
+  ],
+  "cloudSigningKeys": {
+    "AthyaBot": [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINULYjqpKxnHXIgB0hjzOG9lYoZN+hCX8wbpE9AYCHXU"
+    ]
+  }
 }
