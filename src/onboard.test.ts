@@ -215,7 +215,9 @@ describe('onboard', () => {
       '│    2. Once for example-org/example-app: in Claude Code, run /schedule and',
       "│       create a weekly routine on it, with claude.ai's GitHub connected as",
       '│       ExampleBot and the prompt below the line in',
-      `│       https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
+      // GitHub lists no verdict by the agent here, so the routine may not run yet.
+      `│       https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md; skip it`,
+      '│       if done.',
       '│',
       '│    3. Once per claude.ai account: sign in at https://claude.ai/code and',
       '│       connect GitHub as ExampleBot (or change it at',
@@ -282,6 +284,41 @@ describe('onboard', () => {
     assert.deepEqual(sys.calls.filter((c) => c.command === 'rm').at(-1)?.args, ['-rf', '/tmp/verify']);
     const reads = sys.requests.filter((r) => r.url === `https://api.github.com${REPO}`);
     assert.equal(reads[0]?.token, TOKEN, 'checks access as the agent');
+  });
+
+  const TRACE = `${REPO}/issues/comments?since=2026-10-09T12:00:00.000Z&sort=created&direction=desc&per_page=100&page=1`;
+
+  it('leaves the review routine off the by-hand steps once the agent has given a verdict on the repository', async () => {
+    const sys = fresh();
+    sys.route('GET', TRACE, {
+      status: 200,
+      json: [{ body: 'Held for example-owner: it spends money', user: { login: 'examplebot' }, issue_url: `https://api.github.com${REPO}/issues/3045`, created_at: '2026-10-27T06:00:00Z' }],
+    });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(!out.some((line) => line.includes('/schedule') || line.includes('routines/review.md')), out.join('\n'));
+    assert.ok(out.includes('│    2. Once per claude.ai account: sign in at https://claude.ai/code and'), out.join('\n'));
+    const pull = sys.requests.find((r) => r.method === 'POST' && r.url.endsWith(`${REPO}/pulls`));
+    const { body } = pull?.body as { body: string };
+    assert.ok(!body.includes('The review routine'), body);
+    const from = body.indexOf('Done at the terminal');
+    const to = body.indexOf('Left to do by hand');
+    assert.ok(from !== -1 && to > from, body);
+    assert.ok(body.slice(from, to).includes('\n- review routine: ExampleBot gave a verdict on #3045 on 2026-10-27, so it runs\n'), body);
+  });
+
+  it('leaves the review routine by hand when GitHub cannot list the comments', async () => {
+    const sys = fresh();
+    sys.route('GET', TRACE, () => {
+      throw new Error('fetch failed');
+    });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(out.includes('│       if done.'), out.join('\n'));
+    const pull = sys.requests.find((r) => r.method === 'POST' && r.url.endsWith(`${REPO}/pulls`));
+    const { body } = pull?.body as { body: string };
+    assert.ok(body.includes('\n- The review routine: create a weekly Claude routine on example-org/example-app'), body);
+    assert.ok(!body.includes('- review routine:'), body);
   });
 
   it("uses GitHub's spelling of logins typed in another case", async () => {

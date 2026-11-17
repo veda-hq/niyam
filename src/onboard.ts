@@ -29,6 +29,7 @@ import { type TypesPlan, typesDetail, typesLines, typesPlan } from './issue-type
 import { type OwnerToken, asOwner, isOrganisation, ownerScopes, signInOnce } from './owner-login.ts';
 import { appendToArray, removeElements, replaceValues, setMember } from './jsonedit.ts';
 import { HOURLY } from './asks.ts';
+import { routineTrace } from './reviews.ts';
 import { DEFAULT_SCHEDULE, type Feature, FEATURES, FIGMA_FILE_KEY, NEEDS_ISSUE_TYPES, featuresIn, parseFeatures, renamedLines, scheduleIn } from './features.ts';
 import {
   type Change,
@@ -1746,13 +1747,20 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     },
   });
   // Claude's routines API answers only a Claude Code session's own sign-in, and a routine works as claude.ai's GitHub
-  // connection, so onboard cannot create one or check it.
+  // connection, so onboard cannot create one or check it; it sees one runs by the agent's verdicts on the repository.
   if (on('review')) {
     const routine = `${GITHUB_WEB}/${PRODUCT}/blob/v${version}/routines/review.md`;
-    byHand.push(`Once for ${slug}: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ${agent} and the prompt below the line in ${routine}.`);
-    later.push(
-      `The review routine: create a weekly Claude routine on ${slug} (claude.ai/code/routines, or /schedule in Claude Code), with claude.ai's GitHub connected as ${agent}, and give it the prompt below the line in ${routine}. Until it gives its verdicts, the weekly job labels needs-owner each decision over a week past its review date.`,
-    );
+    const seen = await routineTrace(sys, slug, agent, token).catch(() => {
+      // fail-open: comments GitHub does not give leave the routine by hand, which the owner skips if done.
+      return undefined;
+    });
+    if (seen) notes.push(`- review routine: ${agent} gave a verdict on #${seen.number} on ${seen.date}, so it runs`);
+    else {
+      byHand.push(`Once for ${slug}: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ${agent} and the prompt below the line in ${routine}; skip it if done.`);
+      later.push(
+        `The review routine: create a weekly Claude routine on ${slug} (claude.ai/code/routines, or /schedule in Claude Code), with claude.ai's GitHub connected as ${agent}, and give it the prompt below the line in ${routine}. Until it gives its verdicts, the weekly job labels needs-owner each decision over a week past its review date.`,
+      );
+    }
   }
   // Claude cloud sessions. Claude Code has no API for a cloud environment's Setup script, so the version lives in a
   // file the repo owns, written at the pin on every run, and the SessionStart hook runs it when a session has no CLI.

@@ -420,7 +420,8 @@ on any platform without a token store, `niyam env` prints the lock alone.
    │    1. Once for owner/repo: in Claude Code, run /schedule and create a
    │       weekly routine on it, with claude.ai's GitHub connected as AGENT and
    │       the prompt below the line in
-   │       https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
+   │       https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md; skip
+   │       it if done.
    │
    │    2. Once per claude.ai account: sign in at https://claude.ai/code and
    │       connect GitHub as AGENT (or change it at
@@ -1130,7 +1131,14 @@ or `/schedule`), with claude.ai's GitHub connected as the agent, and the
 prompt from `routines/review.md` at the release in use. It cannot create the
 routine itself: Claude's routines API answers only a Claude Code session's own
 sign-in, not a command, and a routine works as claude.ai's GitHub connection,
-which no API names.
+which no API names. It takes the routine's trace as evidence it runs instead:
+once the agent has commented `Kept:`, `Settled:` or `Held for` on any issue of
+the repository in the last three weeks (onboard reads up to 1,000 of its
+newest comments, as the agent), the routine leaves "By hand" and the pull
+request names the verdict it found under "Done at the terminal". Any such
+comment by the agent counts, one from a session run by hand included. Where no
+verdict is found in those three weeks, or GitHub does not list the comments,
+the step stays, ending "skip it if done".
 
 `onboard` also writes a pre-push git hook running `niyam pre-push`,
 for every adopter. In a local agent session (one session-start set up, or
