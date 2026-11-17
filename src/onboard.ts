@@ -262,7 +262,11 @@ const PR_SERVER_RULES = ['mcp__ccd_pr', 'mcp__ccd_pr__*'];
  * every ask to the owner links (`Needs you:`, `Proposal:`, `niyam propose
  * --page`): a new page, one from files, and a change to one. Without them
  * the auto-mode classifier refuses the calls as communication. A new page
- * is private to its owner.
+ * is private to its owner, but a republish (`publish_version` or
+ * `edit_version` with a slug) to a page already shared with an organisation
+ * or the public changes what its readers see, with no prompt: a cost the
+ * owner accepted on veda-hq/niyam#432. Claude Code skips an `mcp__` allow
+ * rule with arguments, so no rule here can limit them to private pages.
  */
 export const ARTIFACT_RULES = ['mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__edit_version'] as const;
 
