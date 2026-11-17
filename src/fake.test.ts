@@ -31,17 +31,32 @@ export function keyOnClipboard(line: string | undefined): { text: string; public
 
 /**
  * Every write to the fake's disk from now on, removed later or not: each
- * file written with what it held, and each folder made, a temporary one
- * included. A check on the files left at the end misses a write undone.
+ * file written, appended to, replaced or claimed, with what it held, and
+ * each folder made, a temporary one included. A check on the files left at the end misses a write undone.
  */
 export function diskWrites(sys: FakeSys): { path: string; data?: string }[] {
   const writes: { path: string; data?: string }[] = [];
   const write = sys.write.bind(sys);
+  const append = sys.append.bind(sys);
+  const replace = sys.replace.bind(sys);
+  const claim = sys.claim.bind(sys);
   const mkdir = sys.mkdir.bind(sys);
   const tempDir = sys.tempDir.bind(sys);
   sys.write = (path, data, mode): void => {
     writes.push({ path, data });
     write(path, data, mode);
+  };
+  sys.append = (path, data): void => {
+    writes.push({ path, data });
+    append(path, data);
+  };
+  sys.replace = (path, data): void => {
+    writes.push({ path, data });
+    replace(path, data);
+  };
+  sys.claim = (path): boolean => {
+    writes.push({ path });
+    return claim(path);
   };
   sys.mkdir = (path): void => {
     writes.push({ path });
