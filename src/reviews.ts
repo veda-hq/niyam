@@ -269,14 +269,16 @@ export const TRACE_DAYS = 21;
 const TRACE_PAGES = 10;
 
 /** GitHub's timestamps: UTC, to the second or finer. */
-const INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
+const INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
 
 /** A GitHub timestamp in milliseconds, or undefined for one that is not such a time, or names no real date. */
 function instant(text: string | undefined): number | undefined {
   const parts = INSTANT.exec(text ?? '');
   if (!parts) return undefined;
-  const [year, month, day, hour, minute, second] = parts.slice(1, 7).map(Number) as [number, number, number, number, number, number];
-  const time = Date.UTC(year, month - 1, day, hour, minute, second);
+  // Milliseconds count, so a verdict a moment after the cutoff, in its second, is not taken for one before it.
+  const milliseconds = (parts[7] ?? '').padEnd(3, '0').slice(0, 3);
+  const [year, month, day, hour, minute, second, ms] = [...parts.slice(1, 7), milliseconds].map(Number) as [number, number, number, number, number, number, number];
+  const time = Date.UTC(year, month - 1, day, hour, minute, second, ms);
   // Date.UTC rolls 30 February into March: a time that does not read back the same was never a date.
   return new Date(time).toISOString().slice(0, 19) === (text as string).slice(0, 19) ? time : undefined;
 }

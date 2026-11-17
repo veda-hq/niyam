@@ -524,6 +524,13 @@ describe('routineTrace', () => {
     assert.equal(await routineTrace(sys, SLUG, AGENT, 'ghp_agent'), undefined);
   });
 
+  it('counts a verdict a moment after the cutoff, in its second', async () => {
+    const sys = new FakeSys();
+    sys.now = () => new Date('2026-10-30T12:00:00.250Z');
+    sys.route('GET', page(1).replace('12:00:00.000Z', '12:00:00.250Z'), { status: 200, json: [comment(44, 'Kept: still holds.', AGENT, '2026-10-09T12:00:00.5Z')] });
+    assert.deepEqual(await routineTrace(sys, SLUG, AGENT, 'ghp_agent'), { number: 44, date: '2026-10-09' });
+  });
+
   it('reads no more than ten pages', async () => {
     const sys = new FakeSys();
     for (let n = 1; n <= 11; n++) sys.route('GET', page(n), { status: 200, json: n === 11 ? [comment(1, 'Kept: late.')] : filler(100) });

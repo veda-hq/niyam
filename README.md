@@ -1120,12 +1120,14 @@ or `/schedule`), with claude.ai's GitHub connected as the agent, and the
 prompt from `routines/review.md` at the release in use. It cannot create the
 routine itself: Claude's routines API answers only a Claude Code session's own
 sign-in, not a command, and a routine works as claude.ai's GitHub connection,
-which no API names. It sees a routine that runs by its trace instead: once
-the agent has commented `Kept:`, `Settled:` or `Held for` on any issue of the
-repository in the last three weeks (onboard reads up to 1,000 of its newest
-comments, as the agent), the routine leaves "By hand" and the pull request
-names the verdict it found under "Done at the terminal". Where GitHub does not
-list the comments, the step stays, ending "skip it if done".
+which no API names. It takes the routine's trace as evidence it runs instead:
+once the agent has commented `Kept:`, `Settled:` or `Held for` on any issue of
+the repository in the last three weeks (onboard reads up to 1,000 of its
+newest comments, as the agent), the routine leaves "By hand" and the pull
+request names the verdict it found under "Done at the terminal". Any such
+comment by the agent counts, one from a session run by hand included. Where no
+verdict is found in those three weeks, or GitHub does not list the comments,
+the step stays, ending "skip it if done".
 
 `onboard` also writes a pre-push git hook running `niyam pre-push`,
 for every adopter. In a local agent session (one session-start set up, or
