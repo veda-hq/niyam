@@ -1,5 +1,7 @@
 # Agents in niyam (formerly process-rules)
 
+@node_modules/@veda-hq/sarathi/skills/working-rules/SKILL.md
+
 ## Merging
 
 Right after `gh pr create`, turn on auto-merge for every pull request,
