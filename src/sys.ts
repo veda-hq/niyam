@@ -201,7 +201,7 @@ export function realSys(): Sys {
           response.writeHead(status, { 'cache-control': 'no-store', ...headers });
           response.end(body);
         };
-        if (request.method !== 'GET') return answer(405);
+        if (request.method !== 'GET') return answer(405, { allow: 'GET' });
         const url = new URL(request.url ?? '/', 'http://127.0.0.1');
         handle({ path: url.pathname, query: Object.fromEntries(url.searchParams) }).then(
           ({ status, headers, body }) => answer(status, headers, body),

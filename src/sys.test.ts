@@ -102,7 +102,9 @@ describe('realSys', () => {
       const moved = await fetch(`${base}/made?code=c1&state=s1`, { redirect: 'manual' });
       assert.deepEqual([moved.status, moved.headers.get('location'), moved.headers.get('cache-control'), await moved.text()], [302, 'https://example.com/next', 'no-store', 'moved']);
       assert.deepEqual(seen, [{ path: '/made', query: { code: 'c1', state: 's1' } }]);
-      assert.equal((await fetch(`${base}/made`, { method: 'POST' })).status, 405, 'a GET alone');
+      const posted = await fetch(`${base}/made`, { method: 'POST' });
+      assert.deepEqual([posted.status, posted.headers.get('allow')], [405, 'GET'], 'a GET alone');
+      assert.equal(seen.length, 1, 'a POST never reaches the handler');
       assert.equal((await fetch(`${base}/broken`)).status, 500, 'a handler that fails answers 500');
     } finally {
       served.close();

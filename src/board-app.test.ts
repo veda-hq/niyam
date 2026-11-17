@@ -118,6 +118,7 @@ describe('the board app', () => {
       assert.deepEqual([id.body.visibility, id.body.selected_repository_ids, id.body.key_id, id.token], ['selected', [REPO_ID], 'org-key', OWNER]);
       assert.ok(!JSON.stringify(sys.requests.map((r) => r.body)).includes('MIIexample'), 'the key never goes out in the clear');
       assert.ok(!out.join('\n').includes('MIIexample'), 'nor is it printed');
+      assert.ok(![...sys.files.values()].some((text) => text.includes('MIIexample')), 'nor written to disk');
       assert.ok(sys.requests.some((r) => r.method === 'PUT' && r.url.endsWith(`/user/installations/91/repositories/${REPO_ID}`)));
       assert.deepEqual(out, [`✓ made the board app ${APP.slug} and set NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY, shared with ${SLUG}`, `✓ installed the board app on ${SLUG}`]);
     });
@@ -255,10 +256,32 @@ describe('the board app', () => {
     });
   });
 
+  it("makes no app where the repository's own secret would hide the organization's, or the organization has one of the two", async () => {
+    const shadowed = await noApp();
+    shadowed.sys.route('GET', `/repos/${SLUG}/actions/secrets?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'FIGMA_TOKEN' }, { name: 'NIYAM_BOARD_APP_KEY' }] } });
+    assert.deepEqual(await setUpBoardApp(shadowed.sys, capture().io, SLUG, OWNER), [
+      `Once for ${SLUG}: delete its own NIYAM_BOARD_APP_KEY at https://github.com/${SLUG}/settings/secrets/actions, which would hide the organization's board app secrets, then run niyam onboard again at your own terminal.`,
+    ]);
+    const half = await noApp();
+    half.sys.route('GET', `${ORG_SECRETS}?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }] } });
+    assert.deepEqual(await setUpBoardApp(half.sys, capture().io, SLUG, OWNER), [
+      "Once for example-org: it has the secret NIYAM_BOARD_APP_ID but not NIYAM_BOARD_APP_KEY. Set the board app's other one at https://github.com/organizations/example-org/settings/secrets/actions, or delete it and its app, then run niyam onboard again at your own terminal.",
+    ]);
+    for (const { sys } of [shadowed, half]) {
+      assert.deepEqual(sys.opened, [], 'no browser');
+      assert.ok(!sys.requests.some((r) => r.method === 'PUT'), 'no secret changed');
+    }
+  });
+
   it('leaves it all by hand when GitHub will not give the repository or list the secrets, or a request fails', async () => {
     const lost = new FakeSys();
     lost.route('GET', `/repos/${SLUG}`, { status: 404, json: null });
     assert.deepEqual(await setUpBoardApp(lost, capture().io, SLUG, OWNER), [`${BY_HAND} onboard did not: GitHub did not give ${SLUG}'s id (HTTP 404).`]);
+
+    const ownUnlisted = new FakeSys();
+    ownUnlisted.route('GET', `/repos/${SLUG}`, { status: 200, json: repoJson() });
+    ownUnlisted.route('GET', `/repos/${SLUG}/actions/secrets?per_page=100&page=1`, { status: 403, json: null });
+    assert.deepEqual(await setUpBoardApp(ownUnlisted, capture().io, SLUG, OWNER), [`${BY_HAND} onboard did not: GitHub would not list ${SLUG}'s own Actions secrets.`]);
 
     const unlisted = new FakeSys();
     unlisted.route('GET', `/repos/${SLUG}`, { status: 200, json: repoJson() });

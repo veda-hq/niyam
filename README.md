@@ -390,9 +390,11 @@ on any platform without a token store, `niyam env` prints the lock alone.
    unless given `--yes` or `--dry-run`. After the yes it shows one line per step, a
    spinner while it works, then a "By hand" group of what GitHub's and
    Claude's APIs cannot do, and last the pull request. Each step there is
-   numbered and wrapped to 80 columns, and says the whole step: how often
-   (now, once for the repository, once per claude.ai account), what to do,
-   and its link. A first onboarding with the review routine ends:
+   numbered and wrapped to 80 characters, where a link too long for a line
+   takes one of its own and may run past it. Each says the whole step: how
+   often (now, once for the repository, once per claude.ai account), what
+   to do, and its link where it has one. A first onboarding with the review
+   routine ends:
 
    ```
    │

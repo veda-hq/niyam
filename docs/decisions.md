@@ -2158,9 +2158,15 @@
   asked "Why is there so much by hand work. Ideally there should be no work
   by hand." P-71's by-hand board app step was a dozen fields and two
   pastes. GitHub's manifest flow makes an app from a JSON manifest with one
-  click and hands the client id and private key back to the page it
-  redirects to. That turns P-71's rejected "onboard setting the secrets
-  itself" into the way it works.
+  click and redirects with a one-time code, which onboard exchanges with
+  GitHub's API for the client id and private key: the key never reaches the
+  browser. That turns P-71's rejected "onboard setting the secrets itself"
+  into the way it works.
+  - With the owner at their own terminal, the doctor's ▲ for a missing
+    board secret now says to run onboard there.
+  - A repository's own secret of either name hides the organization's, and
+    an organization with one of the two holds an app made before. In both,
+    onboard makes no app and says what to delete or set.
   - With board on in an organization's repository that cannot see both
     secrets, and the owner at the terminal (not an agent's or a cloud
     session), the plan names `board app`, an owner step. The owner's
@@ -2186,8 +2192,8 @@
     but its secrets could not be set, the key is gone, so the step left by
     hand is to delete the app and run onboard again.
   - "By hand:" became a `◇ By hand` group before the closing `└`: numbered
-    steps, wrapped to 80 columns, a link longer than a line on one of its
-    own.
+    steps, wrapped to 80 characters (a count of characters, not of a
+    terminal's columns), a link longer than a line on one of its own.
   - Rejected: secrets of the repository, which a second repository of the
     organization could not get without the key again; and a `setup_url` to
     learn of the install, which would stay on the app pointing at a closed

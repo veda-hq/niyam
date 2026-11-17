@@ -82,7 +82,12 @@ export function findingLines(paint: Paint, title: string, findings: Finding[]): 
 /** How wide a by-hand step's lines are, bar and number included: the narrowest terminal people keep. */
 export const BY_HAND_WIDTH = 80;
 
-/** `text` in lines of at most `width`, broken at spaces; a word longer than that, such as a link, has a line of its own. */
+/**
+ * `text` in lines of at most `width` characters, broken at spaces; a word
+ * longer than that, such as a link, has a line of its own. It counts
+ * characters, not a terminal's columns: the steps it wraps are niyam's own
+ * English, links and names, with no wide characters.
+ */
 export function wrap(text: string, width: number): string[] {
   const lines: string[] = [];
   let line = '';

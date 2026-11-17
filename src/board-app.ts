@@ -4,7 +4,7 @@ import { API } from './agent.ts';
 import { detail } from './doc-numbers.ts';
 import { GITHUB_WEB } from './host.ts';
 import { PRODUCT } from './names.ts';
-import { orgSecretNames, setOrgSecret, shareOrgSecret } from './secrets.ts';
+import { orgSecretNames, repoSecretNames, setOrgSecret, shareOrgSecret } from './secrets.ts';
 import type { Output, ServeAnswer, ServeRequest, Sys } from './types.ts';
 
 /**
@@ -146,9 +146,26 @@ export async function setUpBoardApp(sys: Sys, out: Output, slug: string, token: 
     const repo = await sys.http(`${API}/repos/${slug}`, { token });
     const repositoryId = (repo.json as { id?: unknown } | null)?.id;
     if (repo.status !== 200 || typeof repositoryId !== 'number') return byHand(`GitHub did not give ${slug}'s id (HTTP ${repo.status})`);
+    // A repository's own secret hides the organization's of the same name, so one of its own is the owner's to remove.
+    const own = await repoSecretNames(sys, slug, token);
+    if (own === undefined) return byHand(`GitHub would not list ${slug}'s own Actions secrets`);
+    const shadowing = BOARD_SECRETS.filter((name) => own.includes(name));
+    if (shadowing.length > 0) {
+      return [
+        `Once for ${slug}: delete its own ${shadowing.join(' and ')} at ${GITHUB_WEB}/${slug}/settings/secrets/actions, which would hide the organization's board app secrets, then run niyam onboard again at your own terminal.`,
+      ];
+    }
     const names = await orgSecretNames(sys, org, token);
     if (names === undefined) return byHand(`GitHub would not list ${org}'s Actions secrets`);
-    if (BOARD_SECRETS.every((name) => names.includes(name))) return await share(sys, out, { org, slug, token, repositoryId });
+    const has = BOARD_SECRETS.filter((name) => names.includes(name));
+    if (has.length === BOARD_SECRETS.length) return await share(sys, out, { org, slug, token, repositoryId });
+    // One of the two belongs to an app made before: a new app would overwrite it and leave that one installed.
+    if (has.length > 0) {
+      const settings = `${GITHUB_WEB}/organizations/${org}/settings/secrets/actions`;
+      return [
+        `Once for ${org}: it has the secret ${has.join(', ')} but not ${BOARD_SECRETS.filter((name) => !has.includes(name)).join(', ')}. Set the board app's other one at ${settings}, or delete it and its app, then run niyam onboard again at your own terminal.`,
+      ];
+    }
     return await make(sys, out, { org, slug, token, repositoryId });
   } catch (error) {
     // fail-open: the board app is the owner's to finish; nothing else in the run waits on it.

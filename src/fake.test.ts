@@ -112,6 +112,8 @@ export class FakeSys implements Sys {
     // The organisation has its board app already, with its secrets shared with selected repositories and installed on
     // all of them, unless a test routes them: onboard shares both with the repository, with no browser.
     this.route('GET', '/orgs/example-org/actions/secrets?per_page=100&page=1', { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }, { name: 'NIYAM_BOARD_APP_KEY' }] } });
+    // The repository has no secrets of its own, unless a test routes them.
+    this.route('GET', '/repos/example-org/example-app/actions/secrets?per_page=100&page=1', { status: 200, json: { secrets: [] } });
     this.route('GET', '/orgs/example-org/installations?per_page=100&page=1', { status: 200, json: { installations: [{ id: 77, app_slug: 'niyam-board-example-org', repository_selection: 'all' }] } });
     this.handlers.push((method, url) =>
       method === 'PUT' && /\/orgs\/example-org\/actions\/secrets\/NIYAM_BOARD_APP_(ID|KEY)\/repositories\/\d+$/.test(url) ? { status: 204, json: null } : undefined,

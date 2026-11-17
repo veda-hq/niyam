@@ -17,6 +17,11 @@ export async function secretNames(sys: Sys, slug: string, token: string): Promis
   return names;
 }
 
+/** The names of `slug`'s own Actions secrets, not its organization's, as `token` sees them; undefined when GitHub will not list them. */
+export function repoSecretNames(sys: Sys, slug: string, token: string): Promise<string[] | undefined> {
+  return listNames(sys, `${API}/repos/${slug}/actions/secrets`, token);
+}
+
 /** The names of the organization `org`'s own Actions secrets, as `token` sees them; undefined when GitHub will not list them. */
 export function orgSecretNames(sys: Sys, org: string, token: string): Promise<string[] | undefined> {
   return listNames(sys, `${API}/orgs/${org}/actions/secrets`, token);
