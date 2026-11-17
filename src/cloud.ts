@@ -1,4 +1,4 @@
-import { API, BASE_ENV, authorVars, configVars, isNoToken, keyBody, pathsFor, signingConfig } from './agent.ts';
+import { API, BASE_ENV, CLOUD_SIGNING_KEYS, SETTINGS_PATH, authorVars, configVars, isNoToken, pathsFor, signingConfig } from './agent.ts';
 import { SSH_SIGN, signerScript } from './ssh-sign.ts';
 import { commitSignature, publicLine, readPrivateKey, signatureProblem } from './sshsig.ts';
 import { CLAUDE_CODE_WEB, SETUP_FIRST, workflowPins } from './onboard.ts';
@@ -56,13 +56,16 @@ const PROBE_MESSAGE = 'niyam: a probe of the agent\'s signing, never on a branch
  * ssh-keygen, #425, and installing one costs every session time and needs the
  * network). All of them or none, since a commit that claims the agent
  * must be Verified as the agent (PR identity) and a signing setup that fails
- * breaks every commit: each is given only when the key is one GitHub lists
- * for the agent and a probe commit signed with exactly these settings, in
- * the clone at `root`, verifies as that key's. The probe is an object on no
- * branch, which git's housekeeping drops. Otherwise why not, and the session
- * keeps the cloud image's identity.
+ * breaks every commit: each is given only when the key is one of `pinned`,
+ * the agent's cloud signing keys the repo's settings pin, and a probe commit
+ * signed with exactly these settings, in the clone at `root`, verifies as
+ * that key's. The pin stands in for GitHub's list of the agent's signing
+ * keys, which `onboard` read on the owner's Mac: the session's proxy refuses
+ * every `users/…` path (#447). The probe is an object on no branch, which
+ * git's housekeeping drops. Otherwise why not, and the session keeps the
+ * cloud image's identity.
  */
-export async function cloudSigning(sys: Sys, root: string, login: string, id: number | undefined): Promise<{ vars: [string, string][] } | { problem: string }> {
+export function cloudSigning(sys: Sys, root: string, login: string, id: number | undefined, pinned: readonly string[]): { vars: [string, string][] } | { problem: string } {
   const given = sys.env[SIGNING_KEY_VAR]?.trim();
   if (!given) return { problem: `the cloud environment's variables have no ${SIGNING_KEY_VAR}, ${login}'s cloud signing key (niyam's README, "Claude cloud sessions", says how to add one)` };
   if (id === undefined) return { problem: `GitHub named no account id for ${login}` };
@@ -73,9 +76,10 @@ export async function cloudSigning(sys: Sys, root: string, login: string, id: nu
   const parsed = readPrivateKey(text);
   if ('problem' in parsed) return { problem: `${SIGNING_KEY_VAR} cannot be used: ${parsed.problem}` };
   const body = publicLine(parsed);
-  const listed = await listedSigningKeys(sys, login);
-  if ('problem' in listed) return listed;
-  if (!listed.keys.includes(body)) return { problem: `GitHub does not list ${SIGNING_KEY_VAR}'s public half as one of ${login}'s signing keys` };
+  const pin = `${SETTINGS_PATH}'s "${CLOUD_SIGNING_KEYS}"`;
+  const repin = `niyam onboard on the owner's Mac pins the ones GitHub lists`;
+  if (pinned.length === 0) return { problem: `${pin} pins no cloud signing key for ${login}, and this session cannot ask GitHub for ${login}'s signing keys; ${repin}` };
+  if (!pinned.includes(body)) return { problem: `${SIGNING_KEY_VAR}'s public half is not one of the cloud signing keys ${pin} pins for ${login}; ${repin}` };
   const { dir, key } = pathsFor(sys.home, login);
   const pub = `${key}.pub`;
   const signer = `${dir}/${SSH_SIGN}`;
@@ -96,24 +100,6 @@ export async function cloudSigning(sys: Sys, root: string, login: string, id: nu
 
 const PEM_BEGIN = '-----BEGIN OPENSSH PRIVATE KEY-----';
 const PEM_END = '-----END OPENSSH PRIVATE KEY-----';
-
-/** The signing keys GitHub's public list names for `login`, asked through the proxy, or why they cannot be had. */
-async function listedSigningKeys(sys: Sys, login: string): Promise<{ keys: string[] } | { problem: string }> {
-  let answer: { status: number; json: unknown };
-  try {
-    answer = await sys.http(`${API}/users/${encodeURIComponent(login)}/ssh_signing_keys?per_page=100`, { token: cloudToken(sys) });
-  } catch (error) {
-    // fail-open: the session keeps the image's identity, which PR identity passes, and says why.
-    return { problem: `GitHub could not be asked for ${login}'s signing keys (${messageOf(error)})` };
-  }
-  if (answer.status !== 200 || !Array.isArray(answer.json)) return { problem: `GitHub answered HTTP ${answer.status} when asked for ${login}'s signing keys` };
-  return {
-    keys: answer.json.flatMap((entry: unknown) => {
-      const key = (entry as { key?: unknown } | null)?.key;
-      return typeof key === 'string' ? [keyBody(key)] : [];
-    }),
-  };
-}
 
 /**
  * Makes a commit object on no branch with the environment `vars` give, and

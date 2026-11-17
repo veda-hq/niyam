@@ -26,6 +26,7 @@ import {
   launcherPath,
   launcherScript,
   loadSettings,
+  pinnedCloudKeys,
   lockScript,
   noreplyEmail,
   pathsFor,
@@ -87,6 +88,29 @@ describe('loadSettings', () => {
       assert.throws(() => loadSettings(sys, ROOT), /^Error: \.github\/niyam\.json: "approvals" must be the number of the repository's Approvals issue, such as 42$/);
     });
   }
+
+  it("reads the agents' pinned cloud signing keys, and finds an agent's in any case (#447)", () => {
+    const cloudSigningKeys = { examplebot: ['ssh-ed25519 AAAAcloud', 'ssh-ed25519 AAAAnewer=='], OtherBot: [] };
+    const settings = loadSettings(withSettings({ owner: 'example-owner', agent: AGENT, cloudSigningKeys }), ROOT);
+    assert.deepEqual(settings, { owners: ['example-owner'], agents: [AGENT], cloudSigningKeys });
+    assert.deepEqual(pinnedCloudKeys(settings, AGENT), ['ssh-ed25519 AAAAcloud', 'ssh-ed25519 AAAAnewer==']);
+    assert.deepEqual(pinnedCloudKeys(settings, 'NoBot'), []);
+    assert.deepEqual(pinnedCloudKeys(loadSettings(new FakeSys(), ROOT), AGENT), [], 'none when the settings pin none');
+  });
+
+  for (const pins of ['[]', 'null', '"ssh-ed25519 AAAA"', '{"bot":"ssh-ed25519 AAAA"}', '{"bot":["ssh-ed25519 AAAA comment"]}', '{"bot":["AAAA"]}', '{"a b":["ssh-ed25519 AAAA"]}', '{"bot":[7]}']) {
+    it(`refuses "cloudSigningKeys": ${pins}`, () => {
+      const sys = new FakeSys();
+      sys.files.set(`${ROOT}/.github/niyam.json`, `{"owner":"me","agent":"bot","cloudSigningKeys":${pins}}`);
+      assert.throws(() => loadSettings(sys, ROOT), /^Error: \.github\/niyam\.json: "cloudSigningKeys" must map each agent's login to a list of OpenSSH public keys, "type body", as niyam onboard writes it$/);
+    });
+  }
+
+  it('refuses "cloudSigningKeys" that names one agent twice, in any case, so no pin depends on the order (#447)', () => {
+    const sys = new FakeSys();
+    sys.files.set(`${ROOT}/.github/niyam.json`, '{"owner":"me","agent":"bot","cloudSigningKeys":{"bot":["ssh-ed25519 AAAA"],"Bot":["ssh-ed25519 BBBB"]}}');
+    assert.throws(() => loadSettings(sys, ROOT), /^Error: \.github\/niyam\.json: "cloudSigningKeys" names Bot twice, in any case; keep one entry for each agent$/);
+  });
 
   it('says when the file is missing', () => {
     const sys = new FakeSys();

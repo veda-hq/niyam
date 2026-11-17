@@ -153,10 +153,19 @@ describe('sessionStart', () => {
       const signature = signMessage(key, Buffer.from(payload), 'git').trimEnd().split('\n').join('\n ');
       return payload.replace('\n\n', `\ngpgsig ${signature}\n\n`);
     };
-    /** A cloud session whose environment holds the agent's cloud signing key, which GitHub lists, and whose probe commit is signed by it, or by another key. */
+    const SETTINGS_FILE = `${ROOT}/.github/niyam.json`;
+    /** The session's settings with `pins` as their "cloudSigningKeys", or none. */
+    const pinning = (sys: FakeSys, pins?: Record<string, string[]>): void => {
+      const { cloudSigningKeys: _, ...settings } = JSON.parse(sys.files.get(SETTINGS_FILE) as string) as Record<string, unknown>;
+      sys.files.set(SETTINGS_FILE, JSON.stringify(pins ? { ...settings, cloudSigningKeys: pins } : settings));
+    };
+    /**
+     * A cloud session whose environment holds the agent's cloud signing key, which the settings pin, as onboard
+     * writes them, under the agent's login in another case, and whose probe commit is signed by it, or by another key.
+     */
     const keyed = (verifies = true, key = Buffer.from(PEM).toString('base64')): FakeSys => {
       const sys = cloud(AGENT, { NIYAM_SIGNING_KEY: key });
-      sys.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 200, json: [{ key: 'ssh-ed25519 AAAAother' }, { key: `${CLOUD_KEY} cloud` }] });
+      pinning(sys, { examplebot: ['ssh-ed25519 AAAAother', CLOUD_KEY] });
       const probe = probeObject(verifies ? PEM : openSshKey().pem);
       sys.execOverride = ({ command, args }) => {
         const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: '' });
@@ -215,7 +224,8 @@ describe('sessionStart', () => {
       assert.ok(!sys.calls.some((call) => call.command === 'ssh-keygen'), 'the hosted image has none');
       assert.equal(sys.files.get(SIGNER), signerScript(sys.runtime.node, sys.runtime.cli));
       assert.equal(sys.modes.get(SIGNER), 0o755);
-      assert.deepEqual(sys.requests.map((request) => request.url), ['https://api.github.com/user', 'https://api.github.com/users/ExampleBot/ssh_signing_keys?per_page=100'], 'the id from the one /user answer');
+      // The id from the one /user answer, and nothing else asked: the proxy refuses every users/… path (#447).
+      assert.deepEqual(sys.requests.map((request) => request.url), ['https://api.github.com/user']);
       assert.ok(sys.requests.every((request) => request.token === PROXY_TOKEN));
     });
 
@@ -240,16 +250,17 @@ describe('sessionStart', () => {
       await failed(keyed(true, Buffer.from('not a key').toString('base64')), 'NIYAM_SIGNING_KEY is not an OpenSSH private key, base64 on one line or as is');
       const unreadable = keyed(true, Buffer.from(PEM.replace('b3Bl', 'zzzz')).toString('base64'));
       await failed(unreadable, 'NIYAM_SIGNING_KEY cannot be used: it is not an OpenSSH private key');
-      const unlisted = keyed();
-      unlisted.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 200, json: [{ key: 'ssh-ed25519 AAAAother' }] });
-      await failed(unlisted, "GitHub does not list NIYAM_SIGNING_KEY's public half as one of ExampleBot's signing keys");
-      const refused = keyed();
-      refused.route('GET', '/users/ExampleBot/ssh_signing_keys?per_page=100', { status: 403, json: { message: 'not enabled for this session' } });
-      await failed(refused, "GitHub answered HTTP 403 when asked for ExampleBot's signing keys");
-      const down = keyed();
-      const http = down.http.bind(down);
-      down.http = (url, options) => (url.includes('ssh_signing_keys') ? Promise.reject(new Error('proxy down')) : http(url, options));
-      await failed(down, "GitHub could not be asked for ExampleBot's signing keys (proxy down)");
+      const repin = "niyam onboard on the owner's Mac pins the ones GitHub lists";
+      const unpinned = keyed();
+      pinning(unpinned, { ExampleBot: ['ssh-ed25519 AAAAother'] });
+      await failed(unpinned, `NIYAM_SIGNING_KEY's public half is not one of the cloud signing keys .github/niyam.json's "cloudSigningKeys" pins for ExampleBot; ${repin}`);
+      const none = `.github/niyam.json's "cloudSigningKeys" pins no cloud signing key for ExampleBot, and this session cannot ask GitHub for ExampleBot's signing keys; ${repin}`;
+      const noPins = keyed();
+      pinning(noPins);
+      await failed(noPins, none);
+      const another = keyed();
+      pinning(another, { OtherBot: [CLOUD_KEY] });
+      await failed(another, none);
       const unsigned = keyed();
       const fakeExec = unsigned.execOverride;
       unsigned.execOverride = (call) => (call.args[0] === 'commit-tree' ? { code: 128, stdout: '', stderr: 'error: ssh-keygen failed\nfatal: failed to write commit object' } : fakeExec(call));

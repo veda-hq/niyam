@@ -2967,7 +2967,12 @@ describe('onboard never moves the pin backwards', () => {
 describe("the agent's cloud signing key (#417)", () => {
   const KEYS = '/user/ssh_signing_keys';
   /** What onboard says to run where it makes no key itself. */
-  const KEY_BY_HAND = "Once for ExampleBot: in your own terminal on your Mac, run niyam cloud-key ExampleBot, and paste the line it puts on the clipboard into each Claude cloud environment's variables.";
+  const KEY_BY_HAND =
+    "Once for ExampleBot: in your own terminal on your Mac, run niyam cloud-key ExampleBot, paste the line it puts on the clipboard into each Claude cloud environment's variables, then run niyam onboard here again, which pins the key in .github/niyam.json.";
+  const NO_KEY = 'onboard: ExampleBot has no cloud signing key yet; everything before it is done, and no environment holds the key the pull request pins';
+  /** The cloud signing keys the settings onboard leaves pin, by agent. */
+  const pins = (sys: FakeSys): unknown => (JSON.parse(repo(sys).get(SETTINGS) ?? '{}') as { cloudSigningKeys?: unknown }).cloudSigningKeys;
+  const PIN = "pin ExampleBot's cloud signing key, which cloud sessions check theirs against";
   const PASTE =
     "Now: NIYAM_SIGNING_KEY=… is on the clipboard. Paste it as one line into each Claude cloud environment's variables: https://claude.ai/code → the environment's settings. A new session there makes ExampleBot's commits its own; its first niyam line says so.";
 
@@ -3021,9 +3026,65 @@ describe("the agent's cloud signing key (#417)", () => {
     assert.ok(out.includes('◇  cloud signing key for ExampleBot'));
     assert.equal(byHand(out)[0], PASTE, 'the paste comes first, while the clipboard holds it');
     assert.ok(!byHand(out).includes(KEY_BY_HAND));
+    // Made at the plan, so the pull request pins the very key registered last (#447); the Mac's own key is no cloud key.
+    assert.equal(planned(out, 'Pull request')[0], `niyam.json: new, ${FEATURES.length} features on, ${PIN}`);
+    assert.deepEqual(pins(sys), { ExampleBot: [onClipboard.publicLine] });
   });
 
-  it('makes none, and says nothing about it, for an agent that has one, as on a second repo', async () => {
+  it('pins the cloud signing keys GitHub lists, and changes nothing once they are pinned (#447)', async () => {
+    const sys = fresh();
+    sys.route('GET', `${KEYS}?per_page=100`, {
+      status: 200,
+      json: [
+        { id: 1, title: 'niyam signing', key: 'ssh-ed25519 AAAAkey ExampleBot', created_at: '2026-10-01T00:00:00Z' },
+        { id: 3, title: 'niyam cloud signing', key: 'ssh-ed25519 AAAAcloud ExampleBot cloud signing', created_at: '2026-11-16T00:00:00Z' },
+        { id: 4, title: 'niyam cloud signing', key: 'ssh-ed25519 AAAAnewer ExampleBot cloud signing', created_at: '2026-11-17T00:00:00Z' },
+      ],
+    });
+    const first = await run(sys);
+    assert.equal(first.code, 0, first.err.join('\n'));
+    assert.equal(planned(first.out, 'Pull request')[0], `niyam.json: new, ${FEATURES.length} features on, pin ExampleBot's cloud signing keys, which cloud sessions check theirs against`);
+    assert.deepEqual(pins(sys), { ExampleBot: ['ssh-ed25519 AAAAcloud', 'ssh-ed25519 AAAAnewer'] }, 'the cloud keys alone, without their comments');
+    assert.ok(!keyMade(sys));
+    merge(sys);
+    const again = await run(sys);
+    assert.equal(again.code, 0, again.err.join('\n'));
+    assert.ok(!planned(again.out, 'Pull request').some((item) => item.startsWith('niyam.json')), again.out.join('\n'));
+  });
+
+  it("re-pins when the keys change, drops the agent's pin once GitHub lists none, and keeps other agents' pins (#447)", async () => {
+    const sys = fresh();
+    sys.route('GET', `${KEYS}?per_page=100`, { status: 200, json: [{ id: 4, title: 'niyam cloud signing', key: 'ssh-ed25519 AAAAnewer', created_at: '2026-11-17T00:00:00Z' }] });
+    assert.equal((await run(sys)).code, 0);
+    merge(sys);
+    const settings = JSON.parse(sys.files.get(SETTINGS) as string) as Record<string, unknown>;
+    // As the owner left it: the agent's login in another case, an old key since deleted from GitHub, and another agent's.
+    sys.files.set(SETTINGS, `${JSON.stringify({ ...settings, cloudSigningKeys: { OtherBot: ['ssh-ed25519 AAAAother'], examplebot: ['ssh-ed25519 AAAAgone'] } }, null, 2)}\n`);
+    const changed = await run(sys);
+    assert.equal(changed.code, 0, changed.err.join('\n'));
+    assert.ok(planned(changed.out, 'Pull request').includes(`niyam.json: ${PIN}`), changed.out.join('\n'));
+    assert.deepEqual(pins(sys), { OtherBot: ['ssh-ed25519 AAAAother'], examplebot: ['ssh-ed25519 AAAAnewer'] });
+    merge(sys);
+    sys.route('GET', `${KEYS}?per_page=100`, { status: 200, json: [{ id: 1, title: 'niyam signing', key: 'ssh-ed25519 AAAAkey', created_at: '2026-10-01T00:00:00Z' }] });
+    sys.env = { ...sys.env, CLAUDECODE: '1' };
+    const gone = await run(sys);
+    assert.equal(gone.code, 0, gone.err.join('\n'));
+    assert.ok(planned(gone.out, 'Pull request').includes("niyam.json: drop ExampleBot's cloud signing keys, which GitHub no longer lists"), gone.out.join('\n'));
+    assert.deepEqual(pins(sys), { OtherBot: ['ssh-ed25519 AAAAother'] });
+    assert.ok(!keyMade(sys), 'where cloud-key would refuse, none is made, so none is pinned');
+  });
+
+  it('leaves the pin as it is when GitHub does not list the keys (#447)', async () => {
+    const sys = fresh();
+    sys.files.set(SETTINGS, `${JSON.stringify({ owner: 'example-owner', agent: AGENT, cloudSigningKeys: { ExampleBot: ['ssh-ed25519 AAAAcloud'] } }, null, 2)}\n`);
+    sys.route('GET', `${KEYS}?per_page=100`, { status: 403, json: null });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(!planned(out, 'Pull request').some((item) => /cloud signing/.test(item)), out.join('\n'));
+    assert.deepEqual(pins(sys), { ExampleBot: ['ssh-ed25519 AAAAcloud'] });
+  });
+
+  it('makes none, and says nothing about it but the pin, for an agent that has one, as on a second repo', async () => {
     const sys = fresh();
     sys.route('GET', `${KEYS}?per_page=100`, {
       status: 200,
@@ -3035,7 +3096,8 @@ describe("the agent's cloud signing key (#417)", () => {
     const { code, out } = await run(sys);
     assert.equal(code, 0);
     assert.ok(!keyMade(sys));
-    assert.ok(!out.some((line) => /signing key|cloud-key|NIYAM_SIGNING_KEY/.test(line)), out.join('\n'));
+    assert.ok(!out.some((line) => /signing key|cloud-key|NIYAM_SIGNING_KEY/.test(line) && !line.includes(PIN)), out.join('\n'));
+    assert.deepEqual(pins(sys), { ExampleBot: ['ssh-ed25519 AAAAcloud'] });
     assert.ok(sys.requests.some((request) => request.url === `https://api.github.com${KEYS}?per_page=100` && request.token === TOKEN), "decided by the agent's own list");
   });
 
@@ -3075,7 +3137,7 @@ describe("the agent's cloud signing key (#417)", () => {
     assert.ok(out.includes('■  cloud signing key for ExampleBot'), out.join('\n'));
     assert.ok(out.includes('│  ✗ the clipboard did not take the key (pbcopy: no pasteboard), so the key was deleted from GitHub again; nothing is on the clipboard'));
     assert.ok(full.requests.some((request) => request.method === 'DELETE' && request.url.endsWith(`${KEYS}/99`)));
-    assert.deepEqual(err, ['onboard: ExampleBot has no cloud signing key yet; everything before it is done']);
+    assert.deepEqual(err, [NO_KEY]);
     assert.ok(out.includes(`└  ${PULL_URL}  merges itself when checks pass`));
     assert.equal(byHand(out).at(-1), KEY_BY_HAND);
     assert.ok(!byHand(out).includes(PASTE));
@@ -3086,7 +3148,7 @@ describe("the agent's cloud signing key (#417)", () => {
     const thrown = await run(offline);
     assert.equal(thrown.code, 0);
     assert.ok(opened(offline));
-    assert.deepEqual(thrown.err, ['onboard: fetch failed', 'onboard: ExampleBot has no cloud signing key yet; everything before it is done']);
+    assert.deepEqual(thrown.err, ['onboard: fetch failed', NO_KEY]);
     assert.equal(byHand(thrown.out).at(-1), KEY_BY_HAND);
     // A Ctrl-C there deletes the key again and ends the run as a Ctrl-C does, the pull request still open.
     const stopped = keyless();

@@ -5,6 +5,7 @@ import {
   anyLogin,
   either,
   loadSettings,
+  pinnedCloudKeys,
   lockScript,
   sameLogin,
   pathsFor,
@@ -187,7 +188,7 @@ async function cloudStart(sys: Sys): Promise<Said> {
     : hook.state === 'outside'
       ? ` Its pre-push hook ${hook.path} is outside the repository and was not checked, so only the pull request's checks may hold the work rules.`
       : '';
-  const signed = await cloudCommits(sys, root, envFile, asked);
+  const signed = cloudCommits(sys, root, envFile, asked, pinnedCloudKeys(settings, asked.login));
   return { line: `niyam: this cloud session works as ${asked.login} on GitHub.${unchecked}${signed}`, agent: asked.login };
 }
 
@@ -197,13 +198,14 @@ async function cloudStart(sys: Sys): Promise<Said> {
  * identity, Claude's: `cloudSigning`'s variables, appended to CLAUDE_ENV_FILE
  * after the lock is lifted, which reaches every command Claude Code runs and
  * leaves the clone's git config alone. The key's variable is unset there, so
- * commands do not carry it in their environment. A warning only, said after
+ * commands do not carry it in their environment. `pinned` are the agent's
+ * cloud signing keys the repo's settings pin. A warning only, said after
  * the line: when any of it fails, the session works on as the agent and its
  * commits keep the image's identity, which PR identity passes.
  */
-async function cloudCommits(sys: Sys, root: string, envFile: string, asked: { login: string; id?: number }): Promise<string> {
+function cloudCommits(sys: Sys, root: string, envFile: string, asked: { login: string; id?: number }, pinned: readonly string[]): string {
   const keeps = (why: string): string => ` Its commits keep the cloud image's identity, Claude's: ${why}.`;
-  const signing = await cloudSigning(sys, root, asked.login, asked.id);
+  const signing = cloudSigning(sys, root, asked.login, asked.id, pinned);
   if ('problem' in signing) return keeps(signing.problem);
   try {
     sys.append(envFile, `unset ${SIGNING_KEY_VAR}\n${exportLines(signing.vars).join('\n')}\n`);

@@ -66,16 +66,37 @@ export interface Settings {
   agents: string[];
   /** The repository's standing Approvals issue, where one owner comment answers a batch; none when the settings name none. */
   approvals?: number;
+  /**
+   * Each agent's cloud signing keys, as "type body", that `onboard` pinned
+   * from the agent's own list on GitHub (#447): a cloud session's proxy
+   * cannot read that list, so session-start checks NIYAM_SIGNING_KEY against
+   * these. Keyed by the agent's login, as the settings spell it.
+   */
+  cloudSigningKeys?: Record<string, string[]>;
+}
+
+/** The settings' key for each agent's pinned cloud signing keys. */
+export const CLOUD_SIGNING_KEYS = 'cloudSigningKeys';
+
+/** The cloud signing keys `settings` pin for `login`, any case; none when they pin none. */
+export function pinnedCloudKeys(settings: Settings, login: string): string[] {
+  const pins = settings.cloudSigningKeys ?? {};
+  return Object.entries(pins).find(([agent]) => sameLogin(login, agent))?.[1] ?? [];
 }
 
 /** Reads and checks the settings file at `root`; throws with the reason. */
 export function loadSettings(sys: Sys, root: string): Settings {
-  const name = SETTINGS_PATH;
-  const path = `${root}/${name}`;
+  const path = `${root}/${SETTINGS_PATH}`;
   if (!sys.exists(path)) {
     throw new Error(`${SETTINGS_PATH} not found in ${root}`);
   }
-  const raw: unknown = JSON.parse(sys.read(path));
+  return settingsIn(sys.read(path));
+}
+
+/** Reads and checks the settings file's text, `text`; throws with the reason. */
+export function settingsIn(text: string): Settings {
+  const name = SETTINGS_PATH;
+  const raw: unknown = JSON.parse(text);
   const owners = logins(raw, 'owner', name);
   const agents = logins(raw, 'agent', name);
   const both = owners.find((owner) => anyLogin(agents, owner));
@@ -83,7 +104,27 @@ export function loadSettings(sys: Sys, root: string): Settings {
     throw new Error(`${name}: ${both} is named as both owner and agent; they must be different accounts`);
   }
   const approvals = approvalsIn(raw, name);
-  return { owners, agents, ...(approvals === undefined ? {} : { approvals }) };
+  const cloudSigningKeys = cloudSigningKeysIn(raw, name);
+  return { owners, agents, ...(approvals === undefined ? {} : { approvals }), ...(cloudSigningKeys === undefined ? {} : { cloudSigningKeys }) };
+}
+
+/** An OpenSSH public key as "type body", as `onboard` pins one. */
+const PUBLIC_KEY = /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,2}$/;
+
+/** The cloud signing keys the settings pin, by agent, or undefined when they pin none; anything else is refused. */
+function cloudSigningKeysIn(raw: unknown, file: string): Record<string, string[]> | undefined {
+  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)[CLOUD_SIGNING_KEYS] : undefined;
+  if (value === undefined) return undefined;
+  const refused = `${file}: "${CLOUD_SIGNING_KEYS}" must map each agent's login to a list of OpenSSH public keys, "type body", as niyam onboard writes it`;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(refused);
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (!entries.every(([login, keys]) => LOGIN.test(login) && Array.isArray(keys) && keys.every((key) => typeof key === 'string' && PUBLIC_KEY.test(key)))) {
+    throw new Error(refused);
+  }
+  // Logins are case-insensitive: one agent named twice would leave which pin counts to the file's order.
+  const twice = entries.find(([login], i) => entries.findIndex(([other]) => sameLogin(login, other)) !== i);
+  if (twice) throw new Error(`${file}: "${CLOUD_SIGNING_KEYS}" names ${twice[0]} twice, in any case; keep one entry for each agent`);
+  return Object.fromEntries(entries as [string, string[]][]);
 }
 
 /** The Approvals issue the settings name as `"approvals": N`, or undefined when they name none; anything but an issue number is refused. */

@@ -63,6 +63,8 @@ describe('cloud-key', () => {
       '✓ NIYAM_SIGNING_KEY=… is on the clipboard',
       "  Paste it as one line into the cloud environment's variables: https://claude.ai/code → the environment's settings.",
       "  A new session there makes ExampleBot's commits its own; its first niyam line says so.",
+      // A cloud session checks the key against the settings' pin, which only onboard writes (#447).
+      '  Then run niyam onboard in each repository ExampleBot works in: it pins the key in .github/niyam.json, which cloud sessions check it against.',
     ]);
     const again = mac();
     assert.equal((await key(again)).code, 0);
