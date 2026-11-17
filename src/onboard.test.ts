@@ -7,7 +7,7 @@ import { after, beforeEach, describe, it } from 'node:test';
 
 import { BUILT_IN, Board, COPY_URL, OWNER_TOKEN, URL, repoJson, settledViews } from './fake-board.test.ts';
 import { FIELDS, ISSUE_TYPES, LABELS } from './board.ts';
-import { AGENT, AGENT_ID, FakeSys, HOME, PRIVATE_KEY, PUBLIC_KEY, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture } from './fake.test.ts';
+import { AGENT, AGENT_ID, FakeSys, HOME, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, capture, keyOnClipboard } from './fake.test.ts';
 import { cloudRepoScript } from './cloud.ts';
 import { tarballName } from './names.ts';
 import { CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH } from './onboard-pull.ts';
@@ -2895,12 +2895,13 @@ describe("the agent's cloud signing key (#417)", () => {
   /** A fresh run for an agent whose signing keys are the Mac's alone; GitHub registers the new one as id 99, and the clipboard takes what it is given. */
   function keyless(): FakeSys & { clipboard: string[] } {
     const sys = Object.assign(fresh(), { clipboard: [] as string[] });
-    let added = false;
+    let added: string | undefined;
     sys.route('GET', `${KEYS}?per_page=100`, { status: 200, json: [{ id: 1, title: 'niyam signing', key: 'ssh-ed25519 AAAAkey', created_at: '2026-10-01T00:00:00Z' }] });
-    sys.route('GET', KEYS, () => ({ status: 200, json: added ? [{ key: 'ssh-ed25519 AAAAmac' }, { key: PUBLIC_KEY }] : [{ key: 'ssh-ed25519 AAAAmac' }] }));
-    sys.route('POST', KEYS, () => {
-      added = true;
-      return { status: 201, json: { id: 99, title: 'niyam cloud signing', key: PUBLIC_KEY } };
+    sys.route('GET', KEYS, () => ({ status: 200, json: [{ key: 'ssh-ed25519 AAAAmac' }, ...(added ? [{ key: added }] : [])] }));
+    sys.handlers.push((method, url, body) => {
+      if (method !== 'POST' || url !== `https://api.github.com${KEYS}`) return undefined;
+      added = (body as { key: string }).key;
+      return { status: 201, json: { id: 99, title: 'niyam cloud signing', key: added } };
     });
     sys.route('DELETE', `${KEYS}/99`, { status: 204, json: null });
     sys.execOverride = ({ command, input }) => {
@@ -2910,9 +2911,7 @@ describe("the agent's cloud signing key (#417)", () => {
     };
     return sys;
   }
-  // The machine key's own checks run ssh-keygen too; the cloud key's is the one with its comment.
-  const keygen = (sys: FakeSys): { args: readonly string[] } | undefined => sys.calls.find((call) => call.command === 'ssh-keygen' && call.args.includes('ExampleBot cloud signing'));
-  const keyMade = (sys: FakeSys): boolean => keygen(sys) !== undefined || sys.requests.some((request) => request.method === 'POST' && request.url.endsWith(KEYS));
+  const keyMade = (sys: FakeSys): boolean => sys.requests.some((request) => request.method === 'POST' && request.url.endsWith(KEYS));
 
   it('plans one for an agent with none, and makes it last, after the pull request, with the one yes', async () => {
     const sys = keyless();
@@ -2924,13 +2923,15 @@ describe("the agent's cloud signing key (#417)", () => {
     assert.deepEqual(sys.spun.slice(-2), ['pull request', 'cloud signing key for ExampleBot']);
     const urls = sys.requests.filter((request) => request.method === 'POST').map((request) => request.url);
     assert.ok(urls.indexOf(`https://api.github.com${REPO}/pulls`) < urls.indexOf(`https://api.github.com${KEYS}`), 'the pull request opens first');
+    const onClipboard = keyOnClipboard(sys.clipboard[0]);
+    assert.ok(!('problem' in onClipboard), JSON.stringify(onClipboard));
+    assert.equal(sys.clipboard.length, 1);
     const posted = sys.requests.find((request) => request.method === 'POST' && request.url.endsWith(KEYS));
-    assert.deepEqual(posted?.body, { title: 'niyam cloud signing', key: PUBLIC_KEY });
+    assert.deepEqual(posted?.body, { title: 'niyam cloud signing', key: `${onClipboard.publicLine} ExampleBot cloud signing` });
     assert.equal(posted?.token, TOKEN, "as the agent, with its stored token");
-    assert.deepEqual(sys.clipboard, [`NIYAM_SIGNING_KEY=${Buffer.from(`${PRIVATE_KEY}\n`).toString('base64')}`]);
-    assert.ok(!out.join('\n').includes(PRIVATE_KEY) && !out.join('\n').includes(Buffer.from(PRIVATE_KEY).toString('base64')), 'the key is never printed');
-    const folder = dirname(keygen(sys)?.args.at(-1) ?? '');
-    assert.ok(sys.removed.includes(folder) && ![...sys.files.keys()].some((path) => path.startsWith(`${folder}/`)), 'no key file left');
+    assert.ok(!out.join('\n').includes((sys.clipboard[0] ?? '').slice(20, 60)) && !out.join('\n').includes(onClipboard.text.split('\n')[1] ?? ''), 'the key is never printed');
+    assert.ok(!sys.calls.some((call) => call.command === 'ssh-keygen' && call.args.includes('ExampleBot cloud signing')), 'made in memory, with no ssh-keygen (#437)');
+    assert.ok(![...sys.files.values()].some((text) => text.includes(onClipboard.text.split('\n')[1] ?? '')), 'the key is in no file');
     assert.ok(out.includes('◇  cloud signing key for ExampleBot'));
     assert.equal(byHand(out)[0], PASTE, 'the paste comes first, while the clipboard holds it');
     assert.ok(!byHand(out).includes(KEY_BY_HAND));
