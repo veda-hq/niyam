@@ -946,7 +946,11 @@ repeats that call at every `wrap_up` until the app confirms Auto-fix. The
 ToolSearch step, the `<pr-created>` tag and `bind_pr` stay: without them the
 app refuses `set_monitor` for a pull request a hook opened. When the row
 cannot be written, or the session id cannot name a list, the whole
-instruction goes out.
+instruction goes out. With `"autofixList": true`, a pull request whose latest
+state on the list is `on` (folded as sarathi does: `warned` rows skipped,
+`opened` only adding the pull request) gets no instruction at all, and no
+ack, so an `off` later is told at a later Stop. `opened`, `refused`, `off`,
+or a list that cannot be read, gets the instruction as above.
 
 **Started work runs to merge.** `niyam keep-going`, Claude Code's Stop hook,
 sends a session back while its branch has commits the base lacks and its
@@ -1590,7 +1594,7 @@ tag and the commit. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.24/veda-hq-niyam-0.6.24.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.25/veda-hq-niyam-0.6.25.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release

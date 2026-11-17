@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 
 import { githubSlug, isNoToken, SETTINGS_PATH } from './agent.ts';
 import { agentEnv } from './as-agent.ts';
+import { schema } from './doc-numbers.ts';
 import { GITHUB_API, GITHUB_HOST } from './host.ts';
 import { commands } from './shell.ts';
 import type { HttpResult, Output, Sys } from './types.ts';
@@ -645,6 +646,46 @@ export function listForAutofix(sys: Sys, session: string | undefined, url: strin
   }
 }
 
+/**
+ * The pull request's latest state on the session's sarathi Auto-fix list, folded as sarathi's `readRows` and
+ * `fold` do: rows whose `pr` and `event` are strings, the pull request matched in lower case, `warned` skipped,
+ * `opened` only adding it, any other event setting its state. Undefined when the list does not name it, or
+ * cannot be read.
+ */
+export function autofixState(sys: Sys, session: string | undefined, url: string): string | undefined {
+  const pull = pullOf(url);
+  if (!session || !SARATHI_SESSION.test(session) || !pull) return undefined;
+  const file = resolve(autofixDir(sys), `${session}.jsonl`);
+  let text: string;
+  try {
+    text = sys.read(file);
+  } catch {
+    // fail-open: a list that cannot be read shows no state, and the whole instruction goes out
+    return undefined;
+  }
+  const key = pull.pr.toLowerCase();
+  let state: string | undefined;
+  for (const line of text.split('\n')) {
+    let row: { pr: string; event: string };
+    try {
+      row = ListRowSchema.parse(JSON.parse(line));
+    } catch {
+      // fail-open: a blank or partial line, or one that is no row, as sarathi skips it
+      continue;
+    }
+    if (row.pr.toLowerCase() !== key || row.event === 'warned') continue;
+    if (row.event !== 'opened' || state === undefined) state = row.event;
+  }
+  return state;
+}
+
+/** A row of sarathi's Auto-fix list, as its `readRows` keeps one: `pr` and `event` strings. */
+const ListRowSchema = schema((value): { pr: string; event: string } => {
+  const { pr, event } = (typeof value === 'object' && value !== null ? value : {}) as { pr?: unknown; event?: unknown };
+  if (typeof pr !== 'string' || typeof event !== 'string') throw new Error('not a list row');
+  return { pr, event };
+});
+
 /** How the session replaces the placeholder body. */
 function editHint(settings: AutocreateSettings, pulls: Pulls, number: number): string {
   return pulls.cloud ? `gh api -X PATCH repos/${pulls.slug}/pulls/${number} -F body=@FILE` : settings.describe;
@@ -657,6 +698,8 @@ async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettin
   const who = String(session ?? 'nosession').replace(/[^A-Za-z0-9._-]/g, '_');
   const ack = `${stateDir(root)}/acks/${who}-${pr.number}`;
   if (sys.exists(ack)) return '';
+  // sarathi's list shows Auto-fix on already: nothing to say, and no ack, so an `off` later is told at a later Stop.
+  if (listed && settings.autofixList && autofixState(sys, typeof session === 'string' ? session : undefined, pr.url) === 'on') return '';
   try {
     sys.confine(root, ack);
     sys.mkdir(dirname(ack));
