@@ -54,9 +54,11 @@ export function diskWrites(sys: FakeSys): { path: string; data?: string }[] {
     writes.push({ path, data });
     replace(path, data);
   };
+  // A claim that finds the file there already creates nothing.
   sys.claim = (path): boolean => {
-    writes.push({ path });
-    return claim(path);
+    const claimed = claim(path);
+    if (claimed) writes.push({ path });
+    return claimed;
   };
   sys.mkdir = (path): void => {
     writes.push({ path });
