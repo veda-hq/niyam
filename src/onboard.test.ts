@@ -742,8 +742,19 @@ describe('onboard', () => {
     assert.deepEqual(one.labels, ['artifact rules']);
     assert.deepEqual(one.denied, ['mcp__claude-artifacts__edit_version left out: .claude/settings.json denies mcp__claude-artifacts__edit_version']);
     assert.deepEqual(claudeSettings(one.text).changes, [], 'a second run changes nothing');
-    // A near miss denies nothing, and neither does a deny that is not a list.
-    for (const deny of [['mcp__claude-artifacts_*'], 'mcp__claude-artifacts']) {
+    // Every tool, every MCP tool, and a glob in the tool's name deny as Claude Code matches them.
+    for (const every of ['*', 'mcp__*']) {
+      const before = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES], deny: [every] } });
+      assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [] }, every);
+      const lacking = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE], deny: [every] } }));
+      assert.deepEqual(lacking.changes, [], every);
+      assert.deepEqual(lacking.denied, [`Auto-fix rules left out: .claude/settings.json denies ${every}`, `artifact rules left out: .claude/settings.json denies ${every}`], every);
+    }
+    const prefixed = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['mcp__claude-artifacts__publish_*'] } }));
+    assert.deepEqual(JSON.parse(prefixed.text).permissions.allow, [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__edit_version']);
+    assert.deepEqual(prefixed.denied, ['mcp__claude-artifacts__publish_version, mcp__claude-artifacts__publish_files left out: .claude/settings.json denies mcp__claude-artifacts__publish_*']);
+    // A near miss, a glob in the server's name, which Claude Code's page does not describe, and a deny that is not a list deny nothing.
+    for (const deny of [['mcp__claude-artifacts_*'], ['mcp__claude-art*'], ['mcp__claude-artifacts__publish'], 'mcp__claude-artifacts']) {
       const near = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny } }));
       assert.deepEqual(JSON.parse(near.text).permissions.allow, ALLOW, JSON.stringify(deny));
       assert.equal(near.denied, undefined);
@@ -761,9 +772,14 @@ describe('onboard', () => {
     const two = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...ARTIFACT_RULES], deny: ['mcp__ccd_pr__set_monitor', 'mcp__ccd_pr__bind_pr'] } }));
     assert.deepEqual(JSON.parse(two.text).permissions.allow, [REVIEW_THREAD_RULE, ...ARTIFACT_RULES, 'mcp__ccd_pr__get_status']);
     assert.deepEqual(two.denied, ['mcp__ccd_pr__bind_pr, mcp__ccd_pr__set_monitor left out: .claude/settings.json denies mcp__ccd_pr__set_monitor, mcp__ccd_pr__bind_pr']);
-    // An allow rule already there for a denied tool is the owner's, and stays.
+    // An allow rule already there for a denied tool is the owner's, and stays; nothing is left out, so nothing is said.
     const kept = JSON.stringify({ ...CLAUDE, permissions: { allow: ALLOW, deny: ['mcp__claude-artifacts'] } });
-    assert.deepEqual(claudeSettings(kept), { text: kept, changes: [], labels: [], denied: ['artifact rules left out: .claude/settings.json denies mcp__claude-artifacts'] });
+    assert.deepEqual(claudeSettings(kept), { text: kept, changes: [], labels: [] });
+    const some = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files'], deny: ['mcp__claude-artifacts'] } }));
+    assert.deepEqual(some.changes, []);
+    assert.deepEqual(some.denied, ['mcp__claude-artifacts__publish_version, mcp__claude-artifacts__edit_version left out: .claude/settings.json denies mcp__claude-artifacts']);
+    const whole = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts'], deny: ['mcp__claude-artifacts__edit_version'] } });
+    assert.deepEqual(claudeSettings(whole), { text: whole, changes: [], labels: [] }, 'the whole server allowed: nothing would be added');
   });
 
   it("shows the rules a client's deny leaves out in the plan, with no settings.json change", async () => {

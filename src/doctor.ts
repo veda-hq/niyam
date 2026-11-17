@@ -28,7 +28,7 @@ import { type Finding, closing, findingLines, heading, painter, tilde } from './
 import { exposure, exposureFindings, movedFindings, readDeclined, setAside } from './lockout.ts';
 import { CLOUD_SETUP_PATH, HOOKS_PATH, SARATHI_PATH } from './onboard-pull.ts';
 import { leftoverDir, leftoverToken } from './machine.ts';
-import { BOARD_SECRETS, GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, type RuleNeeds, artifactRuleNeeds, autoFixRuleNeeds, sarathiRunner } from './onboard.ts';
+import { BOARD_SECRETS, GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, ARTIFACT_RULES, AUTO_FIX_RULES, type RuleNeeds, artifactRuleNeeds, autoFixRuleNeeds, sarathiRunner } from './onboard.ts';
 import { secretNames } from './secrets.ts';
 import { isOrganisation } from './owner-login.ts';
 import { leftBehind } from './owner-step.ts';
@@ -302,20 +302,22 @@ function allowFindings(sys: Sys): Finding[] {
     return [];
   }
   return [
-    ...groupFindings(autoFixRuleNeeds(settings), 'agent sessions cannot turn Auto-fix on', 'agent sessions do not turn Auto-fix on'),
-    ...groupFindings(artifactRuleNeeds(settings), 'agent sessions cannot publish the page an ask to the owner links', 'agent sessions do not publish pages'),
+    ...groupFindings(autoFixRuleNeeds(settings), AUTO_FIX_RULES, 'agent sessions cannot turn Auto-fix on', 'agent sessions do not turn Auto-fix on'),
+    ...groupFindings(artifactRuleNeeds(settings), ARTIFACT_RULES, 'agent sessions cannot publish the page an ask to the owner links', 'agent sessions do not publish pages'),
   ];
 }
 
 /**
  * One group's findings: ▲ for the rules it lacks, and ✓ for those its deny
  * rules override, which the owner chose and onboard leaves out, so nothing
- * there is to fix.
+ * there is to fix. A whole group denied says what sessions then do not do;
+ * a part of one names the tools denied, since the others still work.
  */
-function groupFindings(needs: RuleNeeds, cannot: string, chosen: string): Finding[] {
+function groupFindings(needs: RuleNeeds, rules: readonly string[], cannot: string, chosen: string): Finding[] {
+  const so = needs.denied.length === rules.length ? chosen : `agent sessions do not use ${needs.denied.join(', ')}`;
   return [
     ...(needs.missing.length === 0 ? [] : [{ mark: '▲' as const, text: `${HOOKS_PATH} does not allow ${needs.missing.join(', ')}, so ${cannot}`, fix: ONBOARD }]),
-    ...(needs.denied.length === 0 ? [] : [{ mark: '✓' as const, text: `${HOOKS_PATH} denies ${needs.deniedBy.join(', ')} on purpose, so ${chosen}` }]),
+    ...(needs.denied.length === 0 ? [] : [{ mark: '✓' as const, text: `${HOOKS_PATH} denies ${needs.deniedBy.join(', ')} on purpose, so ${so}` }]),
   ];
 }
 

@@ -282,29 +282,48 @@ const ARTIFACT_SERVER_RULES = ['mcp__claude-artifacts', 'mcp__claude-artifacts__
 export interface RuleNeeds {
   /** Lacking and not denied, in their order: what onboard adds. */
   missing: string[];
-  /** Overridden by a deny rule, in their order: what onboard leaves out, as the file's owner chose. */
+  /** Overridden by a deny rule, in their order, as the file's owner chose. */
   denied: string[];
+  /** Those of `denied` onboard would add but for the deny: what it leaves out. */
+  leftOut: string[];
   /** The file's deny rules that override them, in the file's order. */
   deniedBy: string[];
 }
 
 /**
+ * Whether deny rule `by` matches MCP tool `tool` of the server named `bare`
+ * (`mcp__<server>`), as Claude Code's permissions page says rules match: the
+ * tool's own name, the bare server, `*` and `mcp__*` (every tool, every MCP
+ * tool), and a glob in the tool name after a literal `mcp__<server>__`, such
+ * as `mcp__<server>__*` or `mcp__<server>__publish_*`. A glob in the server's
+ * own name the page does not describe, so it matches nothing here.
+ */
+function deniesTool(by: string, tool: string, bare: string): boolean {
+  if (by === tool || by === bare || by === '*' || by === 'mcp__*') return true;
+  const prefix = `${bare}__`;
+  if (!by.startsWith(prefix) || !by.includes('*') || !tool.startsWith(prefix)) return false;
+  const glob = by.slice(prefix.length).split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  return new RegExp(`^${glob}$`).test(tool.slice(prefix.length));
+}
+
+/**
  * Which of `rules` a settings file lacks, in their order: none lacks when
  * its `permissions.allow` allows the whole server, by one of `server`. Claude
- * Code applies deny before allow, so a rule that `permissions.deny` overrides,
- * by one of `server` or by the tool's own name, is denied, not missing: an
- * allow rule for it would do nothing. A deny or allow that is not an array
- * names nothing.
+ * Code applies deny before allow, so a rule that `permissions.deny` overrides
+ * (`deniesTool`) is denied, not missing: an allow rule for it would do
+ * nothing. A deny or allow that is not an array names nothing.
  */
 function ruleNeeds(settings: unknown, rules: readonly string[], server: string[]): RuleNeeds {
   const permissions = (settings as { permissions?: { allow?: unknown; deny?: unknown } } | null)?.permissions;
   const listed = (value: unknown): string[] => (Array.isArray(value) ? value.filter((rule): rule is string => typeof rule === 'string') : []);
   const allow = listed(permissions?.allow);
   const deny = listed(permissions?.deny);
-  const deniedBy = deny.filter((rule) => server.includes(rule) || rules.includes(rule));
-  const denied = rules.filter((rule) => deny.some((by) => server.includes(by) || by === rule));
-  if (allow.some((rule) => server.includes(rule))) return { missing: [], denied, deniedBy };
-  return { missing: rules.filter((rule) => !allow.includes(rule) && !denied.includes(rule)), denied, deniedBy };
+  const bare = server[0]!;
+  const deniedBy = deny.filter((by) => rules.some((rule) => deniesTool(by, rule, bare)));
+  const denied = rules.filter((rule) => deny.some((by) => deniesTool(by, rule, bare)));
+  if (allow.some((rule) => server.includes(rule))) return { missing: [], denied, leftOut: [], deniedBy };
+  const lacking = rules.filter((rule) => !allow.includes(rule));
+  return { missing: lacking.filter((rule) => !denied.includes(rule)), denied, leftOut: lacking.filter((rule) => denied.includes(rule)), deniedBy };
 }
 
 /** Which of AUTO_FIX_RULES a settings file lacks, and which its deny rules override. */
@@ -318,12 +337,13 @@ export function artifactRuleNeeds(settings: unknown): RuleNeeds {
 }
 
 /**
- * What a group's denied rules come to, in a line for onboard's plan: the
- * group's name when the file denies all of it, else the rules it denies.
+ * What a group's left-out rules come to, in a line for onboard's plan: the
+ * group's name when the deny leaves all of it out, else the rules it does.
+ * A denied rule the file allows already is not left out, and goes unsaid.
  */
 function deniedLines(needs: RuleNeeds, rules: readonly string[], group: string): string[] {
-  if (needs.denied.length === 0) return [];
-  return [`${needs.denied.length === rules.length ? group : needs.denied.join(', ')} left out: ${HOOKS_PATH} denies ${needs.deniedBy.join(', ')}`];
+  if (needs.leftOut.length === 0) return [];
+  return [`${needs.leftOut.length === rules.length ? group : needs.leftOut.join(', ')} left out: ${HOOKS_PATH} denies ${needs.deniedBy.join(', ')}`];
 }
 
 /** The hook commands older releases wrote, which onboard replaces with this release's. */
