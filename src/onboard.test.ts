@@ -15,7 +15,7 @@ import type { HttpResult } from './types.ts';
 import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
@@ -53,7 +53,7 @@ const SESSION_ENTRY = { hooks: [{ type: 'command', command: HOOK_COMMAND }] };
 const GUARD_ENTRY = { matcher: 'Bash', hooks: [{ type: 'command', command: GUARD_COMMAND }] };
 /** The Claude Code settings this release writes into an empty project. */
 /** The rules onboard allows, in the order it adds them. */
-const ALLOW = [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES];
+const ALLOW = [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES];
 const CLAUDE = { hooks: { SessionStart: [SESSION_ENTRY], PreToolUse: [GUARD_ENTRY] }, env: BASE_ENV, permissions: { allow: ALLOW } };
 const VERIFIED = {
   status: 200,
@@ -632,7 +632,8 @@ describe('onboard', () => {
             "add the PreToolUse hook that refuses gh and git's remote commands outside the agent identity; " +
             `set GH_TOKEN, GITHUB_TOKEN and ${Object.keys(BASE_ENV).length - 2} more in env, so GitHub is locked out until session-start gives the agent identity; ` +
             'allow niyam review-thread without a prompt, so agent sessions answer review threads on their own pull requests; ' +
-            `allow ${AUTO_FIX_RULES.join(', ')} without a prompt, so agent sessions turn Auto-fix on for their own pull requests\n`,
+            `allow ${AUTO_FIX_RULES.join(', ')} without a prompt, so agent sessions turn Auto-fix on for their own pull requests; ` +
+            `allow ${ARTIFACT_RULES.join(', ')} without a prompt, so agent sessions publish the page an ask to the owner links\n`,
         ),
         opened(sys)?.body,
       );
@@ -664,21 +665,21 @@ describe('onboard', () => {
   });
 
   it("adds the review-thread rule to the client's own allow list once", () => {
-    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES], deny: ['Read(.env)'] } }));
-    assert.deepEqual(JSON.parse(text).permissions, { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES, REVIEW_THREAD_RULE], deny: ['Read(.env)'] });
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES, ...ARTIFACT_RULES], deny: ['Read(.env)'] } }));
+    assert.deepEqual(JSON.parse(text).permissions, { allow: ['Bash(pnpm test)', ...AUTO_FIX_RULES, ...ARTIFACT_RULES, REVIEW_THREAD_RULE], deny: ['Read(.env)'] });
     assert.deepEqual(changes, ['allow niyam review-thread without a prompt, so agent sessions answer review threads on their own pull requests']);
     assert.deepEqual(labels, ['review rule']);
     assert.deepEqual(claudeSettings(text).changes, []);
   });
 
   it('replaces the review-thread rule under the old command in its place, and leaves both where both are there', () => {
-    const before = JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', OLDER_REVIEW_THREAD_RULE, ...AUTO_FIX_RULES] } });
+    const before = JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', OLDER_REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES] } });
     const { text, changes, labels } = claudeSettings(before);
-    assert.deepEqual(JSON.parse(text).permissions.allow, ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES]);
+    assert.deepEqual(JSON.parse(text).permissions.allow, ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES]);
     assert.deepEqual(changes, [`replace ${OLDER_REVIEW_THREAD_RULE} with ${REVIEW_THREAD_RULE}, the CLI's own name`]);
     assert.deepEqual(labels, ['review rule']);
     assert.equal(REVIEW_THREAD_RULE, 'Bash(niyam review-thread *)');
-    const both = JSON.stringify({ ...CLAUDE, permissions: { allow: [OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, ...AUTO_FIX_RULES] } });
+    const both = JSON.stringify({ ...CLAUDE, permissions: { allow: [OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES] } });
     assert.deepEqual(claudeSettings(both), { text: both, changes: [], labels: [] });
   });
 
@@ -690,26 +691,51 @@ describe('onboard', () => {
     assert.deepEqual(claudeSettings(text).changes, []);
   });
 
-  it('leaves a file that already allows the Auto-fix rules as it is', () => {
-    const before = `${JSON.stringify({ ...CLAUDE, permissions: { allow: [...AUTO_FIX_RULES, 'Bash(pnpm test)', REVIEW_THREAD_RULE], ask: ['Bash(git push *)'] } }, null, 2)}\n`;
+  it('leaves a file that already allows the Auto-fix and artifact rules as it is', () => {
+    const before = `${JSON.stringify({ ...CLAUDE, permissions: { allow: [...AUTO_FIX_RULES, 'Bash(pnpm test)', REVIEW_THREAD_RULE, ...ARTIFACT_RULES], ask: ['Bash(git push *)'] } }, null, 2)}\n`;
     assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [] });
   });
 
   it('adds no Auto-fix rule where the whole pull request server is allowed', () => {
     for (const server of ['mcp__ccd_pr', 'mcp__ccd_pr__*']) {
-      assert.deepEqual(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, server] } })).changes, [], server);
+      assert.deepEqual(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, server, ...ARTIFACT_RULES] } })).changes, [], server);
     }
-    assert.ok(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, 'mcp__ccd_pr_*'] } })).labels.includes('Auto-fix rules'));
+    assert.ok(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, 'mcp__ccd_pr_*', ...ARTIFACT_RULES] } })).labels.includes('Auto-fix rules'));
   });
 
   it("adds only the Auto-fix rules a file lacks, after the client's own", () => {
-    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status'] } }));
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status', ...ARTIFACT_RULES] } }));
     assert.deepEqual(JSON.parse(text).permissions, {
-      allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status', 'mcp__ccd_pr__bind_pr', 'mcp__ccd_pr__set_monitor'],
+      allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, 'mcp__ccd_pr__get_status', ...ARTIFACT_RULES, 'mcp__ccd_pr__bind_pr', 'mcp__ccd_pr__set_monitor'],
     });
     assert.deepEqual(changes, ['allow mcp__ccd_pr__bind_pr, mcp__ccd_pr__set_monitor without a prompt, so agent sessions turn Auto-fix on for their own pull requests']);
     assert.deepEqual(labels, ['Auto-fix rules']);
     assert.deepEqual(claudeSettings(text).changes, []);
+  });
+
+  it("adds only the artifact rules a file lacks, after the client's own", () => {
+    assert.deepEqual(ARTIFACT_RULES, ['mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__edit_version']);
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files'] } }));
+    assert.deepEqual(JSON.parse(text).permissions, {
+      allow: ['Bash(pnpm test)', REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__edit_version'],
+    });
+    assert.deepEqual(changes, ['allow mcp__claude-artifacts__publish_version, mcp__claude-artifacts__edit_version without a prompt, so agent sessions publish the page an ask to the owner links']);
+    assert.deepEqual(labels, ['artifact rules']);
+    assert.deepEqual(claudeSettings(text).changes, []);
+  });
+
+  it('adds no artifact rule where the whole artifacts server is allowed', () => {
+    for (const server of ['mcp__claude-artifacts', 'mcp__claude-artifacts__*']) {
+      assert.deepEqual(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, server] } })).changes, [], server);
+    }
+    assert.ok(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts_*'] } })).labels.includes('artifact rules'));
+  });
+
+  it('says allow rules when it adds the Auto-fix and artifact rules together', () => {
+    const { text, changes, labels } = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE] } }));
+    assert.deepEqual(JSON.parse(text).permissions.allow, ALLOW);
+    assert.equal(changes.length, 2, changes.join('\n'));
+    assert.deepEqual(labels, ['allow rules']);
   });
 
   it('refuses an env that is not an object, and a file that is not one', () => {

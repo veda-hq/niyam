@@ -28,7 +28,7 @@ import { type Finding, closing, findingLines, heading, painter, tilde } from './
 import { exposure, exposureFindings, movedFindings, readDeclined, setAside } from './lockout.ts';
 import { CLOUD_SETUP_PATH, HOOKS_PATH, SARATHI_PATH } from './onboard-pull.ts';
 import { leftoverDir, leftoverToken } from './machine.ts';
-import { BOARD_SECRETS, GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, missingAutoFixRules, sarathiRunner } from './onboard.ts';
+import { BOARD_SECRETS, GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, missingArtifactRules, missingAutoFixRules, sarathiRunner } from './onboard.ts';
 import { secretNames } from './secrets.ts';
 import { isOrganisation } from './owner-login.ts';
 import { leftBehind } from './owner-step.ts';
@@ -225,8 +225,8 @@ async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Fi
 
 /**
  * Client hooks that reach GitHub outside `as-agent` where doctor runs, a Mac
- * or a cloud session, and the Auto-fix rules an onboarded repo's Claude Code
- * settings lack.
+ * or a cloud session, and the Auto-fix and artifact rules an onboarded repo's
+ * Claude Code settings lack.
  */
 function repoFindings(sys: Sys): Finding[] {
   return [
@@ -237,7 +237,7 @@ function repoFindings(sys: Sys): Finding[] {
         fix: `run its gh or git via niyam as-agent --session <session_id> -- (exit ${LOCKED} when not the agent)`,
       }),
     ),
-    ...autoFixFindings(sys),
+    ...allowFindings(sys),
     ...twiceFindings(sys),
   ];
 }
@@ -284,11 +284,12 @@ function twiceFindings(sys: Sys): Finding[] {
 }
 
 /**
- * Which of onboard's Auto-fix rules the repo's `.claude/settings.json`
- * lacks, so the auto-mode classifier refuses an agent session turning
- * Auto-fix on: checked in an onboarded repo whose file doctor can read.
+ * Which of onboard's Auto-fix and artifact rules the repo's
+ * `.claude/settings.json` lacks, so the auto-mode classifier refuses an agent
+ * session turning Auto-fix on, or publishing the page an ask to the owner
+ * links: checked in an onboarded repo whose file doctor can read.
  */
-function autoFixFindings(sys: Sys): Finding[] {
+function allowFindings(sys: Sys): Finding[] {
   let settings: unknown;
   try {
     // Where session-start looks, so a cloud session's CLI run from outside the clone still finds it.
@@ -300,9 +301,11 @@ function autoFixFindings(sys: Sys): Finding[] {
     return [];
   }
   const missing = missingAutoFixRules(settings);
-  return missing.length === 0
-    ? []
-    : [{ mark: '▲', text: `${HOOKS_PATH} does not allow ${missing.join(', ')}, so agent sessions cannot turn Auto-fix on`, fix: ONBOARD }];
+  const unpublished = missingArtifactRules(settings);
+  return [
+    ...(missing.length === 0 ? [] : [{ mark: '▲' as const, text: `${HOOKS_PATH} does not allow ${missing.join(', ')}, so agent sessions cannot turn Auto-fix on`, fix: ONBOARD }]),
+    ...(unpublished.length === 0 ? [] : [{ mark: '▲' as const, text: `${HOOKS_PATH} does not allow ${unpublished.join(', ')}, so agent sessions cannot publish the page an ask to the owner links`, fix: ONBOARD }]),
+  ];
 }
 
 /** Prints the findings, grouped, and closes; exit 1 when any is broken. */

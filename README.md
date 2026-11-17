@@ -180,7 +180,15 @@ any Markdown emphasis, or names an owner login, with or without `@`) must
 link a published page (`https://claude.ai/artifact/…` or
 `https://claude.ai/code/artifact/…`) and fit 500 characters; otherwise it is
 refused, naming the rule and the fix: publish the page, then post the
-question, the link and how to answer. A body the guard cannot read in full
+question, the link and how to answer. In auto mode the classifier refuses
+the publish as communication unless the repo's `.claude/settings.json`
+allows it, so `onboard` adds `mcp__claude-artifacts__publish_version`,
+`mcp__claude-artifacts__publish_files` and
+`mcp__claude-artifacts__edit_version` to its `permissions.allow` (none
+where `mcp__claude-artifacts` or `mcp__claude-artifacts__*` allows the whole
+server), and `doctor` warns (`▲`) about each one an onboarded repo's file
+lacks. A new page is private to its owner; a republish to a page already
+shared changes what its readers see, with no prompt. A body the guard cannot read in full
 (a variable, a command substitution other than `cat`) is judged by what it
 spells out; where that asks the owner, or the body opens with the unknown
 part, it is refused with how to write it so the guard can read it; so is a comment with no body in the command, which gh would take from an editor, a prompt or the browser. Commands inside `$(…)`, backquotes and `sh -c` are read too. `propose`
@@ -419,8 +427,11 @@ on any platform without a token store, `niyam env` prints the lock alone.
    `.claude/sarathi.json`, below), and `permissions.allow` rules
    for `niyam review-thread` (replacing the rule under the old command) and for
    the app's `mcp__ccd_pr__bind_pr`, `mcp__ccd_pr__get_status` and
-   `mcp__ccd_pr__set_monitor`, which turn Auto-fix on (a rerun adds only
-   the ones missing), and
+   `mcp__ccd_pr__set_monitor`, which turn Auto-fix on, and for
+   `mcp__claude-artifacts__publish_version`, `publish_files` and
+   `edit_version`, which publish the page an ask to the owner links (a
+   rerun adds only the ones missing; a file allowing a whole server gets
+   none of its rules), and
    writes `.github/workflows/niyam.yml`, which calls this repository's
    shared checks (`.github/workflows/checks.yml`) from two jobs: `niyam`
    on pull requests and pushes, read-only, and `niyam-weekly` on the
@@ -1513,7 +1524,7 @@ installs it, since the Setup script does not: both are `✓`. GitHub
 checks that the account the proxy acts as is one of the settings' agents,
 and that `session-start` gave the session that identity (`✗` otherwise:
 `gh` and git stay locked out). This repo lists hooks that reach GitHub
-outside `as-agent` and the Auto-fix rules missing, as on a Mac. It installs nothing; on Linux outside a
+outside `as-agent` and the Auto-fix and artifact rules missing, as on a Mac. It installs nothing; on Linux outside a
 cloud session, `doctor` still refuses.
 
 ### Owner steps
@@ -1609,7 +1620,7 @@ tag and the commit. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.24/veda-hq-niyam-0.6.24.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.6.25/veda-hq-niyam-0.6.25.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release
