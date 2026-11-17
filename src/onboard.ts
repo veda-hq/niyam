@@ -278,24 +278,76 @@ export const ARTIFACT_RULES = ['mcp__claude-artifacts__publish_version', 'mcp__c
 /** The rules that allow every tool of the artifacts server, ARTIFACT_RULES among them. */
 const ARTIFACT_SERVER_RULES = ['mcp__claude-artifacts', 'mcp__claude-artifacts__*'];
 
+/** A group of `rules` a settings file needs: those its `permissions.allow` lacks, and those its `permissions.deny` overrides. */
+export interface RuleNeeds {
+  /** Lacking and not denied, in their order: what onboard adds. */
+  missing: string[];
+  /** Overridden by a deny rule, in their order, as the file's owner chose. */
+  denied: string[];
+  /** Those of `denied` onboard would add but for the deny: what it leaves out. */
+  leftOut: string[];
+  /** The file's deny rules that override them, in the file's order. */
+  deniedBy: string[];
+  /** Those of `deniedBy` that override a rule in `leftOut`, in the file's order. */
+  leftOutBy: string[];
+}
+
 /**
- * Which of `rules` a settings file's `permissions.allow` lacks, in their
- * order: none when it allows the whole server, by one of `server`.
+ * Whether deny rule `by` matches MCP tool `tool` of the server named `bare`
+ * (`mcp__<server>`), as Claude Code's permissions page says rules match: the
+ * tool's own name, the bare server, `*` and `mcp__*` (every tool, every MCP
+ * tool), and a glob in the tool name after a literal `mcp__<server>__`, such
+ * as `mcp__<server>__*` or `mcp__<server>__publish_*`. A glob in the server's
+ * own name the page does not describe, so it matches nothing here.
  */
-function missingRules(settings: unknown, rules: readonly string[], server: string[]): string[] {
-  const allow = (settings as { permissions?: { allow?: unknown } } | null)?.permissions?.allow;
-  if (Array.isArray(allow) && allow.some((rule) => server.includes(rule as string))) return [];
-  return rules.filter((rule) => !Array.isArray(allow) || !allow.includes(rule));
+function deniesTool(by: string, tool: string, bare: string): boolean {
+  if (by === tool || by === bare || by === '*' || by === 'mcp__*') return true;
+  const prefix = `${bare}__`;
+  if (!by.startsWith(prefix) || !by.includes('*') || !tool.startsWith(prefix)) return false;
+  const glob = by.slice(prefix.length).split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  return new RegExp(`^${glob}$`).test(tool.slice(prefix.length));
 }
 
-/** Which of AUTO_FIX_RULES a settings file's `permissions.allow` lacks. */
-export function missingAutoFixRules(settings: unknown): string[] {
-  return missingRules(settings, AUTO_FIX_RULES, PR_SERVER_RULES);
+/**
+ * Which of `rules` a settings file lacks, in their order: none lacks when
+ * its `permissions.allow` allows the whole server, by one of `server`. Claude
+ * Code applies deny before allow, so a rule that `permissions.deny` overrides
+ * (`deniesTool`) is denied, not missing: an allow rule for it would do
+ * nothing. A deny or allow that is not an array names nothing.
+ */
+function ruleNeeds(settings: unknown, rules: readonly string[], server: string[]): RuleNeeds {
+  const permissions = (settings as { permissions?: { allow?: unknown; deny?: unknown } } | null)?.permissions;
+  const listed = (value: unknown): string[] => (Array.isArray(value) ? value.filter((rule): rule is string => typeof rule === 'string') : []);
+  const allow = listed(permissions?.allow);
+  const deny = listed(permissions?.deny);
+  const bare = server[0]!;
+  const deniedBy = deny.filter((by) => rules.some((rule) => deniesTool(by, rule, bare)));
+  const denied = rules.filter((rule) => deny.some((by) => deniesTool(by, rule, bare)));
+  if (allow.some((rule) => server.includes(rule))) return { missing: [], denied, leftOut: [], deniedBy, leftOutBy: [] };
+  const lacking = rules.filter((rule) => !allow.includes(rule));
+  const leftOut = lacking.filter((rule) => denied.includes(rule));
+  const leftOutBy = deniedBy.filter((by) => leftOut.some((rule) => deniesTool(by, rule, bare)));
+  return { missing: lacking.filter((rule) => !denied.includes(rule)), denied, leftOut, deniedBy, leftOutBy };
 }
 
-/** Which of ARTIFACT_RULES a settings file's `permissions.allow` lacks. */
-export function missingArtifactRules(settings: unknown): string[] {
-  return missingRules(settings, ARTIFACT_RULES, ARTIFACT_SERVER_RULES);
+/** Which of AUTO_FIX_RULES a settings file lacks, and which its deny rules override. */
+export function autoFixRuleNeeds(settings: unknown): RuleNeeds {
+  return ruleNeeds(settings, AUTO_FIX_RULES, PR_SERVER_RULES);
+}
+
+/** Which of ARTIFACT_RULES a settings file lacks, and which its deny rules override. */
+export function artifactRuleNeeds(settings: unknown): RuleNeeds {
+  return ruleNeeds(settings, ARTIFACT_RULES, ARTIFACT_SERVER_RULES);
+}
+
+/**
+ * What a group's left-out rules come to, in a line for onboard's plan: the
+ * group's name when the deny leaves all of it out, else the rules it does.
+ * A denied rule the file allows already is not left out, and goes unsaid.
+ */
+function deniedLines(needs: RuleNeeds, rules: readonly string[], group: string): string[] {
+  if (needs.leftOut.length === 0) return [];
+  return [`${needs.leftOut.length === rules.length ? group : needs.leftOut.join(', ')} left out: ${HOOKS_PATH} denies ${needs.leftOutBy.join(', ')}`];
 }
 
 /** The hook commands older releases wrote, which onboard replaces with this release's. */
@@ -986,6 +1038,8 @@ export interface SarathiEdit {
  * entry an older release wrote swapped where it stands, a missing one added,
  * the lock's variables set in `env`, and REVIEW_THREAD_RULE, AUTO_FIX_RULES and ARTIFACT_RULES allowed. Every edit is made in the text, so
  * the rest of the file keeps its layout. Says what changed, for the question.
+ * A rule the file's `permissions.deny` overrides is not allowed, since the
+ * allow would do nothing; `denied` says which, for the plan, only when any is.
  *
  * Where the project keeps `.claude/sarathi.json` (`sarathiBefore`) and the
  * settings run sarathi for an event, with a matcher that lets niyam's hook
@@ -995,7 +1049,10 @@ export interface SarathiEdit {
  * own entry gets at least the handler's timeout, as `sarathi check` asks.
  * `sarathi` is said only when that file changes.
  */
-export function claudeSettings(before: string | undefined, sarathiBefore?: string): { text: string; changes: string[]; labels: string[]; sarathi?: SarathiEdit } {
+export function claudeSettings(
+  before: string | undefined,
+  sarathiBefore?: string,
+): { text: string; changes: string[]; labels: string[]; denied?: string[]; sarathi?: SarathiEdit } {
   let text = before ?? '{}\n';
   const changes: string[] = [];
   // The same, in a word or two each, for the plan.
@@ -1003,6 +1060,7 @@ export function claudeSettings(before: string | undefined, sarathiBefore?: strin
   let moved = false;
   let timed = false;
   const labels: string[] = [];
+  const denied: string[] = [];
   const parsed = (): object => JSON.parse(text) as object;
   const first: unknown = parsed();
   if (typeof first !== 'object' || first === null || Array.isArray(first)) throw new Error(`${HOOKS_PATH} is not a JSON object`);
@@ -1123,28 +1181,33 @@ export function claudeSettings(before: string | undefined, sarathiBefore?: strin
       text = appendToArray(text, ['permissions'], 'allow', REVIEW_THREAD_RULE);
       changes.push('allow niyam review-thread without a prompt, so agent sessions answer review threads on their own pull requests');
     }
-    const lacking = missingAutoFixRules(parsed());
+    const autoFix = autoFixRuleNeeds(parsed());
+    const lacking = autoFix.missing;
     for (const rule of lacking) text = appendToArray(text, ['permissions'], 'allow', rule);
     if (lacking.length > 0) {
       changes.push(`allow ${lacking.join(', ')} without a prompt, so agent sessions turn Auto-fix on for their own pull requests`);
     }
-    const unpublished = missingArtifactRules(parsed());
+    const artifacts = artifactRuleNeeds(parsed());
+    const unpublished = artifacts.missing;
     for (const rule of unpublished) text = appendToArray(text, ['permissions'], 'allow', rule);
     if (unpublished.length > 0) {
       changes.push(`allow ${unpublished.join(', ')} without a prompt, so agent sessions publish the page an ask to the owner links`);
     }
+    // A rule the file denies is the owner's choice: an allow rule for it would do nothing, so the plan says so instead.
+    denied.push(...deniedLines(autoFix, AUTO_FIX_RULES, 'Auto-fix rules'), ...deniedLines(artifacts, ARTIFACT_RULES, 'artifact rules'));
     // One group's own word, or one word for several, so the plan's line stays short.
     const groups = [review || renamed.replaced > 0 ? 'review rule' : '', lacking.length > 0 ? 'Auto-fix rules' : '', unpublished.length > 0 ? 'artifact rules' : ''].filter(Boolean);
     if (groups.length > 0) labels.push(groups.length === 1 ? groups[0]! : 'allow rules');
   } catch (error) {
     throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
   }
+  const said = denied.length > 0 ? { denied } : {};
   if (sarathi !== undefined && sarathi.changes.length > 0) {
     if (handlersChanged) sarathi.labels.push(`hooks ${handlersChanged}`);
     if (handlersTimed) sarathi.labels.push('timeout');
-    return { text, changes, labels, sarathi };
+    return { text, changes, labels, ...said, sarathi };
   }
-  return { text, changes, labels };
+  return { text, changes, labels, ...said };
 }
 
 /** Who the run's sign-in is, the owner's likely login; undefined when it failed. */
@@ -1498,6 +1561,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   const existing = fileAt(HOOKS_PATH);
   // Worked out before the plan, so a file onboard cannot edit is refused before any question.
   const claude = claudeSettings(existing, fileAt(SARATHI_PATH));
+  warnings.push(...(claude.denied ?? []));
   if (claude.changes.length > 0) {
     pull.push({ label: 'settings.json', detail: existing === undefined ? 'new' : claude.labels.join(', ') });
     change(HOOKS_PATH, claude.text, claude.changes.join('; '));
