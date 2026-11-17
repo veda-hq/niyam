@@ -187,6 +187,43 @@ describe('doctor', () => {
     assert.equal((await check(sys)).out.at(-1), '└  1 to fix', 'a near miss is not the whole server');
   });
 
+  it('says a rule group the settings deny is denied on purpose, not missing, and still all good', async () => {
+    const sys = healthy();
+    const settings = (allow: string[], deny: unknown): void => {
+      sys.files.set(`${ROOT}/.claude/settings.json`, JSON.stringify({ permissions: { allow, deny } }));
+    };
+    for (const server of ['mcp__claude-artifacts', 'mcp__claude-artifacts__*']) {
+      settings([...AUTO_FIX_RULES], ['Artifact', server]);
+      const { code, out } = await check(sys);
+      assert.equal(code, 0);
+      assert.deepEqual(out.slice(-5), [
+        '│',
+        '◇  This repo',
+        `✓  .claude/settings.json denies ${server} on purpose, so agent sessions do not publish pages`,
+        '│',
+        '└  All good',
+      ]);
+    }
+    // One tool denied: the others still missing are to fix.
+    settings([...AUTO_FIX_RULES], ['mcp__claude-artifacts__edit_version']);
+    const partly = (await check(sys)).out;
+    assert.deepEqual(marked(partly, '▲'), [
+      '▲  .claude/settings.json does not allow mcp__claude-artifacts__publish_version, mcp__claude-artifacts__publish_files, so agent sessions cannot publish the page an ask to the owner links → niyam onboard again',
+    ]);
+    assert.ok(partly.includes('✓  .claude/settings.json denies mcp__claude-artifacts__edit_version on purpose, so agent sessions do not publish pages'), partly.join('\n'));
+    // The Auto-fix rules alike, and a near miss or a deny that is not a list denies nothing.
+    settings([...ARTIFACT_RULES], ['mcp__ccd_pr__*']);
+    const autoFix = await check(sys);
+    assert.ok(autoFix.out.includes('✓  .claude/settings.json denies mcp__ccd_pr__* on purpose, so agent sessions do not turn Auto-fix on'), autoFix.out.join('\n'));
+    assert.equal(autoFix.out.at(-1), '└  All good');
+    for (const deny of [['mcp__ccd_pr_*'], 'mcp__ccd_pr']) {
+      settings([...ARTIFACT_RULES], deny);
+      assert.deepEqual(marked((await check(sys)).out, '▲'), [
+        `▲  .claude/settings.json does not allow ${AUTO_FIX_RULES.join(', ')}, so agent sessions cannot turn Auto-fix on → niyam onboard again`,
+      ], JSON.stringify(deny));
+    }
+  });
+
   it('says nothing about Auto-fix rules where the repo is not onboarded or its settings do not parse', async () => {
     const sys = healthy();
     sys.files.set(`${ROOT}/.claude/settings.json`, '{ not json');
@@ -861,6 +898,14 @@ describe('doctor in a Claude cloud session', () => {
       '▲  .claude/settings.json does not allow mcp__ccd_pr__set_monitor, so agent sessions cannot turn Auto-fix on → niyam onboard again',
       '▲  .claude/settings.json does not allow mcp__claude-artifacts__publish_files, mcp__claude-artifacts__edit_version, so agent sessions cannot publish the page an ask to the owner links → niyam onboard again',
     ]);
+  });
+
+  it('says a rule group the settings deny is denied on purpose, as on a Mac', async () => {
+    const sys = cloud();
+    sys.files.set(`${ROOT}/.claude/settings.json`, JSON.stringify({ permissions: { allow: [...AUTO_FIX_RULES], deny: ['mcp__claude-artifacts'] } }));
+    const { out } = await check(sys);
+    assert.deepEqual(marked(out, '▲'), []);
+    assert.ok(out.includes('✓  .claude/settings.json denies mcp__claude-artifacts on purpose, so agent sessions do not publish pages'), out.join('\n'));
   });
 
   it('groups client hooks that reach GitHub outside as-agent under This repo, as on a Mac', async () => {
