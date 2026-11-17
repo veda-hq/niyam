@@ -2221,8 +2221,9 @@
     unarchived, with a Status field, rather than let nothing moved read as
     "where they belong" (veda-hq/niyam#420, veda-hq/veda#168). The desktop
     push prints the same line. Adding the issue to the board stays #407's.
-  - Each run mints a board app token and reads the owner's Projects through
-    REST: a few calls a push, well inside the app's hourly limit.
+  - Where the caller passes the board app's secrets, each Slice started job
+    mints a board app token and reads the owner's Projects through REST: a
+    few calls a push, well inside the app's hourly limit.
   - Rejected: the explicit list opened, reopened, synchronize and edited,
     which would drift from Work rules' own events; running on the owner's
     👍 (`issue_comment` reactions start no workflow, and the hourly sweep
