@@ -2229,3 +2229,24 @@
     has no pull request to judge); and moving the board from the Work rules
     job, which would put the board app's token, and its failures, into a
     required check.
+- **2026-11-17 — Record: onboard sees the review routine by its verdicts
+  (Work item #430, slice #458).** The review routine was the last by-hand
+  step on athya_mono, and onboard printed it on every run after it ran.
+  Alok asked that onboard stop listing it once it is set up. Claude's
+  routines API answers only a Claude Code session's own sign-in, so onboard
+  looks for the routine's trace on GitHub instead.
+  - With the agent's token, onboard reads the repository's issue comments
+    of the last 21 days (three weekly runs), newest first, at most ten
+    pages of 100. A comment by the agent, in any case of its login, that
+    starts `Kept:`, `Settled:` or `Held for ` (the verdicts in
+    `routines/review.md`) is the trace. `since` is by last update, so a
+    comment created before the cutoff does not count.
+  - Seen: the routine is under neither "By hand" nor the pull request's
+    "Left to do by hand". "Done at the terminal" names the issue and date.
+  - Not seen, or GitHub refuses or fails: the step stays, its terminal line
+    ending "skip it if done", as the claude.ai line does. Being wrong there
+    costs one line the owner skips; a check that blocked would cost a run.
+  - A routine with no decision due in three weeks leaves no trace and is
+    listed again; the line says to skip it.
+  - Rejected: widening the weekly job's verdict match to `Held for`, which
+    would take off the `needs-owner` the routine's own hold puts on.

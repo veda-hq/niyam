@@ -215,7 +215,9 @@ describe('onboard', () => {
       '│    2. Once for example-org/example-app: in Claude Code, run /schedule and',
       "│       create a weekly routine on it, with claude.ai's GitHub connected as",
       '│       ExampleBot and the prompt below the line in',
-      `│       https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md.`,
+      // GitHub lists no verdict by the agent here, so the routine may not run yet.
+      `│       https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md; skip it`,
+      '│       if done.',
       '│',
       '│    3. Once per claude.ai account: sign in at https://claude.ai/code and',
       '│       connect GitHub as ExampleBot (or change it at',
@@ -282,6 +284,41 @@ describe('onboard', () => {
     assert.deepEqual(sys.calls.filter((c) => c.command === 'rm').at(-1)?.args, ['-rf', '/tmp/verify']);
     const reads = sys.requests.filter((r) => r.url === `https://api.github.com${REPO}`);
     assert.equal(reads[0]?.token, TOKEN, 'checks access as the agent');
+  });
+
+  const TRACE = `${REPO}/issues/comments?since=2026-10-09T12:00:00.000Z&sort=created&direction=desc&per_page=100&page=1`;
+
+  it('leaves the review routine off the by-hand steps once the agent has given a verdict on the repository', async () => {
+    const sys = fresh();
+    sys.route('GET', TRACE, {
+      status: 200,
+      json: [{ body: 'Held for example-owner: it spends money', user: { login: 'examplebot' }, issue_url: `https://api.github.com${REPO}/issues/3045`, created_at: '2026-10-27T06:00:00Z' }],
+    });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(!out.some((line) => line.includes('/schedule') || line.includes('routines/review.md')), out.join('\n'));
+    assert.ok(out.includes('│    2. Once per claude.ai account: sign in at https://claude.ai/code and'), out.join('\n'));
+    const pull = sys.requests.find((r) => r.method === 'POST' && r.url.endsWith(`${REPO}/pulls`));
+    const { body } = pull?.body as { body: string };
+    assert.ok(!body.includes('The review routine'), body);
+    const from = body.indexOf('Done at the terminal');
+    const to = body.indexOf('Left to do by hand');
+    assert.ok(from !== -1 && to > from, body);
+    assert.ok(body.slice(from, to).includes('\n- review routine: ExampleBot gave a verdict on #3045 on 2026-10-27, so it runs\n'), body);
+  });
+
+  it('leaves the review routine by hand when GitHub cannot list the comments', async () => {
+    const sys = fresh();
+    sys.route('GET', TRACE, () => {
+      throw new Error('fetch failed');
+    });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(out.includes('│       if done.'), out.join('\n'));
+    const pull = sys.requests.find((r) => r.method === 'POST' && r.url.endsWith(`${REPO}/pulls`));
+    const { body } = pull?.body as { body: string };
+    assert.ok(body.includes('\n- The review routine: create a weekly Claude routine on example-org/example-app'), body);
+    assert.ok(!body.includes('- review routine:'), body);
   });
 
   it("uses GitHub's spelling of logins typed in another case", async () => {
@@ -729,6 +766,71 @@ describe('onboard', () => {
       assert.deepEqual(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, server] } })).changes, [], server);
     }
     assert.ok(claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts_*'] } })).labels.includes('artifact rules'));
+  });
+
+  it('adds no artifact rule the file denies, by server or by tool, and says so instead', () => {
+    for (const server of ['mcp__claude-artifacts', 'mcp__claude-artifacts__*']) {
+      const before = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['Artifact', server] } });
+      assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [], denied: [`artifact rules left out: .claude/settings.json denies ${server}`] }, server);
+    }
+    const one = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['mcp__claude-artifacts__edit_version'] } }));
+    assert.deepEqual(JSON.parse(one.text).permissions.allow, [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__publish_files']);
+    assert.deepEqual(one.changes, ['allow mcp__claude-artifacts__publish_version, mcp__claude-artifacts__publish_files without a prompt, so agent sessions publish the page an ask to the owner links']);
+    assert.deepEqual(one.labels, ['artifact rules']);
+    assert.deepEqual(one.denied, ['mcp__claude-artifacts__edit_version left out: .claude/settings.json denies mcp__claude-artifacts__edit_version']);
+    assert.deepEqual(claudeSettings(one.text).changes, [], 'a second run changes nothing');
+    // Every tool, every MCP tool, and a glob in the tool's name deny as Claude Code matches them.
+    for (const every of ['*', 'mcp__*']) {
+      const before = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES], deny: [every] } });
+      assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [] }, every);
+      const lacking = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE], deny: [every] } }));
+      assert.deepEqual(lacking.changes, [], every);
+      assert.deepEqual(lacking.denied, [`Auto-fix rules left out: .claude/settings.json denies ${every}`, `artifact rules left out: .claude/settings.json denies ${every}`], every);
+    }
+    const prefixed = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['mcp__claude-artifacts__publish_*'] } }));
+    assert.deepEqual(JSON.parse(prefixed.text).permissions.allow, [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__edit_version']);
+    assert.deepEqual(prefixed.denied, ['mcp__claude-artifacts__publish_version, mcp__claude-artifacts__publish_files left out: .claude/settings.json denies mcp__claude-artifacts__publish_*']);
+    // A near miss, a glob in the server's name, which Claude Code's page does not describe, and a deny that is not a list deny nothing.
+    for (const deny of [['mcp__claude-artifacts_*'], ['mcp__claude-art*'], ['mcp__claude-artifacts__publish'], 'mcp__claude-artifacts']) {
+      const near = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny } }));
+      assert.deepEqual(JSON.parse(near.text).permissions.allow, ALLOW, JSON.stringify(deny));
+      assert.equal(near.denied, undefined);
+    }
+  });
+
+  it('adds no Auto-fix rule the file denies, and says each group it leaves out', () => {
+    const before = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE], deny: ['mcp__ccd_pr', 'mcp__claude-artifacts__*'] } });
+    assert.deepEqual(claudeSettings(before), {
+      text: before,
+      changes: [],
+      labels: [],
+      denied: ['Auto-fix rules left out: .claude/settings.json denies mcp__ccd_pr', 'artifact rules left out: .claude/settings.json denies mcp__claude-artifacts__*'],
+    });
+    const two = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...ARTIFACT_RULES], deny: ['mcp__ccd_pr__set_monitor', 'mcp__ccd_pr__bind_pr'] } }));
+    assert.deepEqual(JSON.parse(two.text).permissions.allow, [REVIEW_THREAD_RULE, ...ARTIFACT_RULES, 'mcp__ccd_pr__get_status']);
+    assert.deepEqual(two.denied, ['mcp__ccd_pr__bind_pr, mcp__ccd_pr__set_monitor left out: .claude/settings.json denies mcp__ccd_pr__set_monitor, mcp__ccd_pr__bind_pr']);
+    // An allow rule already there for a denied tool is the owner's, and stays; nothing is left out, so nothing is said.
+    const kept = JSON.stringify({ ...CLAUDE, permissions: { allow: ALLOW, deny: ['mcp__claude-artifacts'] } });
+    assert.deepEqual(claudeSettings(kept), { text: kept, changes: [], labels: [] });
+    const some = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files'], deny: ['mcp__claude-artifacts'] } }));
+    assert.deepEqual(some.changes, []);
+    assert.deepEqual(some.denied, ['mcp__claude-artifacts__publish_version, mcp__claude-artifacts__edit_version left out: .claude/settings.json denies mcp__claude-artifacts']);
+    // A deny behind a tool the file allows already is not named as a cause.
+    const causes = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_files'], deny: ['mcp__claude-artifacts__publish_files', 'mcp__claude-artifacts__edit_version'] } }));
+    assert.deepEqual(causes.denied, ['mcp__claude-artifacts__edit_version left out: .claude/settings.json denies mcp__claude-artifacts__edit_version']);
+    const whole = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts'], deny: ['mcp__claude-artifacts__edit_version'] } });
+    assert.deepEqual(claudeSettings(whole), { text: whole, changes: [], labels: [] }, 'the whole server allowed: nothing would be added');
+  });
+
+  it("shows the rules a client's deny leaves out in the plan, with no settings.json change", async () => {
+    const sys = fresh();
+    sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity'] }));
+    sys.files.set(HOOKS, JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['mcp__claude-artifacts'] } }));
+    sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
+    const { code, out } = await run(sys, ['--dry-run']);
+    assert.equal(code, 0);
+    assert.ok(out.includes('│  ! artifact rules left out: .claude/settings.json denies mcp__claude-artifacts'), out.join('\n'));
+    assert.ok(!planned(out, 'Pull request').some((item) => item.startsWith('settings.json')), out.join('\n'));
   });
 
   it('says allow rules when it adds the Auto-fix and artifact rules together', () => {

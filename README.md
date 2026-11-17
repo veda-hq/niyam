@@ -157,6 +157,13 @@ In auto mode the classifier refuses those calls unless the repo's
 `mcp__ccd_pr__get_status` and `mcp__ccd_pr__set_monitor` to its
 `permissions.allow`, and `doctor` warns under "This repo" (`▲`) about each
 one an onboarded repo's file lacks. They reach the app only, not GitHub.
+Claude Code applies deny before allow, so where the file's
+`permissions.deny` matches one of the tools (by its name, `mcp__ccd_pr`,
+`mcp__ccd_pr__*` or another glob after `mcp__ccd_pr__`, `mcp__*` or `*`),
+`onboard` adds no rule for it and says so in its plan, and `doctor` marks it
+denied on purpose (`✓`). A group denied whole leaves nothing to fix; in a
+group denied in part, `doctor` still warns (`▲`) about each other rule the
+file lacks.
 
 Before each Bash command, the client's PreToolUse hook runs `niyam
 guard`: a command running `gh` or a git command that reaches a remote (push,
@@ -187,7 +194,10 @@ allows it, so `onboard` adds `mcp__claude-artifacts__publish_version`,
 `mcp__claude-artifacts__edit_version` to its `permissions.allow` (none
 where `mcp__claude-artifacts` or `mcp__claude-artifacts__*` allows the whole
 server), and `doctor` warns (`▲`) about each one an onboarded repo's file
-lacks. A new page is private to its owner; a republish to a page already
+lacks. A repo that publishes its pages another way may deny the artifacts
+server on purpose. Where the file's `permissions.deny` matches one of the
+three, as for the Auto-fix rules above, `onboard` adds no rule for it and
+its plan says so, and `doctor` marks it denied on purpose (`✓`). A new page is private to its owner; a republish to a page already
 shared changes what its readers see, with no prompt. A body the guard cannot read in full
 (a variable, a command substitution other than `cat`) is judged by what it
 spells out; where that asks the owner, or the body opens with the unknown
@@ -410,7 +420,8 @@ on any platform without a token store, `niyam env` prints the lock alone.
    │    1. Once for owner/repo: in Claude Code, run /schedule and create a
    │       weekly routine on it, with claude.ai's GitHub connected as AGENT and
    │       the prompt below the line in
-   │       https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md.
+   │       https://github.com/veda-hq/niyam/blob/v0.6.15/routines/review.md; skip
+   │       it if done.
    │
    │    2. Once per claude.ai account: sign in at https://claude.ai/code and
    │       connect GitHub as AGENT (or change it at
@@ -431,7 +442,8 @@ on any platform without a token store, `niyam env` prints the lock alone.
    `mcp__claude-artifacts__publish_version`, `publish_files` and
    `edit_version`, which publish the page an ask to the owner links (a
    rerun adds only the ones missing; a file allowing a whole server gets
-   none of its rules), and
+   none of its rules, and a rule the file's `permissions.deny` overrides is
+   left out, the plan saying so), and
    writes `.github/workflows/niyam.yml`, which calls this repository's
    shared checks (`.github/workflows/checks.yml`) from two jobs: `niyam`
    on pull requests and pushes, read-only, and `niyam-weekly` on the
@@ -1125,7 +1137,14 @@ or `/schedule`), with claude.ai's GitHub connected as the agent, and the
 prompt from `routines/review.md` at the release in use. It cannot create the
 routine itself: Claude's routines API answers only a Claude Code session's own
 sign-in, not a command, and a routine works as claude.ai's GitHub connection,
-which no API names.
+which no API names. It takes the routine's trace as evidence it runs instead:
+once the agent has commented `Kept:`, `Settled:` or `Held for` on any issue of
+the repository in the last three weeks (onboard reads up to 1,000 of its
+newest comments, as the agent), the routine leaves "By hand" and the pull
+request names the verdict it found under "Done at the terminal". Any such
+comment by the agent counts, one from a session run by hand included. Where no
+verdict is found in those three weeks, or GitHub does not list the comments,
+the step stays, ending "skip it if done".
 
 `onboard` also writes a pre-push git hook running `niyam pre-push`,
 for every adopter. In a local agent session (one session-start set up, or
@@ -1658,7 +1677,7 @@ tag and the commit. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.7.0/veda-hq-niyam-0.7.0.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.7.1/veda-hq-niyam-0.7.1.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release
