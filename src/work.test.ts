@@ -115,9 +115,15 @@ function github(sys: FakeSys, issue: Node | null, pulls: Node[] = []): void {
     return http(url, options);
   };
   sys.route('GET', `/repos/${SLUG}/pulls?state=open&per_page=100&page=1`, { status: 200, json: pulls });
-  // No open Work items and no Projects, so a push moves nothing on the board.
+  // No open Work items, and one Project holding slice #12 In Progress already, so a push moves nothing on the board.
   sys.route('GET', `${ISSUES}?state=open&type=Work%20item&sort=created&direction=desc&per_page=100`, { status: 200, json: [] });
-  sys.route('GET', '/orgs/example-org/projectsV2?per_page=100', { status: 200, json: [] });
+  const project = '/orgs/example-org/projectsV2/3';
+  sys.route('GET', '/orgs/example-org/projectsV2?per_page=100', { status: 200, json: [{ number: 3, title: 'example-app work' }] });
+  sys.route('GET', `${project}/fields?per_page=100`, { status: 200, json: [{ id: 2, name: 'Status', data_type: 'single_select', options: [{ id: 'in-progress', name: 'In Progress' }] }] });
+  sys.route('GET', `${project}/items?per_page=100&fields=2`, {
+    status: 200,
+    json: [{ id: 100, content_type: 'Issue', content: { number: 12, repository_url: `https://api.github.com/repos/${SLUG}`, state: 'open' }, fields: [{ id: 2, value: { name: 'In Progress' } }] }],
+  });
 }
 
 let ids = 0;
@@ -1562,6 +1568,31 @@ describe('prStarted', () => {
     assert.ok(!sys.requests.some((r) => r.url.includes('/issues/12')), 'the slice is not read');
     // An empty token is what the workflow passes when the token step is skipped or fails.
     assert.match((await run(actions('Slice: #12', ''))).out[0] ?? '', /^pr-started: no board app token here/);
+  });
+
+  it('says the slice and its work item are in place when a later run, on a push or an edit, finds them moved', async () => {
+    const sys = actions('Slice: #12');
+    const board = new RestBoard(sys);
+    board.projects[0]!.items = [
+      { issue: 12, values: { Status: 'In Progress' } },
+      { issue: 10, values: { Status: 'Todo', Step: 'Build' } },
+    ];
+    board.workItems = [10];
+    assert.deepEqual(await run(sys), { code: 0, out: ['pr-started: #12 and its work item are where they belong on the board already'], err: [] });
+    assert.deepEqual(writes(board), []);
+  });
+
+  it('says the slice is not on the board, not that it is in place, when no Project holds it', async () => {
+    const sys = actions('Slice: #12');
+    const board = new RestBoard(sys);
+    board.projects[0]!.items = [{ issue: 10, values: { Status: 'Todo', Step: 'Build' } }];
+    board.workItems = [10];
+    assert.deepEqual(await run(sys), {
+      code: 0,
+      out: ['! board: slice #12 is not on the board: no open Project of example-org with a Status field holds it unarchived, so it did not move to In Progress'],
+      err: [],
+    });
+    assert.deepEqual(writes(board), []);
   });
 
   it('moves nothing for a slice the work rules refuse, and passes, as Work rules fails the pull request', async () => {

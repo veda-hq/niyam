@@ -2198,3 +2198,34 @@
     organization could not get without the key again; and a `setup_url` to
     learn of the install, which would stay on the app pointing at a closed
     port.
+- **2026-11-17 — Record: Slice started runs after Work rules, on every event
+  it runs on (P-73, Work item #426, slice #459).** P-70's job ran only when a
+  pull request opened or reopened. On 2026-11-16, 3 of 7 slice pull requests
+  failed Work rules at that moment (veda-hq/niyam#421, veda-hq/veda#172,
+  veda-hq/veda#173), printed "may not be built yet", and never moved once
+  Work rules passed. Built in a Claude cloud session, such a slice skips In
+  Progress.
+  - The `started` job has `needs: work-rules` and the same events as Work
+    rules: any pull request action but `closed`, from the repository itself.
+    The client's workflow already passes opened, synchronize, reopened and
+    edited, so onboard and the clients' files do not change.
+  - `needs` skips the job while Work rules fails. GitHub re-runs a job's
+    dependents when the job is re-run, so re-running a failed Work rules,
+    as an agent does after the owner's 👍, runs Slice started too. A 👍
+    alone re-runs no check, as for Work rules itself.
+  - `pr-started` still reads the work rules itself before it moves anything,
+    since Work rules passes pull requests it does not judge. Moving stays
+    idempotent: a field already at its option is not written, so a later run
+    says the slice and its work item are where they belong.
+  - `boardStarted` says when no open Project of the owner holds the slice,
+    unarchived, with a Status field, rather than let nothing moved read as
+    "where they belong" (veda-hq/niyam#420, veda-hq/veda#168). The desktop
+    push prints the same line. Adding the issue to the board stays #407's.
+  - Each run mints a board app token and reads the owner's Projects through
+    REST: a few calls a push, well inside the app's hourly limit.
+  - Rejected: the explicit list opened, reopened, synchronize and edited,
+    which would drift from Work rules' own events; running on the owner's
+    👍 (`issue_comment` reactions start no workflow, and the hourly sweep
+    has no pull request to judge); and moving the board from the Work rules
+    job, which would put the board app's token, and its failures, into a
+    required check.

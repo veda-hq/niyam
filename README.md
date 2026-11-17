@@ -648,9 +648,15 @@ A board it cannot read, or a move GitHub refuses, is said and does not stop
 the push; a push for a closed slice, such as a fix, moves nothing. A Claude
 cloud session's GitHub proxy lets through only `repos/{owner}/{repo}/…`, so
 its push never reaches an organization's Projects and says only that the
-workflow moves the slice. When a pull request from the repository opens or
-reopens, the shared workflow's Slice started job makes the same moves, under
-the same conditions, with a token from the board GitHub App. The client's
+workflow moves the slice. Once Work rules passes for a pull request from the
+repository, the shared workflow's Slice started job makes the same moves,
+under the same conditions, with a token from the board GitHub App. It runs
+after Work rules on every event Work rules runs on (the pull request opening
+or reopening, a push to it, an edit of it) and again when a failed Work rules
+is re-run, so a slice that could not be built when its pull request opened
+moves once it can. A slice and work item already where they belong are not
+written again, and a slice no open Project holds gets a line saying it is
+not on the board. The client's
 workflow passes it the app's client id and private key as the
 `NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY` secrets. With `board` on,
 onboard writes them under the `niyam` job's secrets, the pull request job

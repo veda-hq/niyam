@@ -226,10 +226,13 @@ jobs:
 
   started:
     name: Slice started
-    # Opened or reopened, from this repository: a fork's run gets no secrets. A Claude cloud session's push cannot
-    # reach an organization's Projects, so the slice moves to In Progress here, when its pull request opens.
+    # From this repository: a fork's run gets no secrets. A Claude cloud session's push cannot reach an organization's
+    # Projects, so the slice moves to In Progress here, once Work rules passes for it (P-73): on every event Work rules
+    # runs on, and again when a failed Work rules is re-run, since GitHub re-runs a job's dependents with it. A slice
+    # that is In Progress already is not written again.
+    needs: work-rules
     if: >-
-      github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') &&
+      github.event_name == 'pull_request' && github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
