@@ -20,6 +20,7 @@ import {
   STATE_DIR,
   autocreateSettings,
   autofixDir,
+  autofixState,
   claudeHook,
   ensurePr,
   listForAutofix,
@@ -476,12 +477,91 @@ describe("pr-autocreate claude-hook and sarathi's Auto-fix list", () => {
   it('adds no second row for a pull request the list names already, whoever put it there', async () => {
     const dir = join(w.dir, '.local/state/sarathi/autofix');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 's1.jsonl'), `not json\n${JSON.stringify({ at: 'x', pr: 'Example-Org/Example-App#100', url: PR, event: 'on', source: 'mcp__ccd_pr__set_monitor' })}\n`);
+    writeFileSync(join(dir, 's1.jsonl'), `not json\n${JSON.stringify({ at: 'x', pr: 'Example-Org/Example-App#100', url: PR, event: 'refused', source: 'mcp__ccd_pr__set_monitor' })}\n`);
     listOn();
     const said = context((await hook(sys, bash(w.work, 'git push'))).out);
     assert.doesNotMatch(said, /\n4\./);
     await hook(sys, input('Stop', { cwd: w.work }));
-    assert.deepEqual(list().map((row) => row.event), ['on']);
+    assert.deepEqual(list().map((row) => row.event), ['refused']);
+  });
+
+  describe('once the list shows Auto-fix on', () => {
+    const dir = (): string => join(w.dir, '.local/state/sarathi/autofix');
+    const row = (event: string, pr = 'example-org/example-app#100'): string => `${JSON.stringify({ at: 'x', pr, url: PR, event, source: 'sarathi' })}\n`;
+    const rows = (...lines: string[]): void => {
+      mkdirSync(dir(), { recursive: true });
+      writeFileSync(join(dir(), 's2.jsonl'), lines.join(''));
+    };
+    const ack = (): string => join(w.work, STATE_DIR, 'acks', 's2-100');
+    const stop = (): Promise<{ code: number; out: string[]; err: string[] }> => hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
+    // Another session's push opens #100; s2 then stops on its branch.
+    const opened = async (): Promise<void> => {
+      await hook(sys, bash(w.work, 'git push'));
+    };
+
+    it('says nothing at Stop and writes no ack; an `off` later gets the instruction once', async () => {
+      listOn();
+      await opened();
+      // A partial line, another pull request, the PR in other letters, then rows that leave its state alone.
+      rows('{"pr": "example-org/exam', '\n', row('on', 'example-org/example-app#10'), '[1]\n', row('on', 'Example-Org/Example-App#100'), row('warned'), row('opened'));
+      assert.deepEqual(await stop(), { code: 0, out: [], err: [] });
+      assert.equal(existsSync(ack()), false);
+      assert.equal(readFileSync(join(dir(), 's2.jsonl'), 'utf8').split('\n').filter(Boolean).length, 6, 'no row added');
+      writeFileSync(join(dir(), 's2.jsonl'), row('off'), { flag: 'a' });
+      const told = await stop();
+      assert.equal(told.code, 2);
+      assert.match(told.err.join('\n'), /This PR is on this session's sarathi Auto-fix list/);
+      assert.doesNotMatch(told.err.join('\n'), /\n4\./);
+      assert.equal(existsSync(ack()), true);
+      assert.equal((await stop()).code, 0);
+    });
+
+    it('is quiet after a push too', async () => {
+      listOn();
+      rows(row('on'));
+      const got = await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: 's2' }));
+      assert.deepEqual(got, { code: 0, out: [], err: [] });
+      assert.equal(existsSync(ack()), false);
+    });
+
+    it('still tells a session whose list shows the pull request refused', async () => {
+      listOn();
+      await opened();
+      rows(row('on'), row('refused'));
+      const got = await stop();
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), /Autofix must be ON/);
+    });
+
+    it('still tells a session with no list, which the hook starts with an `opened` row', async () => {
+      listOn();
+      await opened();
+      const got = await stop();
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), /Autofix must be ON/);
+      assert.deepEqual(list(undefined, 's2').map((one) => one.event), ['opened']);
+    });
+
+    it('with "autofixList" off, tells the whole instruction as before', async () => {
+      await opened();
+      rows(row('on'));
+      const got = await stop();
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), STEP4);
+    });
+
+    it("reads the state as sarathi's fold does, and none from a list it cannot read", () => {
+      rows(row('opened'), row('on'), row('opened'), row('warned'));
+      assert.equal(autofixState(sys, 's2', PR), 'on');
+      rows(row('opened'), row('refused'), 'null\n', '"text"\n', `${JSON.stringify({ pr: 'example-org/example-app#100', event: 7 })}\n`);
+      assert.equal(autofixState(sys, 's2', PR), 'refused');
+      rows(row('warned'));
+      assert.equal(autofixState(sys, 's2', PR), undefined);
+      assert.equal(autofixState(sys, 's3', PR), undefined, 'no list');
+      mkdirSync(join(dir(), 's4.jsonl'));
+      assert.equal(autofixState(sys, 's4', PR), undefined, 'a folder where the list goes');
+      for (const [session, url] of [[undefined, PR], ['a/b', PR], ['s2', 'not a url']] as const) assert.equal(autofixState(sys, session, url), undefined);
+    });
   });
 
   it('adds one row for a session told before, and none in a cloud session', async () => {
