@@ -106,6 +106,12 @@ describe('loadSettings', () => {
     });
   }
 
+  it('refuses "cloudSigningKeys" that names one agent twice, in any case, so no pin depends on the order (#447)', () => {
+    const sys = new FakeSys();
+    sys.files.set(`${ROOT}/.github/niyam.json`, '{"owner":"me","agent":"bot","cloudSigningKeys":{"bot":["ssh-ed25519 AAAA"],"Bot":["ssh-ed25519 BBBB"]}}');
+    assert.throws(() => loadSettings(sys, ROOT), /^Error: \.github\/niyam\.json: "cloudSigningKeys" names Bot twice, in any case; keep one entry for each agent$/);
+  });
+
   it('says when the file is missing', () => {
     const sys = new FakeSys();
     sys.files.clear();

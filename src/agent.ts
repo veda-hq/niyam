@@ -121,6 +121,9 @@ function cloudSigningKeysIn(raw: unknown, file: string): Record<string, string[]
   if (!entries.every(([login, keys]) => LOGIN.test(login) && Array.isArray(keys) && keys.every((key) => typeof key === 'string' && PUBLIC_KEY.test(key)))) {
     throw new Error(refused);
   }
+  // Logins are case-insensitive: one agent named twice would leave which pin counts to the file's order.
+  const twice = entries.find(([login], i) => entries.findIndex(([other]) => sameLogin(login, other)) !== i);
+  if (twice) throw new Error(`${file}: "${CLOUD_SIGNING_KEYS}" names ${twice[0]} twice, in any case; keep one entry for each agent`);
   return Object.fromEntries(entries as [string, string[]][]);
 }
 
