@@ -34,10 +34,14 @@ describe('checks.yml', () => {
     }
   });
 
-  it("moves the board when a pull request from the repository opens, with the board app's token where the caller passes its secrets", () => {
-    type Job = { if: string; permissions: Record<string, string>; env: Record<string, string>; steps: (Step & { id?: string; if?: string; env?: Record<string, string>; 'continue-on-error'?: boolean })[] };
+  it("moves the board once Work rules passes for a pull request from the repository, with the board app's token where the caller passes its secrets", () => {
+    type Job = { if: string; needs?: string; permissions: Record<string, string>; env: Record<string, string>; steps: (Step & { id?: string; if?: string; env?: Record<string, string>; 'continue-on-error'?: boolean })[] };
     const started = jobs.started as unknown as Job;
-    assert.equal(started.if.replace(/\s+/g, ' ').trim(), "github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') && github.event.pull_request.head.repo.full_name == github.repository");
+    const workRules = jobs['work-rules'] as unknown as Job;
+    // P-73: after Work rules, on every event it runs on, so a slice that passes later still moves, and a re-run of a failed Work rules runs it too.
+    assert.equal(started.needs, 'work-rules');
+    assert.equal(started.if.replace(/\s+/g, ' ').trim(), `${workRules.if} && github.event.pull_request.head.repo.full_name == github.repository`);
+    assert.equal(workRules.if, "github.event_name == 'pull_request' && github.event.action != 'closed'");
     assert.deepEqual(started.permissions, { contents: 'read', issues: 'read', 'pull-requests': 'read' }, 'read-only, as the caller that runs on pull requests grants');
     const secrets = (parse(CHECKS) as { on: { workflow_call: { secrets: Record<string, { required: boolean }> } } }).on.workflow_call.secrets;
     for (const name of ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY']) assert.equal(secrets[name]?.required, false, `${name} is optional, so callers from before it still run`);

@@ -499,6 +499,35 @@ describe('boardStarted', () => {
       { issue: 31, values: {} },
       { issue: 30, values: {} },
     ];
+    // None of those items is slice #12 on this repository's board, so it says the slice is not on the board.
+    assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+      '! board: slice #12 is not on the board: no open Project of example-org with a Status field holds it unarchived, so it did not move to In Progress',
+    ]);
+    assert.deepEqual(board.writes, []);
+  });
+
+  it('says a slice missing from the board is not on it, and still moves its work item', async () => {
+    const sys = new FakeSys();
+    slice(sys);
+    const board = new RestBoard(sys);
+    board.projects[0]!.items = board.projects[0]!.items.filter((item) => item.issue !== 12);
+    board.projects.push({ number: 5, title: 'roadmap', fields: { Title: null, Step: STEP_OPTIONS }, items: [{ issue: 12, values: {} }] });
+    board.workItems = [10];
+    assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+      '✓ board: work item #10 is at Step Build in "example-app work"',
+      '! board: slice #12 is not on the board: no open Project of example-org with a Status field holds it unarchived, so it did not move to In Progress',
+    ]);
+  });
+
+  it('writes nothing for a slice In Progress already and a work item at Build', async () => {
+    const sys = new FakeSys();
+    slice(sys);
+    const board = new RestBoard(sys);
+    board.projects[0]!.items = [
+      { issue: 12, values: { Status: 'In Progress' } },
+      { issue: 10, values: { Status: 'Todo', Step: 'Build' } },
+    ];
+    board.workItems = [10];
     assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), []);
     assert.deepEqual(board.writes, []);
   });

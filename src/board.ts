@@ -843,11 +843,14 @@ export async function boardStarted(sys: Sys, token: string, slug: string, slice:
   const parent = status === 200 && (json as RestIssue | null)?.type?.name === 'Work item' ? (json as RestIssue).number : undefined;
   const items = await projectItems(sys, token, slug);
   const steps = stepMoves(items.step, parent);
-  const moved = await move(sys, token, [
-    ...items.status.filter((item) => item.number === slice).map((item) => ({ item, option: 'In Progress', name: `slice #${slice}`, what: `slice #${slice} is In Progress` })),
-    ...steps.moves,
-  ]);
-  return [...moved, ...steps.lacking];
+  const held = items.status.filter((item) => item.number === slice);
+  const moved = await move(sys, token, [...held.map((item) => ({ item, option: 'In Progress', name: `slice #${slice}`, what: `slice #${slice} is In Progress` })), ...steps.moves]);
+  // A slice on no Project has nothing to move: say so, rather than let "nothing moved" read as "in place".
+  const missing =
+    held.length === 0
+      ? [`! board: slice #${slice} is not on the board: no open Project of ${slug.split('/')[0]} with a Status field holds it unarchived, so it did not move to In Progress`]
+      : [];
+  return [...moved, ...missing, ...steps.lacking];
 }
 
 function stopped(io: Output, step: string): undefined {
