@@ -2366,7 +2366,10 @@
     GitHub Actions, and the ruleset requires it from that app. A lone other
     app reporting the name passes `--check`, and that is the spoof the shared
     Guard exists to stop, so `--check niyam-guard / judge` takes this path
-    and never `--check`'s.
+    and never `--check`'s. For the same reason a ruleset requiring it
+    already from another app, or from any, is not taken as done: on the
+    same proof the entry is bound to GitHub Actions, and without it the
+    entry stays and the step says so as a ✗.
   - It is gated on the caller file, not on `work-rules`: a repository with
     no caller is told nothing, unless the owner named the check, so the step
     says nothing new to a client that has not onboarded at a release with

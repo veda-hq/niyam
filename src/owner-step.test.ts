@@ -962,10 +962,34 @@ describe("owner-step required-checks, the shared Guard's check (#471)", () => {
     assert.deepEqual(made.now(), [{ type: 'deletion' }, checks(JUDGE, 'niyam / PR identity', 'Secret scans')]);
   });
 
-  it('refuses a result that still requires Guard, or lacks its check', async () => {
+  it('binds it to GitHub Actions where the ruleset requires it already from another app, or any, on the same proof', async () => {
+    for (const [loose, from] of [
+      [{ context: JUDGE, integration_id: 99 }, 'app 99'],
+      [{ context: JUDGE }, 'any app'],
+    ] as const) {
+      const rules = (judge: unknown): unknown[] => [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'niyam / PR identity', integration_id: 15368 }, judge] } }];
+      const made = setUp('veda-hq/app', rules(loose));
+      const first = capture();
+      assert.equal(await ownerStep(made.sys, first.io, step('veda-hq/app')), 0, first.out.join('\n'));
+      assert.match(first.out.join('\n'), new RegExp(`make the ruleset main of veda-hq/app require niyam-guard / judge from GitHub Actions, not ${from}\\n`));
+      assert.deepEqual(made.now(), rules({ context: JUDGE, integration_id: 15368 }));
+
+      // No proof: it stays as it is, a ✗ saying so; no caller: a ✗ too, since it is named by the ruleset.
+      for (const extra of [{ [judged('veda-hq/app')]: ran(run('success', LOOKALIKE)) }, { [callerAt('veda-hq/app')]: { status: 404, json: { message: 'Not Found' } } }] as Record<string, Reply>[]) {
+        const unproven = setUp('veda-hq/app', rules(loose), extra);
+        const said = capture();
+        assert.equal(await ownerStep(unproven.sys, said.io, step('veda-hq/app')), 1);
+        assert.match(said.out.join('\n'), new RegExp(`✗ leaving niyam-guard / judge required from ${from}, not bound to GitHub Actions: `));
+        assert.ok(!wrote(unproven));
+      }
+    }
+  });
+
+  it('refuses a result that still requires Guard, lacks its check, or requires it from another app', async () => {
     const cases: [(body: { rules: unknown[] }) => unknown[], RegExp][] = [
       [() => [checks('Guard', JUDGE, 'niyam / PR identity')], /GitHub shows the ruleset still requiring Guard afterwards/],
       [() => [checks('niyam / PR identity')], /GitHub shows the ruleset without niyam-guard \/ judge afterwards/],
+      [() => [checks([JUDGE, 99], 'niyam / PR identity')], /GitHub shows the ruleset requiring niyam-guard \/ judge from another app than GitHub Actions afterwards/],
     ];
     for (const [put, why] of cases) {
       const made = setUp('veda-hq/niyam', [checks('Guard', 'niyam / PR identity')], {}, put);

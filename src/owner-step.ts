@@ -528,8 +528,16 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
   const checks = turnedOn.filter(runs);
   // The shared Guard's check, on its own proof (sharedGuard), never --check's, which any one app passes.
   const own = same(repo, PRODUCT);
-  const guard = !had.includes(CALLER_CHECK) || (own && required.includes(OWN_GUARD)) ? await sharedGuard(gh, repo, named.includes(CALLER_CHECK), had.includes(CALLER_CHECK) ? `keeping ${OWN_GUARD}, not ${CALLER_CHECK} in its place` : `not requiring ${CALLER_CHECK}`) : undefined;
+  // Required already from another app, or from any, it is the spoof itself: it is bound to GitHub Actions, on the same proof.
+  const bound = (rules: Rule[]): { context: string; integration_id?: number }[] => rules.find((rule) => rule.type === 'required_status_checks')?.parameters?.required_status_checks ?? [];
+  const loose = (rules: Rule[]): { context: string; integration_id?: number } | undefined => bound(rules).find((check) => check.context === CALLER_CHECK && check.integration_id !== ACTIONS_APP);
+  const looseBefore = loose(before.rules);
+  const from = looseBefore?.integration_id === undefined ? 'any app' : `app ${looseBefore.integration_id}`;
+  const sound = had.includes(CALLER_CHECK) && looseBefore === undefined;
+  const what = looseBefore ? `leaving ${CALLER_CHECK} required from ${from}, not bound to GitHub Actions` : sound ? `keeping ${OWN_GUARD}, not ${CALLER_CHECK} in its place` : `not requiring ${CALLER_CHECK}`;
+  const guard = !sound || (own && required.includes(OWN_GUARD)) ? await sharedGuard(gh, repo, named.includes(CALLER_CHECK) || looseBefore !== undefined, what) : undefined;
   const guardRuns = guard !== undefined && 'note' in guard;
+  const guardRebind = guardRuns && looseBefore !== undefined;
   // In niyam's ruleset its own Guard check goes, the shared one in its place, once that has passed (#472).
   const swapsGuard = (check: string): boolean => own && guardRuns && check === OWN_GUARD;
   const guardAdded = guardRuns && !had.includes(CALLER_CHECK) ? [CALLER_CHECK] : [];
@@ -570,7 +578,7 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
   notes.push(`before: ${list(required)}`, `after:  ${list(after)}`);
   const namedHad = named.filter((check) => had.includes(check) && !turnedOn.includes(check));
   const guardSwap = required.some(swapsGuard);
-  if (missing.length === 0 && swaps.length === 0 && !guardSwap) {
+  if (missing.length === 0 && swaps.length === 0 && !guardSwap && !guardRebind) {
     return { changes: [], notes, skipped, already: `the ruleset ${before.name} requires every check ${file} turns on${namedHad.length > 0 ? `, and ${list(namedHad)}` : ''}` };
   }
   // Built on the ruleset as it is just before the write, so an edit made while the owner read the plan is kept.
@@ -580,7 +588,7 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
     const moved = (list: { context: string; integration_id?: number }[]): { context: string; integration_id?: number }[] =>
       list
         .flatMap((check) => {
-          if (swapsGuard(check.context)) return [{ context: CALLER_CHECK, integration_id: ACTIONS_APP }];
+          if (swapsGuard(check.context) || (guardRuns && check.context === CALLER_CHECK)) return [{ context: CALLER_CHECK, integration_id: ACTIONS_APP }];
           const to = stale(check.context) ? (runs(renamed(check.context)) ? renamed(check.context) : undefined) : check.context;
           return to === undefined ? [] : [{ ...check, context: to }];
         })
@@ -601,6 +609,7 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
         plan: [
           ...swaps.map(({ from, to }) => (to ? `require ${to} in place of ${from}` : `drop ${from}, which no workflow reports since P-53`)),
           ...(guardSwap ? [`require ${CALLER_CHECK} in place of ${OWN_GUARD}`] : []),
+          ...(guardRebind ? [`require ${CALLER_CHECK} from GitHub Actions, not ${from}`] : []),
           ...(missing.length > 0 ? [`also require ${missing.join(', ')}`] : []),
         ].reduce((plan, part, at) => `${plan}${at === 0 ? ' ' : ', and '}${part}`, `make the ruleset ${before.name} of ${repo}`),
         apply: async (checkpoint) => {
@@ -614,6 +623,7 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
           if (lacking.length > 0) throw new Error(`GitHub shows the ruleset without ${lacking.join(', ')} afterwards`);
           const left = contexts(now.rules).filter((check) => stale(check) || swapsGuard(check));
           if (left.length > 0) throw new Error(`GitHub shows the ruleset still requiring ${left.join(', ')} afterwards`);
+          if (guardRuns && loose(now.rules)) throw new Error(`GitHub shows the ruleset requiring ${CALLER_CHECK} from another app than GitHub Actions afterwards`);
           if (others(now.rules) !== others(current.rules)) throw new Error(`GitHub shows the ruleset's other rules changed afterwards; check it at ${GITHUB_WEB}/${repo}/rules/${id}`);
           return `the ruleset ${now.name} requires ${list(contexts(now.rules))}`;
         },

@@ -1660,12 +1660,16 @@ niyam owner-step required-checks <owner/repo> <ruleset id or name> [--check <nam
   once it reported `success` on the head commit of the last pull request
   merged into the default branch from GitHub Actions alone, and requires it
   from GitHub Actions: another app reporting that name is the spoof the
-  shared Guard stops, so `--check` cannot add it. Until then it is a `✗`
-  saying why. Guard runs from the default branch's copy of its caller, so it
-  first reports on the pull request after the one that adds the caller; in
-  a public repository, from 2026-12-02, it runs only once a policy allows
-  `pull_request_target`, and the `✗` names where. A repository with no
-  caller is not told about it unless the check is named with `--check`. In
+  shared Guard stops. `--check niyam-guard / judge` gets this proof, never
+  the one-app proof of any other `--check`. A ruleset that requires the
+  check already from another app, or from any, gets it bound to GitHub
+  Actions on the same proof. Until then it is a `✗` saying why. Guard runs
+  from the default branch's copy of its caller, so it first reports on the
+  pull request after the one that adds the caller; in a public repository,
+  from 2026-12-02, it runs only once a policy allows `pull_request_target`,
+  and the `✗` names where. A repository with no caller hears nothing of the
+  check unless it is named with `--check` or required already from another
+  app. In
   niyam's own ruleset, once the check has passed, it takes the place of
   niyam's `Guard`, as a `process-rules / …` check gives way to its
   `niyam / …` one; in any other repository a check named `Guard` is its
