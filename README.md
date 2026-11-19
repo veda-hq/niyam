@@ -1856,7 +1856,7 @@ niyam version, and a sha256 with it, to that release, tagged on
 `veda-hq/niyam`'s `main`; and a Dependabot pull request whose every changed
 line only moves a `uses:` to another full commit sha with its version
 comment. Whatever the slice says, Guard refuses a pull request that adds a
-job reporting a check the default branch's ruleset requires, or `Guard`, and any job
+job reporting a check the default branch's ruleset requires, and any job
 that could report the shared Guard's check, `niyam-guard / judge`, other than
 its caller as `onboard` writes it. It fails closed: a truncated file list,
 settings it cannot read, any read GitHub does not answer, or an event other

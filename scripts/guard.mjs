@@ -27,9 +27,6 @@ const MAIN = 'main';
 /** The repository whose releases ship the guard, and whose main a release tag must be on. */
 const NIYAM = 'veda-hq/niyam';
 
-/** niyam's own Guard check, from guard.yml: no pull request may add a job by its name, even before the ruleset requires it. */
-const OWN_CHECK = 'Guard';
-
 /** The shared Guard's check: the caller's job `niyam-guard` over shared-guard.yml's job `judge`. */
 const SHARED_CHECK = 'niyam-guard / judge';
 
@@ -513,7 +510,7 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, 
     const rules = await read(gh, `/repos/${repo}/rules/branches/${branch.split('/').map(encodeURIComponent).join('/')}`);
     if (!Array.isArray(rules)) throw new Unread(`GitHub did not answer ${branch}'s rules as a list`);
     const contexts = rules.filter((rule) => rule.type === 'required_status_checks').flatMap((rule) => rule.parameters?.required_status_checks ?? []).map((check) => check.context);
-    return (required = [...new Set([OWN_CHECK, SHARED_CHECK, ...contexts])]);
+    return (required = [...new Set([SHARED_CHECK, ...contexts])]);
   };
 
   for (const file of files) {
