@@ -1299,8 +1299,14 @@ come from the owner's sign-in for the run.
 **New issues get a type as they open.** With `board` on, `onboard` writes
 the client workflow (for `board` alone too), whose `niyam-asks` job
 also starts when an issue is opened or reopened, and runs `niyam
-issue-type`, which gives an issue with no type one by the same rule, read
-from GitHub when the job runs, so a parent set as the issue was made counts.
+issue-type`, which gives an issue with no type one by the same rule.
+`gh issue create` sets no type, so an opener types an issue in a second
+call, as it adds a parent or sub-issues after: the job, finding the issue
+with no type, waits 30 seconds, then reads it again from GitHub and decides
+from that read. A type set by then stands, and a parent or sub-issues added
+by then count. Every write, the hourly one's too, reads the issue's type
+once more just before it and writes only when there is still none, so an
+issue typed since the job read it keeps its type.
 GitHub starts no run for an issue a workflow's own `GITHUB_TOKEN` opens, such
 as a monthly reminder a client's workflow files, so the job also runs on the
 asks job's hourly cron and types every open issue in the repository with

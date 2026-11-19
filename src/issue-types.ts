@@ -452,6 +452,13 @@ export async function typesDrift(sys: Sys, token: string, org: string, slug: str
   return { mark: '▲', text: parts.join('; '), fix: RERUN };
 }
 
+/**
+ * How long the job waits, on an issue opened with no type, before it reads
+ * the issue again and types it: time for its opener to set a type in a
+ * second call, and to add its parent or sub-issues.
+ */
+export const OPENER_WAIT_MS = 30_000;
+
 interface IssueEvent {
   action?: string;
   schedule?: string;
@@ -467,15 +474,36 @@ async function typeOf(sys: Sys, token: string, url: string, number: number): Pro
   return typeof type === 'string' ? type : undefined;
 }
 
-/** Sets an issue's type, checking GitHub's answer; returns the line saying so. */
-async function setType(sys: Sys, token: string, url: string, number: number, { to, why }: { to: string; why: string }): Promise<string> {
+/** An issue as GitHub shows it now: what issueType decides from. */
+interface Facts {
+  state?: unknown;
+  type?: { name?: unknown } | null;
+  pull_request?: unknown;
+  parent_issue_url?: unknown;
+  sub_issues_summary?: { total?: unknown };
+}
+
+async function readIssue(sys: Sys, token: string, url: string, number: number): Promise<Facts | null> {
+  const read = await sys.http(url, { token });
+  if (read.status !== 200) throw new Error(`cannot read #${number} (HTTP ${read.status})`);
+  return read.json as Facts | null;
+}
+
+/**
+ * Sets an issue's type, checking GitHub's answer; returns the line saying so.
+ * It reads the issue's type again first and writes only when it is still
+ * none, so a type its opener set since the job read it stands.
+ */
+async function setType(sys: Sys, token: string, url: string, number: number, { to, why }: { to: string; why: string }): Promise<{ line: string; typed: boolean }> {
+  const had = (await readIssue(sys, token, url, number))?.type?.name;
+  if (typeof had === 'string') return { line: `issue-type: #${number} is a ${had} now, typed since the job read it; left as it is`, typed: false };
   const { status, json } = await sys.http(url, { method: 'PATCH', token, body: { type: to } });
   const now = (json as { type?: { name?: unknown } | null } | null)?.type?.name;
   if (status !== 200 || typeof now !== 'string' || !same(now, to)) {
     // GitHub refuses a type the organisation lacks or has disabled, and drops one silently where the token may not set it.
     throw new Error(`GitHub did not make #${number} a ${to} (HTTP ${status}); the owner runs niyam onboard, which adds and enables the work model's issue types`);
   }
-  return `issue-type: #${number} had no type; now a ${to}: ${why}`;
+  return { line: `issue-type: #${number} had no type; now a ${to}: ${why}`, typed: true };
 }
 
 /**
@@ -502,11 +530,13 @@ async function decideAll(sys: Sys, token: string, issues: Omit<Holder, 'archived
 /**
  * The issue-type job, run by the shared workflow. When an issue is opened or
  * reopened, an issue with no type gets the work model's by the rule onboard
- * applies (see typeFor), read from GitHub when the job runs, so a parent set
- * as the issue was made counts. GitHub starts no run for an issue a
+ * applies (see typeFor), read from GitHub half a minute after the job finds
+ * it with no type, so a type its opener sets in a second call stands, and a
+ * parent or sub-issues added in that time count. GitHub starts no run for an issue a
  * workflow's own token opens, such as a monthly reminder, so the hourly
  * sweep types every open issue here with none. An issue with a type, and the
- * Approvals issue the settings name, are left as they are.
+ * Approvals issue the settings name, are left as they are; each write reads
+ * the type again first, so an issue typed since the job read it keeps that type.
  */
 export async function issueType(sys: Sys, io: Output): Promise<number> {
   const { GITHUB_EVENT_NAME: name, GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: slug, GH_TOKEN: token } = sys.env;
@@ -531,8 +561,13 @@ export async function issueType(sys: Sys, io: Output): Promise<number> {
     }
     const bare = (await untyped(sys, token, slug)).filter((issue) => issue.number !== approvals);
     const types = await decideAll(sys, token, bare);
-    for (const issue of bare) io.out(await setType(sys, token, issue.url, issue.number, types.get(issue.url) as { to: string; why: string }));
-    io.out(`issue-type: ${plural(bare.length, 'open issue')} with no type typed`);
+    let typed = 0;
+    for (const issue of bare) {
+      const set = await setType(sys, token, issue.url, issue.number, types.get(issue.url) as { to: string; why: string });
+      io.out(set.line);
+      if (set.typed) typed++;
+    }
+    io.out(`issue-type: ${plural(typed, 'open issue')} with no type typed`);
     return 0;
   }
   const number = event.issue?.number;
@@ -549,25 +584,30 @@ export async function issueType(sys: Sys, io: Output): Promise<number> {
     return 0;
   }
   const url = `${API}/repos/${slug}/issues/${number}`;
-  const read = await sys.http(url, { token });
-  if (read.status !== 200) throw new Error(`cannot read #${number} (HTTP ${read.status})`);
-  const issue = read.json as { state?: unknown; type?: { name?: unknown } | null; pull_request?: unknown; parent_issue_url?: unknown; sub_issues_summary?: { total?: unknown } } | null;
-  if (issue?.pull_request) {
-    io.out(`issue-type: #${number} is a pull request, which has no type`);
-    return 0;
+  /** The line saying why the issue is left as it is; undefined when it is open with no type. */
+  const leave = (issue: Facts | null): string | undefined => {
+    if (issue?.pull_request) return `issue-type: #${number} is a pull request, which has no type`;
+    // Closed since the event, as a queued run may find it: a closed issue with no type is left as it is.
+    if (issue?.state !== 'open') return `issue-type: #${number} is not open; left as it is`;
+    if (typeof issue?.type?.name === 'string') return `issue-type: #${number} is a ${issue.type.name} already; nothing to do`;
+    return undefined;
+  };
+  let issue = await readIssue(sys, token, url, number);
+  let left = leave(issue);
+  if (left === undefined) {
+    // `gh issue create` sets no type, so its opener sets one in a second call, and adds sub-issues or a parent
+    // after: the job waits for them, then decides from the issue as it is.
+    await sys.sleep(OPENER_WAIT_MS);
+    issue = await readIssue(sys, token, url, number);
+    left = leave(issue);
   }
-  // Closed since the event, as a queued run may find it: a closed issue with no type is left as it is.
-  if (issue?.state !== 'open') {
-    io.out(`issue-type: #${number} is not open; left as it is`);
-    return 0;
-  }
-  if (typeof issue?.type?.name === 'string') {
-    io.out(`issue-type: #${number} is a ${issue.type.name} already; nothing to do`);
+  if (left !== undefined) {
+    io.out(left);
     return 0;
   }
   const parentUrl = typeof issue?.parent_issue_url === 'string' ? issue.parent_issue_url : undefined;
   const parent = parentUrl ? { number: parentUrl.split('/').at(-1) as string, type: await typeOf(sys, token, parentUrl, number) } : undefined;
   const subIssues = issue?.sub_issues_summary?.total;
-  io.out(await setType(sys, token, url, number, typeFor(parent, typeof subIssues === 'number' ? subIssues : 0)));
+  io.out((await setType(sys, token, url, number, typeFor(parent, typeof subIssues === 'number' ? subIssues : 0))).line);
   return 0;
 }
