@@ -2262,8 +2262,11 @@
     type, parent and sub-issues. An issue with a type exits at once.
   - Every write, the hourly sweep's too, reads the issue just before it and
     writes only to one still open with no type.
-  - The sweep leaves an issue opened under 30 seconds before, so it cannot
-    beat that issue's own run to it.
+  - The sweep leaves an issue GitHub shows changed (`updated_at`) under 30
+    seconds before, so it cannot beat that issue's own run to it. Not
+    `created_at`, which a reopen leaves as the first opening. An issue
+    edited in that time, or one no run started for, waits for the next
+    hour.
   - GitHub's issue PATCH cannot be made conditional on the current type, so
     an opener whose type lands in the instant between the last read and the
     write can still lose it. A type written after the job's wins anyway.
