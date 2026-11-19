@@ -292,7 +292,8 @@ what of the owner's an agent session could reach, any `owner-step` folder
 left behind (`▲`, saying whether it still holds a token; see Owner steps), and, in a repository with
 the board on, the organisation's issue types (see Issue types), and, in every
 onboarded repository, the shared Guard's caller (`✗` when it is missing or not
-as `onboard` writes it at `niyam.yml`'s release; see The shared Guard). It shows them grouped as
+as `onboard` writes it at `niyam.yml`'s release, or, with identity alone and so
+no `niyam.yml`, at any release; see The shared Guard). It shows them grouped as
 This Mac, GitHub and This repo, one line each: `✓` fine, `▲` worth fixing,
 `✗` broken. Each problem line ends with its fix:
 
@@ -452,7 +453,7 @@ on any platform without a token store, `niyam env` prints the lock alone.
    on pull requests and pushes, read-only, and `niyam-weekly` on the
    weekly run, the only one that writes to issues. Each job carries a
    `name:` (`niyam`, `niyam-weekly`, …), so its checks read
-   `niyam / Work rules`. With identity alone `onboard` writes no workflow.
+   `niyam / Work rules`. With identity alone `onboard` writes no `niyam.yml`.
    Whatever the features, it also writes `.github/workflows/niyam-guard.yml`,
    the shared Guard's caller (see The shared Guard below): run by
    `pull_request_target` on pull requests to the default branch, read-only,
@@ -1214,7 +1215,7 @@ client's own and stays as it is); any other workflow is offered a replacement. M
 features a client has turned on required on its default branch, such as
 `niyam / PR identity` with `pr-identity` and `niyam / Work rules` with
 `work-rules`; a check of a feature that is off still runs and passes, but with
-identity alone there is no workflow at all, so require none.
+identity alone there is no `niyam.yml`, so require none of its checks.
 
 ### One feature at a time
 

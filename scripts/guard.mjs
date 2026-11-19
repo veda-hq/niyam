@@ -40,6 +40,10 @@ const RELEASE_REF = /^(v\d+\.\d+\.\d+|[0-9a-f]{40})$/;
 
 /** The settings file, read at the default branch's tip. */
 const SETTINGS = '.github/niyam.json';
+/** The features niyam knows, as src/features.ts lists them (a test keeps the two equal). */
+export const FEATURES = ['identity', 'pr-identity', 'board', 'work-rules', 'figma', 'decisions', 'review'];
+/** Older feature names settings may still list, as src/features.ts renames them. */
+export const RENAMED_FEATURES = ['design'];
 
 /** GitHub lists at most 3,000 of a pull request's files, 100 a page. */
 const FILES_MOST = 3000;
@@ -302,13 +306,16 @@ export function ownersIn(text) {
  * Whether main's `.github/niyam.json` turns work rules on, so the repository
  * has Work items whose slices name its guard files: yes when it lists no
  * `features` (every feature on) or lists `work-rules`; anything but a list of
- * names refuses. Without work rules, Guard judges no slice (#485).
+ * names, or a name niyam does not know, refuses: a typo must not turn the
+ * slice check off. Without work rules, Guard judges no slice (#485).
  * @param {string} text @returns {boolean}
  */
 export function workRulesIn(text) {
   const features = JSON.parse(text).features;
   if (features === undefined) return true;
   if (!Array.isArray(features) || !features.every((one) => typeof one === 'string')) throw new Error(`${SETTINGS}'s "features" must be a list of feature names`);
+  const unknown = features.filter((one) => !FEATURES.includes(one.trim()) && !RENAMED_FEATURES.includes(one.trim()));
+  if (unknown.length > 0) throw new Error(`${SETTINGS} lists unknown feature ${unknown.map((one) => JSON.stringify(one)).join(', ')}; the features are ${FEATURES.join(', ')}`);
   return features.some((one) => one.trim() === 'work-rules');
 }
 

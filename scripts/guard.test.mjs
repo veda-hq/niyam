@@ -1,7 +1,10 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
+  FEATURES,
+  RENAMED_FEATURES,
   bodyAt,
   changeRuns,
   client,
@@ -653,6 +656,25 @@ describe('main', () => {
       assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')], contents: settings({ owner: 'Owner', features }) })), 1);
       assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: \.github\/niyam\.json's "features" must be a list of feature names/);
     }
+    // So does a name niyam does not know: a typo must not turn the slice check off.
+    for (const features of [['identity', 'work-rule'], ['constructor']]) {
+      out = output();
+      assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')], contents: settings({ owner: 'Owner', features }) })), 1, JSON.stringify(features));
+      assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: \.github\/niyam\.json lists unknown feature "(work-rule|constructor)"; the features are identity, pr-identity/);
+    }
+    // The older name design is still a feature, and turns work rules off.
+    out = output();
+    assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')], contents: settings({ owner: 'Owner', features: ['identity', 'design'] }) })), 0);
+  });
+
+  test('knows the features src/features.ts lists, and its renamed ones (#485)', () => {
+    const source = readFileSync(new URL('../src/features.ts', import.meta.url), 'utf8');
+    const listed = /export const FEATURES = \[([^\]]*)\] as const;/.exec(source);
+    assert.ok(listed, 'src/features.ts lists FEATURES');
+    assert.deepEqual(FEATURES, [...listed[1].matchAll(/'([^']+)'/g)].map((match) => match[1]));
+    const renamed = /const RENAMED = new Map<string, Feature>\(\[(.*)\]\);/.exec(source);
+    assert.ok(renamed, 'src/features.ts lists RENAMED');
+    assert.deepEqual(RENAMED_FEATURES, [...renamed[1].matchAll(/\['([^']+)', '[^']+'\]/g)].map((match) => match[1]));
   });
 
   test('refuses any event but pull_request_target', async () => {
