@@ -1788,26 +1788,47 @@ item (for a slice added later, when the owner's `Decision:` settled it):
 ```
 
 A name is a path, a folder ending in `/`, or a pattern where `*` matches
-within one folder and `**` across them. The guard files are everything under
-`.github/`, `.githooks/`, `.dvara.json`, `.dvara/records-baseline.json`,
-`.gitleaks.toml`, `.trufflehog-exclude`, the `scripts` of `package.json`,
-and `scripts/*.mjs`. A test file needs naming too when a pull request
+within one folder and `**` across them. The guard files are a floor every
+repository has, everything under `.github/`, `.githooks/` and `.husky/`,
+`lefthook.yml`, `.dvara.json`, `.dvara/records-baseline.json`,
+`.gitleaks.toml`, `.trufflehog-exclude` and the `scripts` of `package.json`,
+and the repository's own paths, named the same way as `"guard"` in the
+default branch's `.github/niyam.json` (niyam's: `scripts/*.mjs`). That list
+only adds to the floor, and the settings are under `.github/`, so changing it
+is a guard change too. A test file needs naming too when a pull request
 deletes it, leaves it fewer `test(`/`it(` calls than the merge base, or adds
 `.skip`, `.only` or `todo`.
 
 Two changes pass unnamed: an onboard pull request
 (`chore(niyam): onboard at vX.Y.Z`) whose every changed line only moves the
-niyam version, and a sha256 with it, to that release, tagged on `main`; and a
-Dependabot pull request whose every changed line only moves a `uses:` to
-another full commit sha with its version comment. Whatever the slice says,
-Guard refuses a pull request that adds a job reporting a check the `main`
-ruleset requires, or `Guard`. It fails closed: a truncated file list, or any
-read GitHub does not answer, refuses. Each refusal names the file and how to
+niyam version, and a sha256 with it, to that release, tagged on
+`veda-hq/niyam`'s `main`; and a Dependabot pull request whose every changed
+line only moves a `uses:` to another full commit sha with its version
+comment. Whatever the slice says, Guard refuses a pull request that adds a
+job reporting a check the default branch's ruleset requires, or `Guard`, and any job
+that could report the shared Guard's check, `niyam-guard / judge`, other than
+its caller as `onboard` writes it. It fails closed: a truncated file list,
+settings it cannot read, any read GitHub does not answer, or an event other
+than `pull_request_target`, refuses. Each refusal names the file and how to
 pass. A slice edit does not run Guard again: edit or push the pull request.
+
+**The shared Guard.** The same script runs for any repository from
+`.github/workflows/shared-guard.yml`, a reusable workflow whose job, `judge`,
+checks out niyam at its own commit (`job.workflow_sha`, refusing when GitHub
+gives none), never the calling repository or the pull request, and judges
+the caller's pull request with the caller's token. A repository calls it
+from a workflow run by `pull_request_target` alone, whose one job,
+`niyam-guard` (id and name), only calls
+`veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z` (a release tag or
+a full commit sha, never a branch), read-only, with no inputs or secrets; its
+check is `niyam-guard / judge`. The default branch is the repository's own,
+whatever its name. From 2026-12-02
+GitHub blocks `pull_request_target` in a public repository unless Settings,
+Actions, Policies allows it for that workflow.
 
 Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
 `@AlokBansal8` for the guard's files alone: `.github/workflows/guard.yml`,
-`scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
+`.github/workflows/shared-guard.yml`, `scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
 itself. With "Require review from Code Owners" on in the `main` ruleset, a
 pull request that changes one of them waits for his approval. Every other
 pull request, including one under `.github/` that Guard passed, does not.

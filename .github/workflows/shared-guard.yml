@@ -1,0 +1,82 @@
+name: niyam guard
+
+# The shared Guard (slice #469 of Work item #468): niyam's Guard, run for
+# any repository from the niyam release its caller pins. The caller is the
+# one niyam onboard writes, .github/workflows/niyam-guard.yml:
+#
+#   on:
+#     pull_request_target:
+#       types: [opened, edited, synchronize, reopened]
+#       branches: [main]
+#   jobs:
+#     niyam-guard:
+#       name: niyam-guard
+#       permissions: { contents: read, pull-requests: read, issues: read }
+#       uses: veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z
+#
+# so its check is `niyam-guard / judge`. pull_request_target, so GitHub runs
+# the caller from the default branch, never the pull request. This job runs
+# niyam's own code at its own commit (job.workflow_sha) and nothing of the
+# caller's: it never checks out the caller's repository, the pull request's
+# head or its merge commit, and reads them through the API as data, with the
+# caller's token. The job is `judge`, not `Guard`: Guard refuses an added job
+# that reports its own check, in niyam as in every client.
+on:
+  workflow_call:
+
+# No workflow-wide permissions: GitHub refuses a whole run when a called
+# workflow asks for more than the calling job grants. The job says its own.
+jobs:
+  judge:
+    name: judge
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Its own group, not guard.yml's guard-<number>, so niyam's two Guards do not cancel each other while both run.
+    concurrency:
+      group: niyam-guard-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      # No fallback to an input, a branch or main: the caller's file must not decide what runs.
+      - name: The shared Guard knows its own commit
+        env:
+          OWN_REPOSITORY: ${{ job.workflow_repository }}
+          OWN_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$OWN_REPOSITORY" ] || ! printf %s "$OWN_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::GitHub gave no job.workflow_repository or job.workflow_sha, so the shared Guard cannot run its own release's code. It refuses rather than run another."
+            exit 1
+          fi
+          echo "niyam guard: $OWN_REPOSITORY at $OWN_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+          # The script and what installs its one package. lint/package.json is
+          # a workspace project the frozen lockfile names.
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/guard.mjs
+            /package.json
+            /pnpm-lock.yaml
+            /pnpm-workspace.yaml
+            /.nvmrc
+            /lint/package.json
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        timeout-minutes: 3
+        with:
+          node-version-file: .nvmrc
+      # niyam's lockfile, for the yaml parser that reads workflows. No install scripts run.
+      # --prod: yaml is a dependency, so niyam's dev tools stay out (9 packages, not 156).
+      - run: pnpm install --frozen-lockfile --ignore-scripts --prod
+      # Only the pull request's number reaches the script; it reads the rest from the API.
+      - run: node scripts/guard.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}

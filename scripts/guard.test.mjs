@@ -1,14 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { after, describe, test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   bodyAt,
   changeRuns,
   client,
+  guardPathsIn,
   guardsNamed,
+  isCaller,
   isGuardFile,
   isTestFile,
   jobNames,
@@ -23,12 +22,11 @@ import {
   sliceOf,
   testChange,
   versionMoves,
+  workflowOf,
 } from './guard.mjs';
 
-const scratch = mkdtempSync(join(tmpdir(), 'guard-'));
-after(() => rmSync(scratch, { recursive: true, force: true }));
-
 const REPO = 'o/r';
+const NIYAM = 'veda-hq/niyam';
 const OWNERS = ['Owner'];
 const APPROVED = '2026-01-02T00:00:00Z';
 const SHA_A = 'a'.repeat(40);
@@ -44,6 +42,7 @@ const WORKFLOW = (jobs) => `name: x\non: push\njobs:\n${jobs.map(([id, name]) =>
 function github({ files = [], body = '**Guards:** `.github/workflows/ci.yml`', pull = {}, contents = {}, over = {} } = {}) {
   const calls = [];
   const routes = {
+    [`/repos/${REPO}`]: { default_branch: 'main' },
     [`/repos/${REPO}/pulls/1`]: { title: '✨ feat(x): y', body: 'Slice: #10', user: { login: 'AthyaBot' }, changed_files: files.length, base: { sha: 'b' }, head: { sha: 'h' }, ...pull },
     [`/repos/${REPO}/pulls/1/files`]: files,
     [`/repos/${REPO}/compare/b...h`]: { merge_base_commit: { sha: 'm' } },
@@ -77,11 +76,25 @@ function github({ files = [], body = '**Guards:** `.github/workflows/ci.yml`', p
 const modified = (filename, patch = '@@ -1 +1 @@\n-a\n+b', extra = {}) => ({ filename, status: 'modified', patch, ...extra });
 
 describe('which files the guard watches', () => {
-  test('guard files', () => {
-    for (const path of ['.github/workflows/ci.yml', '.github/niyam.json', '.githooks/pre-push', '.dvara.json', '.dvara/records-baseline.json', '.gitleaks.toml', '.trufflehog-exclude', 'scripts/guard.mjs', 'package.json']) {
+  test('the floor of guard files', () => {
+    for (const path of ['.github/workflows/ci.yml', '.github/niyam.json', '.githooks/pre-push', '.husky/pre-commit', 'lefthook.yml', '.dvara.json', '.dvara/records-baseline.json', '.gitleaks.toml', '.trufflehog-exclude', 'package.json']) {
       assert.ok(isGuardFile(path), path);
     }
-    for (const path of ['src/cli.ts', 'scripts/fixtures/a.mjs', 'README.md', '.dvara/other.json', 'docs/decisions.md']) assert.ok(!isGuardFile(path), path);
+    for (const path of ['src/cli.ts', 'scripts/guard.mjs', 'README.md', '.dvara/other.json', 'docs/decisions.md', 'apps/lefthook.yml']) assert.ok(!isGuardFile(path), path);
+  });
+
+  test("a repository's own paths add to the floor", () => {
+    const paths = ['scripts/*.mjs', 'eslint.config.mjs', 'lint/'];
+    for (const path of ['scripts/guard.mjs', 'eslint.config.mjs', 'lint/rules.ts', '.github/workflows/ci.yml']) assert.ok(isGuardFile(path, paths), path);
+    for (const path of ['scripts/fixtures/a.mjs', 'src/eslint.config.mjs']) assert.ok(!isGuardFile(path, paths), path);
+  });
+
+  test("guardPathsIn reads the settings' guard list, and refuses anything else", () => {
+    assert.deepEqual(guardPathsIn('{"owner":"A"}'), []);
+    assert.deepEqual(guardPathsIn('{"guard":["scripts/*.mjs","lint/"]}'), ['scripts/*.mjs', 'lint/']);
+    for (const bad of ['{"guard":"scripts/*.mjs"}', '{"guard":[1]}', '{"guard":["two words.mjs"]}', '{"guard":["prose"]}', '{"guard":[""]}']) {
+      assert.throws(() => guardPathsIn(bad), /"guard" must be a list of paths/, bad);
+    }
   });
 
   test('test files', () => {
@@ -228,7 +241,35 @@ describe('reading a change', () => {
     assert.deepEqual(jobNames('jobs:\n  a: null'), ['a']);
   });
 
+  test('workflowOf reads events and jobs', () => {
+    assert.deepEqual(workflowOf('on: push\njobs:\n  a: { name: A }')?.events, ['push']);
+    assert.deepEqual(workflowOf('on: [push, pull_request]\njobs: {}')?.events, ['push', 'pull_request']);
+    assert.deepEqual(workflowOf('on:\n  pull_request_target:\n    branches: [main]\njobs: {}')?.events, ['pull_request_target']);
+    assert.deepEqual(workflowOf('jobs:\n  a: { name: A }')?.jobs, [{ name: 'A', job: { name: 'A' } }]);
+    assert.equal(workflowOf('a: [b'), undefined);
+  });
+
+  test("isCaller takes the shared Guard's caller as onboard writes it, and nothing else", () => {
+    const job = { name: 'niyam-guard', uses: 'veda-hq/niyam/.github/workflows/shared-guard.yml@v0.8.0' };
+    assert.ok(isCaller(['pull_request_target'], job));
+    assert.ok(!isCaller(['pull_request_target', 'pull_request'], job));
+    assert.ok(!isCaller(['pull_request'], job));
+    assert.ok(!isCaller(['pull_request_target'], { ...job, uses: './.github/workflows/shared-guard.yml' }));
+    assert.ok(!isCaller(['pull_request_target'], { ...job, uses: 'evil/niyam/.github/workflows/shared-guard.yml@v0.8.0' }));
+    assert.ok(!isCaller(['pull_request_target'], { ...job, uses: 'veda-hq/niyam/.github/workflows/shared-guard.yml@' }));
+    // Pinned to a release tag or a full sha, never a branch someone could push to.
+    assert.ok(isCaller(['pull_request_target'], { ...job, uses: `veda-hq/niyam/.github/workflows/shared-guard.yml@${'0'.repeat(40)}` }));
+    for (const ref of ['main', 'v0.8', 'v0.8.0-evil', 'v0.8.0 ', 'abc123']) {
+      assert.ok(!isCaller(['pull_request_target'], { ...job, uses: `veda-hq/niyam/.github/workflows/shared-guard.yml@${ref}` }), ref);
+    }
+    assert.ok(!isCaller(['pull_request_target'], { name: 'niyam-guard', 'runs-on': 'ubuntu-latest', steps: [{ run: 'true' }] }));
+    assert.ok(!isCaller(['pull_request_target'], null));
+  });
+
   test('reports a check by name, matrix leg or reusable job', () => {
+    assert.ok(reports('niyam-guard', 'niyam-guard / judge'));
+    assert.ok(!reports('niyam', 'niyam-guard / judge'));
+    assert.ok(!reports('judge', 'niyam-guard / judge'));
     assert.ok(reports('Guard', 'Guard'));
     assert.ok(reports('niyam', 'niyam / Work rules'));
     assert.ok(reports('Build', 'Build (ubuntu)'));
@@ -393,6 +434,12 @@ describe('judging a pull request', () => {
     assert.equal((await judge(github({ files: more, contents, body: 'none', pull: { user: { login: 'dependabot[bot]' } } }), REPO, 1, OWNERS)).length, 2);
   });
 
+  test("a guard path of the repository's own needs naming", async () => {
+    const [refusal] = await judge(github({ files: [modified('scripts/guard.mjs')] }), REPO, 1, OWNERS, ['scripts/*.mjs']);
+    assert.match(refusal.message, /changes a guard file, scripts\/guard\.mjs/);
+    assert.deepEqual(await judge(github({ files: [modified('scripts/guard.mjs')] }), REPO, 1, OWNERS), []);
+  });
+
   test('onboard moving niyam to a newer release on main passes unnamed', async () => {
     const patch = '@@ -1 +1 @@\n-    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.16\n+    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.17';
     const files = [modified('.github/workflows/niyam.yml', patch)];
@@ -400,10 +447,11 @@ describe('judging a pull request', () => {
     const pull = { title: '🔧 chore(niyam): onboard at v0.6.17' };
     const TAG = 'c'.repeat(40);
     const COMMIT = 'd'.repeat(40);
+    // The tag is niyam's, on niyam's main, whichever repository onboarded.
     const tagged = (status, ref = { object: { type: 'tag', sha: TAG } }) => ({
-      [`/repos/${REPO}/git/ref/tags/v0.6.17`]: ref,
-      [`/repos/${REPO}/git/tags/${TAG}`]: { object: { type: 'commit', sha: COMMIT } },
-      [`/repos/${REPO}/compare/main...${COMMIT}`]: { status },
+      [`/repos/${NIYAM}/git/ref/tags/v0.6.17`]: ref,
+      [`/repos/${NIYAM}/git/tags/${TAG}`]: { object: { type: 'commit', sha: COMMIT } },
+      [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status },
     });
     assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS), []);
     assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('identical') }), REPO, 1, OWNERS), []);
@@ -412,7 +460,10 @@ describe('judging a pull request', () => {
     // A tag off main, one GitHub cannot find, or an annotated tag it cannot read, is no exemption.
     assert.equal((await judge(github({ files, contents, body: 'none', pull, over: tagged('diverged') }), REPO, 1, OWNERS)).length, 1);
     assert.equal((await judge(github({ files, contents, body: 'none', pull }), REPO, 1, OWNERS)).length, 1);
-    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: { ...tagged('behind'), [`/repos/${REPO}/git/tags/${TAG}`]: { status: 404, json: {} } } }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: { ...tagged('behind'), [`/repos/${NIYAM}/git/tags/${TAG}`]: { status: 404, json: {} } } }), REPO, 1, OWNERS)).length, 1);
+    // A tag of the onboarded repository's own is no exemption either: the release is niyam's.
+    const own = Object.fromEntries(Object.entries(tagged('behind')).map(([path, route]) => [path.replace(NIYAM, REPO), route]));
+    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: own }), REPO, 1, OWNERS)).length, 1);
     // Nor are sha256 swaps that move no version.
     const swap = [modified('.github/niyam/cloud-setup.sh', `@@ -1 +1 @@\n-x ${'1'.repeat(64)}\n+x ${'2'.repeat(64)}`)];
     assert.equal((await judge(github({ files: swap, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS)).length, 1);
@@ -438,8 +489,9 @@ describe('judging a pull request', () => {
     assert.match(refusal.message, /reports "Guard"/);
     [refusal] = await one(WORKFLOW([['niyam']]), WORKFLOW([['other']]));
     assert.match(refusal.message, /reports "niyam \/ Work rules"/);
-    [refusal] = await one(WORKFLOW([['x', '"${{ inputs.name }}"']]), WORKFLOW([['other']]));
-    assert.match(refusal.message, /whose name is an expression/);
+    // An expression could report any check: the shared Guard's too.
+    const expression = await one(WORKFLOW([['x', '"${{ inputs.name }}"']]), WORKFLOW([['other']]));
+    assert.deepEqual(expression.map((one) => /whose name is an expression|could report "niyam-guard \/ judge"/.test(one.message)), [true, true]);
     [refusal] = await one('jobs: [', WORKFLOW([['other']]));
     assert.match(refusal.message, /does not parse as a workflow/);
     // A second job of a required name counts as added.
@@ -448,6 +500,36 @@ describe('judging a pull request', () => {
     // A base that no longer parses keeps no names.
     [refusal] = await one(WORKFLOW([['g', 'Guard']]), 'jobs: [');
     assert.match(refusal.message, /reports "Guard"/);
+  });
+
+  test("only the caller as onboard writes it may report the shared Guard's check, Guards: or not", async () => {
+    const CALLER = 'name: niyam guard\non:\n  pull_request_target:\n    branches: [main]\njobs:\n  niyam-guard:\n    name: niyam-guard\n    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@v0.8.0\n';
+    const one = async (now, before, status = 'modified') =>
+      judge(
+        github({
+          files: [modified('.github/workflows/niyam-guard.yml', '@@ -1 +1 @@\n-a\n+b', { status })],
+          contents: { '.github/workflows/niyam-guard.yml@h': now, ...(before ? { '.github/workflows/niyam-guard.yml@m': before } : {}) },
+          body: '**Guards:** `.github/workflows/niyam-guard.yml`',
+        }),
+        REPO,
+        1,
+        OWNERS,
+      );
+    // Added where there was none, as onboard writes it, it passes; so does a move to another release.
+    assert.deepEqual(await one(CALLER, undefined, 'added'), []);
+    assert.deepEqual(await one(CALLER.replace('v0.8.0', 'v0.8.1'), CALLER), []);
+    // A trigger that runs the pull request's own copy, with the job's name unchanged, is refused.
+    let [refusal, ...rest] = await one(CALLER.replace('  pull_request_target:', '  pull_request:\n  pull_request_target:'), CALLER);
+    assert.equal(rest.length, 0);
+    assert.match(refusal.message, /has the job "niyam-guard", which could report "niyam-guard \/ judge", the shared Guard's check, but is not its caller/);
+    // So are steps of its own, or a workflow of its own, under the name.
+    [refusal] = await one(CALLER.replace(/uses: .*/, "runs-on: ubuntu-latest\n    steps: [{ run: 'true' }]"), CALLER);
+    assert.match(refusal.message, /is not its caller/);
+    [refusal] = await one(CALLER.replace('veda-hq/niyam/.github/workflows/shared-guard.yml@v0.8.0', './.github/workflows/mine.yml'), CALLER);
+    assert.match(refusal.message, /is not its caller/);
+    // And a job named after the whole check.
+    [refusal] = await one(WORKFLOW([['x', 'niyam-guard / judge']]), WORKFLOW([['other']]));
+    assert.match(refusal.message, /has the job "niyam-guard \/ judge"/);
   });
 
   test('a workflow change when the ruleset cannot be read fails closed', async () => {
@@ -469,39 +551,83 @@ function ciContents() {
 }
 
 describe('main', () => {
-  const root = join(scratch, 'repo');
-  mkdirSync(join(root, '.github'), { recursive: true });
-  writeFileSync(join(root, '.github', 'niyam.json'), JSON.stringify({ owner: 'Owner', agent: 'AthyaBot' }));
   const output = () => {
     const lines = [];
     return { lines, log: (line) => lines.push(['log', line]), error: (line) => lines.push(['error', line]) };
   };
-  const env = { REPO, PR: '1', GH_TOKEN: 'x' };
+  const env = { REPO, PR: '1', GH_TOKEN: 'x', GITHUB_EVENT_NAME: 'pull_request_target' };
+  /** main's settings, read through the API at the default branch's tip. */
+  const settings = (json = { owner: 'Owner', agent: 'AthyaBot' }) => ({ '.github/niyam.json@main': JSON.stringify(json) });
 
   test('passes, refuses, fails closed and checks its usage', async () => {
     let out = output();
-    assert.equal(await main(env, out, github({ files: [modified('src/a.ts')] }), root), 0);
+    assert.equal(await main(env, out, github({ files: [modified('src/a.ts')], contents: settings() })), 0);
     assert.match(out.lines[0][1], /^Guard: /);
 
     out = output();
-    assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')] }), root), 1);
+    assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')], contents: settings() })), 1);
     assert.match(out.lines[0][1], /^::error file=\.githooks\/pre-push::This pull request changes a guard file/);
 
     out = output();
-    assert.equal(await main(env, out, github({ files: [modified('README.md')], pull: { changed_files: 9 } }), root), 1);
+    assert.equal(await main(env, out, github({ files: [modified('README.md')], pull: { changed_files: 9 }, contents: settings() })), 1);
     assert.match(out.lines[0][1], /^::error::GitHub listed 1/);
 
     out = output();
-    assert.equal(await main(env, out, github({ over: { [`/repos/${REPO}/pulls/1`]: { status: 404, json: { message: 'Not Found' } } } }), root), 1);
+    assert.equal(await main(env, out, github({ contents: settings(), over: { [`/repos/${REPO}/pulls/1`]: { status: 404, json: { message: 'Not Found' } } } })), 1);
     assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: GitHub did not answer \/repos\/o\/r\/pulls\/1 \(HTTP 404: Not Found\)/);
-
-    out = output();
-    assert.equal(await main(env, out, github(), join(scratch, 'missing')), 1);
 
     for (const bad of [{ ...env, REPO: undefined }, { ...env, REPO: 'a b' }, { ...env, PR: 'x' }, { ...env, PR: '0' }, { ...env, GH_TOKEN: undefined }]) {
       out = output();
-      assert.equal(await main(bad, out, undefined, root), 2);
+      assert.equal(await main(bad, out, undefined), 2);
       assert.match(out.lines[0][1], /^usage:/);
+    }
+  });
+
+  test("reads the owners and the repository's own guard paths from the default branch's settings", async () => {
+    let out = output();
+    const files = [modified('scripts/guard.mjs')];
+    assert.equal(await main(env, out, github({ files, contents: settings({ owner: 'Owner', agent: 'AthyaBot', guard: ['scripts/*.mjs'] }) })), 1);
+    assert.match(out.lines[0][1], /^::error file=scripts\/guard\.mjs::This pull request changes a guard file/);
+
+    // No settings, settings naming no owner, or a guard list that is not one, fail closed.
+    for (const contents of [{}, settings({ agent: 'AthyaBot' }), settings({ owner: 'Owner', guard: 'scripts/' }), { '.github/niyam.json@main': '{' }]) {
+      out = output();
+      assert.equal(await main(env, out, github({ files, contents })), 1);
+      assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: /);
+    }
+    out = output();
+    await main(env, out, github({ files, contents: {} }));
+    assert.match(out.lines[0][1], /main has no \.github\/niyam\.json; run niyam onboard/);
+
+    // No default branch named fails closed too.
+    for (const repository of [{}, { default_branch: '' }, { status: 404, json: { message: 'Not Found' } }]) {
+      out = output();
+      assert.equal(await main(env, out, github({ files, contents: settings(), over: { [`/repos/${REPO}`]: repository } })), 1);
+      assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: /);
+    }
+  });
+
+  test("a default branch other than main: its settings and its ruleset", async () => {
+    const out = output();
+    const files = [{ filename: '.github/workflows/new.yml', status: 'added', patch: '@@ -0,0 +1 @@\n+x' }];
+    const contents = {
+      '.github/niyam.json@release/1': JSON.stringify({ owner: 'Owner', agent: 'AthyaBot' }),
+      '.github/workflows/new.yml@h': WORKFLOW([['lint', 'Lint']]),
+    };
+    const rules = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'Lint' }] } }];
+    const gh = github({ files, body: '**Guards:** `.github/workflows/new.yml`', contents, over: { [`/repos/${REPO}`]: { default_branch: 'release/1' }, [`/repos/${REPO}/rules/branches/release/1`]: rules } });
+    assert.equal(await main(env, out, gh), 1);
+    assert.match(out.lines[0][1], /reports "Lint", a check release\/1's ruleset requires/);
+    assert.ok(!gh.calls.some((path) => path.includes('ref=main') || path.endsWith('/rules/branches/main')));
+  });
+
+  test('refuses any event but pull_request_target', async () => {
+    for (const event of ['pull_request', 'push', undefined]) {
+      const out = output();
+      const gh = github({ files: [modified('src/a.ts')], contents: settings() });
+      assert.equal(await main({ ...env, GITHUB_EVENT_NAME: event }, out, gh), 1);
+      assert.match(out.lines[0][1], /^::error::Guard runs only on pull_request_target/);
+      assert.deepEqual(gh.calls, []);
     }
   });
 

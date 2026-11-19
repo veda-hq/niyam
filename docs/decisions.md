@@ -2273,3 +2273,48 @@
   - Rejected: reading the timeline after the write and putting back another
     actor's type (timeline events lag the write, and a second write is one
     more to race); a shorter wait (#453's opener took ten seconds).
+- **2026-11-19 — Record: one Guard, from a niyam release, for any repository
+  (P-74, Work item #468, slice #469).** A client's pull request runs its own
+  copy of the checks that judge it, and only niyam had Guard (P-62). Alok
+  chose one Guard shipped from niyam, as `checks.yml` is, over a copy in
+  each repository; org rulesets' required workflows cannot cross
+  organisations, and veda-hq is on GitHub Free.
+  - `.github/workflows/shared-guard.yml` (`workflow_call`, no inputs, no
+    secrets) runs `scripts/guard.mjs` from niyam at `job.workflow_sha`, the
+    commit GitHub resolved for the caller's `uses:`. It checks out nothing
+    of the caller's and reads the pull request through the API with the
+    caller's token. No `job.workflow_sha` refuses: unlike `checks.yml`, no
+    fallback to an input, since the caller's file would then pick the code.
+    Since 2025-12-08 GitHub runs a `pull_request_target` workflow from the
+    default branch (changelog of 2025-11-07), so the pin is the default
+    branch's.
+  - The script refuses any event but `pull_request_target`, and reads the
+    owners and the repository's own guard paths (`"guard"`) from the
+    default branch's `.github/niyam.json` through the API, and the required
+    checks from that branch's ruleset: the branch GitHub names as the
+    repository's default, not `main`, since onboard takes any. The floor
+    (`.github/`, `.githooks/`, `.husky/`, `lefthook.yml`, `package.json`'s
+    scripts, the dvara, gitleaks and trufflehog settings) is fixed in the
+    script; `scripts/*.mjs`, niyam's own, moved to niyam's settings, so
+    niyam holds the same files before and after.
+  - The onboard exemption's tag is read on `veda-hq/niyam`'s `main`, where
+    the release is, whichever repository onboarded.
+  - The check is `niyam-guard / judge`: GitHub names a reusable workflow's
+    check `<caller job> / <called job>` (community discussion 29825; the
+    docs say nothing, nor whether it takes the job's id or its name, so the
+    caller's are the same). Neither job is `Guard`, which today's Guard
+    refuses as an added job, and the caller is not `niyam`, `niyam.yml`'s
+    job, which a pull request could point at a local workflow.
+  - Only the caller as onboard writes it may report that check: a job that
+    could report it must be in a workflow run by `pull_request_target`
+    alone and only call `shared-guard.yml` at a release tag or a full sha,
+    never a branch anyone with push to niyam could move. A ruleset can pin a
+    check to an app, not an event, so a `pull_request` copy of the caller
+    would report the same name from GitHub Actions; how GitHub weighs a
+    failing and a passing run of one required name is not documented.
+  - Its concurrency group, `niyam-guard-<number>`, is not `guard.yml`'s, so
+    the two do not cancel each other while niyam runs both (slice #472).
+  - Rejected: an input naming niyam's ref, as veda's `version-rule.yml`
+    has (the caller would choose the code); a check posted by niyam's
+    GitHub App (the later upgrade #468 names: it closes the same-name case
+    for sure, but needs a service); per-repository copies of the guard.
