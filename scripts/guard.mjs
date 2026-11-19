@@ -35,6 +35,8 @@ const SHARED_CHECK = 'niyam-guard / judge';
 
 /** The one job that may report the shared check: the caller onboard writes calls this workflow, at a release. */
 const SHARED_WORKFLOW = `${NIYAM}/.github/workflows/shared-guard.yml@`;
+/** A ref the caller may pin: a release tag, or a full commit sha. */
+const RELEASE_REF = /^(v\d+\.\d+\.\d+|[0-9a-f]{40})$/;
 
 /** The settings file, read at the default branch's tip. */
 const SETTINGS = '.github/niyam.json';
@@ -265,14 +267,16 @@ export function workflowOf(text) {
  * Whether `job`, in a workflow run by `events`, is the shared Guard's caller
  * as onboard writes it: run by pull_request_target alone, so GitHub runs the
  * default branch's copy, and doing nothing but call shared-guard.yml at a
- * ref. Only such a job may report the shared check.
+ * release tag or a full commit sha, never a branch. Only such a job may
+ * report the shared check.
  * @param {string[]} events @param {unknown} job
  */
 export function isCaller(events, job) {
   if (events.length !== 1 || events[0] !== 'pull_request_target') return false;
   if (!job || typeof job !== 'object' || Array.isArray(job)) return false;
   const { uses, steps } = /** @type {{ uses?: unknown, steps?: unknown }} */ (job);
-  return typeof uses === 'string' && uses.startsWith(SHARED_WORKFLOW) && uses.length > SHARED_WORKFLOW.length && !/\s/.test(uses) && steps === undefined;
+  if (typeof uses !== 'string' || !uses.startsWith(SHARED_WORKFLOW) || steps !== undefined) return false;
+  return RELEASE_REF.test(uses.slice(SHARED_WORKFLOW.length));
 }
 
 /** Whether a job named `name` could report the required check `check`: itself, a matrix leg of it, or a reusable workflow's job under it. */
@@ -450,11 +454,12 @@ async function approvedAt(gh, repo, slice, owners) {
 /**
  * Judges pull request `pr` of `repo`: the refusals, each naming its file and
  * how to pass, empty when it passes. `ownPaths` are the repository's own guard
- * paths, from its settings, beyond the floor.
- * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} [ownPaths]
+ * paths, from its settings, beyond the floor; `branch` is its default branch,
+ * whose ruleset names the required checks.
+ * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} [ownPaths] @param {string} [branch]
  * @returns {Promise<{ file?: string, message: string }[]>}
  */
-export async function judge(gh, repo, pr, owners, ownPaths = []) {
+export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN) {
   const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
   const files = await every(gh, `/repos/${repo}/pulls/${pr}/files`, FILES_MOST);
   if (files.length !== pull.changed_files) {
@@ -481,8 +486,8 @@ export async function judge(gh, repo, pr, owners, ownPaths = []) {
   let required;
   const requiredChecks = async () => {
     if (required) return required;
-    const rules = await read(gh, `/repos/${repo}/rules/branches/${MAIN}`);
-    if (!Array.isArray(rules)) throw new Unread(`GitHub did not answer ${MAIN}'s rules as a list`);
+    const rules = await read(gh, `/repos/${repo}/rules/branches/${branch.split('/').map(encodeURIComponent).join('/')}`);
+    if (!Array.isArray(rules)) throw new Unread(`GitHub did not answer ${branch}'s rules as a list`);
     const contexts = rules.filter((rule) => rule.type === 'required_status_checks').flatMap((rule) => rule.parameters?.required_status_checks ?? []).map((check) => check.context);
     return (required = [...new Set([OWN_CHECK, SHARED_CHECK, ...contexts])]);
   };
@@ -545,8 +550,8 @@ export async function judge(gh, repo, pr, owners, ownPaths = []) {
         refusals.push({
           file: file.filename,
           message: name.includes('${{')
-            ? `${file.filename} adds the job "${name}", whose name is an expression that could report a check ${MAIN}'s ruleset requires. Give it a fixed name.`
-            : `${file.filename} adds the job "${name}", which reports "${check}", a check ${MAIN}'s ruleset requires: a pull request would report it from its own copy. Rename the job.`,
+            ? `${file.filename} adds the job "${name}", whose name is an expression that could report a check ${branch}'s ruleset requires. Give it a fixed name.`
+            : `${file.filename} adds the job "${name}", which reports "${check}", a check ${branch}'s ruleset requires: a pull request would report it from its own copy. Rename the job.`,
         });
       }
     }
@@ -597,9 +602,12 @@ export async function main(env = process.env, out = console, gh = undefined) {
   let refusals;
   try {
     const github = gh ?? client(env.GH_TOKEN, env.GITHUB_API_URL || undefined);
-    const settings = await textAt(github, repo, SETTINGS, MAIN);
-    if (settings === undefined) throw new Unread(`${MAIN} has no ${SETTINGS}; run niyam onboard`);
-    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings));
+    // The repository's own default branch, which a pull request cannot change.
+    const branch = (await read(github, `/repos/${repo}`))?.default_branch;
+    if (typeof branch !== 'string' || branch === '') throw new Unread(`GitHub named no default branch for ${repo}`);
+    const settings = await textAt(github, repo, SETTINGS, encodeURIComponent(branch));
+    if (settings === undefined) throw new Unread(`${branch} has no ${SETTINGS}; run niyam onboard`);
+    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings), branch);
   } catch (error) {
     // Anything it could not read refuses: the guard fails closed.
     out.error(`::error::Guard could not judge this pull request: ${error.message}. Run Guard again once GitHub answers.`);

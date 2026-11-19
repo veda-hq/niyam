@@ -42,6 +42,7 @@ const WORKFLOW = (jobs) => `name: x\non: push\njobs:\n${jobs.map(([id, name]) =>
 function github({ files = [], body = '**Guards:** `.github/workflows/ci.yml`', pull = {}, contents = {}, over = {} } = {}) {
   const calls = [];
   const routes = {
+    [`/repos/${REPO}`]: { default_branch: 'main' },
     [`/repos/${REPO}/pulls/1`]: { title: '✨ feat(x): y', body: 'Slice: #10', user: { login: 'AthyaBot' }, changed_files: files.length, base: { sha: 'b' }, head: { sha: 'h' }, ...pull },
     [`/repos/${REPO}/pulls/1/files`]: files,
     [`/repos/${REPO}/compare/b...h`]: { merge_base_commit: { sha: 'm' } },
@@ -256,6 +257,11 @@ describe('reading a change', () => {
     assert.ok(!isCaller(['pull_request_target'], { ...job, uses: './.github/workflows/shared-guard.yml' }));
     assert.ok(!isCaller(['pull_request_target'], { ...job, uses: 'evil/niyam/.github/workflows/shared-guard.yml@v0.8.0' }));
     assert.ok(!isCaller(['pull_request_target'], { ...job, uses: 'veda-hq/niyam/.github/workflows/shared-guard.yml@' }));
+    // Pinned to a release tag or a full sha, never a branch someone could push to.
+    assert.ok(isCaller(['pull_request_target'], { ...job, uses: `veda-hq/niyam/.github/workflows/shared-guard.yml@${'0'.repeat(40)}` }));
+    for (const ref of ['main', 'v0.8', 'v0.8.0-evil', 'v0.8.0 ', 'abc123']) {
+      assert.ok(!isCaller(['pull_request_target'], { ...job, uses: `veda-hq/niyam/.github/workflows/shared-guard.yml@${ref}` }), ref);
+    }
     assert.ok(!isCaller(['pull_request_target'], { name: 'niyam-guard', 'runs-on': 'ubuntu-latest', steps: [{ run: 'true' }] }));
     assert.ok(!isCaller(['pull_request_target'], null));
   });
@@ -592,6 +598,27 @@ describe('main', () => {
     out = output();
     await main(env, out, github({ files, contents: {} }));
     assert.match(out.lines[0][1], /main has no \.github\/niyam\.json; run niyam onboard/);
+
+    // No default branch named fails closed too.
+    for (const repository of [{}, { default_branch: '' }, { status: 404, json: { message: 'Not Found' } }]) {
+      out = output();
+      assert.equal(await main(env, out, github({ files, contents: settings(), over: { [`/repos/${REPO}`]: repository } })), 1);
+      assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: /);
+    }
+  });
+
+  test("a default branch other than main: its settings and its ruleset", async () => {
+    const out = output();
+    const files = [{ filename: '.github/workflows/new.yml', status: 'added', patch: '@@ -0,0 +1 @@\n+x' }];
+    const contents = {
+      '.github/niyam.json@release/1': JSON.stringify({ owner: 'Owner', agent: 'AthyaBot' }),
+      '.github/workflows/new.yml@h': WORKFLOW([['lint', 'Lint']]),
+    };
+    const rules = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'Lint' }] } }];
+    const gh = github({ files, body: '**Guards:** `.github/workflows/new.yml`', contents, over: { [`/repos/${REPO}`]: { default_branch: 'release/1' }, [`/repos/${REPO}/rules/branches/release/1`]: rules } });
+    assert.equal(await main(env, out, gh), 1);
+    assert.match(out.lines[0][1], /reports "Lint", a check release\/1's ruleset requires/);
+    assert.ok(!gh.calls.some((path) => path.includes('ref=main') || path.endsWith('/rules/branches/main')));
   });
 
   test('refuses any event but pull_request_target', async () => {

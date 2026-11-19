@@ -2290,7 +2290,9 @@
     branch's.
   - The script refuses any event but `pull_request_target`, and reads the
     owners and the repository's own guard paths (`"guard"`) from the
-    default branch's `.github/niyam.json` through the API. The floor
+    default branch's `.github/niyam.json` through the API, and the required
+    checks from that branch's ruleset: the branch GitHub names as the
+    repository's default, not `main`, since onboard takes any. The floor
     (`.github/`, `.githooks/`, `.husky/`, `lefthook.yml`, `package.json`'s
     scripts, the dvara, gitleaks and trufflehog settings) is fixed in the
     script; `scripts/*.mjs`, niyam's own, moved to niyam's settings, so
@@ -2305,7 +2307,8 @@
     job, which a pull request could point at a local workflow.
   - Only the caller as onboard writes it may report that check: a job that
     could report it must be in a workflow run by `pull_request_target`
-    alone and only call `shared-guard.yml` at a ref. A ruleset can pin a
+    alone and only call `shared-guard.yml` at a release tag or a full sha,
+    never a branch anyone with push to niyam could move. A ruleset can pin a
     check to an app, not an event, so a `pull_request` copy of the caller
     would report the same name from GitHub Actions; how GitHub weighs a
     failing and a passing run of one required name is not documented.

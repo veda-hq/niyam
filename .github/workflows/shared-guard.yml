@@ -72,7 +72,8 @@ jobs:
         with:
           node-version-file: .nvmrc
       # niyam's lockfile, for the yaml parser that reads workflows. No install scripts run.
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      # --prod: yaml is a dependency, so niyam's dev tools stay out (9 packages, not 156).
+      - run: pnpm install --frozen-lockfile --ignore-scripts --prod
       # Only the pull request's number reaches the script; it reads the rest from the API.
       - run: node scripts/guard.mjs
         env:

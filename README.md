@@ -1805,7 +1805,7 @@ niyam version, and a sha256 with it, to that release, tagged on
 `veda-hq/niyam`'s `main`; and a Dependabot pull request whose every changed
 line only moves a `uses:` to another full commit sha with its version
 comment. Whatever the slice says, Guard refuses a pull request that adds a
-job reporting a check the `main` ruleset requires, or `Guard`, and any job
+job reporting a check the default branch's ruleset requires, or `Guard`, and any job
 that could report the shared Guard's check, `niyam-guard / judge`, other than
 its caller as `onboard` writes it. It fails closed: a truncated file list,
 settings it cannot read, any read GitHub does not answer, or an event other
@@ -1819,8 +1819,10 @@ gives none), never the calling repository or the pull request, and judges
 the caller's pull request with the caller's token. A repository calls it
 from a workflow run by `pull_request_target` alone, whose one job,
 `niyam-guard` (id and name), only calls
-`veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z`, read-only, with
-no inputs or secrets; its check is `niyam-guard / judge`. From 2026-12-02
+`veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z` (a release tag or
+a full commit sha, never a branch), read-only, with no inputs or secrets; its
+check is `niyam-guard / judge`. The default branch is the repository's own,
+whatever its name. From 2026-12-02
 GitHub blocks `pull_request_target` in a public repository unless Settings,
 Actions, Policies allows it for that workflow.
 
