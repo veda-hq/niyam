@@ -1881,7 +1881,7 @@ Actions, Policies allows it for that workflow, so `onboard` names that step
 there.
 
 Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
-`@AlokBansal8` for the guard's files alone: `.github/workflows/guard.yml`,
+`@AlokBansal8` for the guard's files alone: `.github/workflows/guard.yml`, the caller `.github/workflows/niyam-guard.yml`,
 `.github/workflows/shared-guard.yml`, `scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
 itself. With "Require review from Code Owners" on in the `main` ruleset, a
 pull request that changes one of them waits for his approval. Every other
