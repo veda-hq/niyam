@@ -44,7 +44,7 @@
     "@types/node": "24.19.2",
     "@veda-hq/dvara": "0.5.16",
     "@veda-hq/pariksha": "0.5.20",
-    "@veda-hq/sarathi": "0.7.1",
+    "@veda-hq/sarathi": "0.7.8",
     "typescript": "7.0.2"
   },
   "dependencies": {

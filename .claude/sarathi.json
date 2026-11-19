@@ -29,6 +29,19 @@
         "command": "bash \"$SARATHI_HOOKS\"/ask-gate.sh",
         "timeout": 10
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "command": "bash \"$SARATHI_HOOKS\"/ask-gate.sh",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "command": "bash \"$SARATHI_HOOKS\"/ask-gate.sh",
+        "timeout": 10
+      }
     ]
   }
 }
