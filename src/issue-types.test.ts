@@ -594,7 +594,7 @@ describe('issueType', () => {
 
   it('types, hourly, every open issue here with no type but the Approvals issue, as a workflow token opens issues no run sees', async () => {
     const sys = job({ schedule: '41 * * * *' }, undefined, 'schedule');
-    const row = (number: number, extra: object = {}) => ({ number, url: `https://api.github.com/repos/${SLUG}/issues/${number}`, type: null, ...extra });
+    const row = (number: number, extra: object = {}) => ({ number, url: `https://api.github.com/repos/${SLUG}/issues/${number}`, state: 'open', type: null, ...extra });
     sys.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, {
       status: 200,
       json: [row(3), row(8), row(9, { parent_issue_url: `https://api.github.com/repos/${SLUG}/issues/2` }), row(10, { pull_request: {} })],
@@ -628,9 +628,14 @@ describe('issueType', () => {
     assert.equal(family.requests.filter((request) => request.method === 'GET' && request.url.endsWith('/issues/11')).length, 1, 'a parent being typed is not asked of GitHub');
     // An issue typed after the sweep listed it keeps that type, and is not counted.
     const raced = job({ schedule: '41 * * * *' }, undefined, 'schedule');
-    raced.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, { status: 200, json: [row(8)] });
+    raced.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, { status: 200, json: [row(8), row(9)] });
     raced.route('GET', `/repos/${SLUG}/issues/8`, { status: 200, json: row(8, { type: { name: 'Work item' } }) });
-    assert.deepEqual((await run(raced)).out, ['issue-type: #8 is a Work item now, typed since the job read it; left as it is', 'issue-type: 0 open issues with no type typed']);
+    raced.route('GET', `/repos/${SLUG}/issues/9`, { status: 200, json: row(9, { state: 'closed' }) });
+    assert.deepEqual((await run(raced)).out, [
+      'issue-type: #8 is a Work item now, typed since the job read it; left as it is',
+      'issue-type: #9 is closed now, since the job read it; left as it is',
+      'issue-type: 0 open issues with no type typed',
+    ]);
     assert.ok(!raced.requests.some((request) => request.method === 'PATCH'));
     assert.deepEqual(raced.slept, [], 'the sweep does not wait: the issues it lists are not new');
     const personal = job({ schedule: '41 * * * *' }, undefined, 'schedule');

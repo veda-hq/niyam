@@ -1304,9 +1304,9 @@ issue-type`, which gives an issue with no type one by the same rule.
 call, as it adds a parent or sub-issues after: the job, finding the issue
 with no type, waits 30 seconds, then reads it again from GitHub and decides
 from that read. A type set by then stands, and a parent or sub-issues added
-by then count. Every write, the hourly one's too, reads the issue's type
-once more just before it and writes only when there is still none, so an
-issue typed since the job read it keeps its type.
+by then count. Every write, the hourly one's too, reads the issue once more
+just before it and writes only when it is still open with no type, so an
+issue typed or closed since the job read it is left as it is.
 GitHub starts no run for an issue a workflow's own `GITHUB_TOKEN` opens, such
 as a monthly reminder a client's workflow files, so the job also runs on the
 asks job's hourly cron and types every open issue in the repository with

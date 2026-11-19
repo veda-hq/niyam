@@ -491,12 +491,14 @@ async function readIssue(sys: Sys, token: string, url: string, number: number): 
 
 /**
  * Sets an issue's type, checking GitHub's answer; returns the line saying so.
- * It reads the issue's type again first and writes only when it is still
- * none, so a type its opener set since the job read it stands.
+ * It reads the issue again first and writes only when it is still open with
+ * no type, so a type its opener set since the job read it stands.
  */
 async function setType(sys: Sys, token: string, url: string, number: number, { to, why }: { to: string; why: string }): Promise<{ line: string; typed: boolean }> {
-  const had = (await readIssue(sys, token, url, number))?.type?.name;
+  const fresh = await readIssue(sys, token, url, number);
+  const had = fresh?.type?.name;
   if (typeof had === 'string') return { line: `issue-type: #${number} is a ${had} now, typed since the job read it; left as it is`, typed: false };
+  if (fresh?.state !== 'open') return { line: `issue-type: #${number} is closed now, since the job read it; left as it is`, typed: false };
   const { status, json } = await sys.http(url, { method: 'PATCH', token, body: { type: to } });
   const now = (json as { type?: { name?: unknown } | null } | null)?.type?.name;
   if (status !== 200 || typeof now !== 'string' || !same(now, to)) {
