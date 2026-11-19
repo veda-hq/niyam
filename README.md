@@ -1678,7 +1678,7 @@ tag and the commit. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.7.2/veda-hq-niyam-0.7.2.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.7.3/veda-hq-niyam-0.7.3.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release
