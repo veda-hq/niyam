@@ -2356,3 +2356,25 @@
   - Rejected: writing it with any feature that writes `niyam.yml`, which
     would add a guard file Guard then refuses to change in a repository with
     no Work items to name.
+- **2026-11-19 — Record: owner-step required-checks requires the shared
+  Guard once it has passed (Work item #468, slice #471).**
+  `niyam owner-step required-checks` requires `niyam-guard / judge` when the
+  default branch's caller is as onboard writes it (`callerAt`), at the
+  release `niyam.yml` pins and on the default branch, and the check reported
+  `success` on the head of the last pull request merged there.
+  - Its proof is `--check`'s (`passedOnPull`) plus one rule: the one app is
+    GitHub Actions, and the ruleset requires it from that app. A lone other
+    app reporting the name passes `--check`, and that is the spoof the shared
+    Guard exists to stop, so `--check niyam-guard / judge` takes this path
+    and never `--check`'s.
+  - It is gated on the caller file, not on `work-rules`: a repository with
+    no caller is told nothing, unless the owner named the check, so the step
+    says nothing new to a client that has not onboarded at a release with
+    the caller. Doctor already marks that.
+  - The swap of `Guard` for it is for niyam's own ruleset alone (`PRODUCT`).
+    `Guard` is a common name, and the step keeps every other check, so a
+    client's `Guard` stays. Its new entry is from GitHub Actions, not the
+    old entry's app.
+  - The caller runs on pull requests into the default branch alone, so the
+    step says that a ruleset also targeting other branches would hold
+    theirs; it does not read the ruleset's conditions to refuse that.

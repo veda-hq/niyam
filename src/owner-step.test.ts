@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { type Call, FakeSys, capture } from './fake.test.ts';
+import { guardCaller } from './guard-caller.ts';
 import { ISSUE_TYPES } from './issue-types.ts';
 import { FOLDER_PREFIX, REVOKE, folderRoot, leftBehind, ownerStep, ownerStepArgs, stepScopes } from './owner-step.ts';
 import { run } from './run.ts';
@@ -776,5 +777,201 @@ describe('owner-step required-checks --check', () => {
     assert.equal(await ownerStep(made.sys, io, step(VEDA, 'niyam / PR identity')), 0, out.join('\n'));
     assert.match(out.join('\n'), /✓ nothing to change: the ruleset main requires every check \.github\/niyam\.json turns on, and veda-checks \/ Checks/);
     assert.ok(!made.api.some((call) => call.args[1]?.includes('/pulls') || call.args[1]?.includes('/check-runs')));
+  });
+});
+
+describe("owner-step required-checks, the shared Guard's check (#471)", () => {
+  const JUDGE = 'niyam-guard / judge';
+  const CALLER = guardCaller('main', '0.6.6');
+  const ACTIONS = { id: 15368, name: 'GitHub Actions' };
+  const LOOKALIKE = { id: 99, name: 'Lookalike' };
+  const checks = (...list: (string | [string, number])[]): unknown => ({
+    type: 'required_status_checks',
+    parameters: { strict_required_status_checks_policy: false, required_status_checks: list.map((one) => (typeof one === 'string' ? { context: one, integration_id: 15368 } : { context: one[0], integration_id: one[1] })) },
+  });
+  const run = (conclusion: string | null, app: { id: number; name: string } = ACTIONS): unknown => ({ name: JUDGE, conclusion, app });
+  const ran = (...runs: unknown[]): { status: number; json: unknown } => ({ status: 200, json: { total_count: runs.length, check_runs: runs } });
+  const judged = (repo: string): string => `GET repos/${repo}/commits/eight/check-runs?check_name=${encodeURIComponent(JUDGE)}&filter=latest&per_page=100`;
+  const callerAt = (repo: string): string => `GET repos/${repo}/contents/.github/workflows/niyam-guard.yml`;
+  /** `repo` as onboard leaves it with pr-identity and the caller on main at v0.6.6, whose check passed from GitHub Actions on #8, the last pull request merged. */
+  const setUp = (
+    repo: string,
+    rules: unknown[],
+    extra: Record<string, Reply> = {},
+    put?: (body: { rules: unknown[] }) => unknown[],
+  ): ReturnType<typeof world> & { now: () => unknown[]; set: (rules: unknown[]) => void } => {
+    let now = rules;
+    const made = world(
+      {
+        [`GET repos/${repo}`]: { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 'main', private: true } },
+        'GET user/memberships/orgs/veda-hq': ADMIN,
+        [`GET repos/${repo}/rulesets?includes_parents=false&per_page=100`]: { status: 200, json: [{ id: 5, name: 'main' }] },
+        [`GET repos/${repo}/rulesets/5`]: () => ({ status: 200, json: { id: 5, name: 'main', rules: now } }),
+        [`PUT repos/${repo}/rulesets/5`]: (body) => {
+          now = put ? put(body as { rules: unknown[] }) : (body as { rules: unknown[] }).rules;
+          return { status: 200, json: {} };
+        },
+        [`GET repos/${repo}/contents/.github/niyam.json`]: encoded(JSON.stringify({ owner: OWNER, agent: 'ExampleBot', features: ['pr-identity'] })),
+        [`GET repos/${repo}/contents/.github/workflows/niyam.yml`]: encoded(WORKFLOW),
+        'GET repos/veda-hq/niyam/contents/.github/workflows/checks.yml?ref=v0.6.6': encoded(SHARED),
+        [callerAt(repo)]: encoded(CALLER),
+        [`GET repos/${repo}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=30`]: { status: 200, json: [{ number: 8, merged_at: '2026-11-14T10:00:00Z', head: { sha: 'eight' } }] },
+        [judged(repo)]: ran(run('success')),
+        ...extra,
+      },
+      'repo',
+    );
+    return {
+      ...made,
+      now: () => now,
+      set: (rules) => {
+        now = rules;
+      },
+    };
+  };
+  const step = (repo: string, ...names: string[]): string[] => ['required-checks', repo, 'main', ...names.flatMap((name) => ['--check', name])];
+  const wrote = (made: ReturnType<typeof world>): boolean => made.api.some((call) => call.args.includes('PUT'));
+
+  it("requires it from GitHub Actions once it passed on the last merged pull request, keeping a client's own Guard", async () => {
+    const made = setUp('veda-hq/app', [{ type: 'deletion' }, checks('Guard', 'niyam / PR identity')], { [callerAt('veda-hq/app')]: encoded(CALLER.replaceAll('\n', '\r\n')) });
+    const { io, out, err } = capture();
+    assert.equal(await ownerStep(made.sys, io, step('veda-hq/app')), 0, out.join('\n'));
+    const text = out.join('\n');
+    assert.match(text, /niyam-guard \/ judge passed on veda-hq\/app#8, reported by GitHub Actions; \.github\/workflows\/niyam-guard\.yml runs it on pull requests into main alone, so a ruleset that also targets other branches would hold theirs/);
+    assert.match(text, /before: Guard, niyam \/ PR identity\n {2}after: {2}Guard, niyam \/ PR identity, niyam-guard \/ judge/);
+    assert.match(text, /make the ruleset main of veda-hq\/app also require niyam-guard \/ judge\n/);
+    assert.deepEqual(made.now(), [{ type: 'deletion' }, checks('Guard', 'niyam / PR identity', JUDGE)]);
+    cleaned(made.sys, out);
+    noLeak(made.sys, out, err);
+  });
+
+  it("puts it in Guard's place in niyam's ruleset, from GitHub Actions, and drops Guard beside it when both are required", async () => {
+    const made = setUp('veda-hq/niyam', [{ type: 'deletion' }, checks(['Guard', 42], 'niyam / PR identity')]);
+    const first = capture();
+    assert.equal(await ownerStep(made.sys, first.io, step('veda-hq/niyam')), 0, first.out.join('\n'));
+    const text = first.out.join('\n');
+    assert.match(text, /make the ruleset main of veda-hq\/niyam require niyam-guard \/ judge in place of Guard\n/);
+    assert.match(text, /before: Guard, niyam \/ PR identity\n {2}after: {2}niyam-guard \/ judge, niyam \/ PR identity/);
+    assert.deepEqual(made.now(), [{ type: 'deletion' }, checks(JUDGE, 'niyam / PR identity')]);
+
+    const both = setUp('veda-hq/niyam', [checks('Guard', 'niyam / PR identity', JUDGE)]);
+    const second = capture();
+    assert.equal(await ownerStep(both.sys, second.io, step('veda-hq/niyam')), 0, second.out.join('\n'));
+    assert.match(second.out.join('\n'), /require niyam-guard \/ judge in place of Guard/);
+    assert.deepEqual(both.now(), [checks(JUDGE, 'niyam / PR identity')]);
+  });
+
+  it("asks no proof when it is required already and there is no Guard of niyam's to swap, nor when there is no caller", async () => {
+    for (const [repo, rules, extra] of [
+      ['veda-hq/niyam', [checks('niyam / PR identity', JUDGE)], {}],
+      ['veda-hq/app', [checks('Guard', 'niyam / PR identity', JUDGE)], {}],
+      ['veda-hq/niyam', [checks('Guard', 'niyam / PR identity')], { [callerAt('veda-hq/niyam')]: { status: 404, json: { message: 'Not Found' } } }],
+    ] as [string, unknown[], Record<string, Reply>][]) {
+      const made = setUp(repo, rules, extra);
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, step(repo)), 0, out.join('\n'));
+      assert.match(out.join('\n'), /✓ nothing to change/);
+      assert.ok(!made.api.some((call) => call.args[1]?.includes('/pulls') || call.args[1]?.includes('/check-runs')), repo);
+      assert.ok(!wrote(made));
+    }
+  });
+
+  it('keeps Guard and requires nothing new, as ✗ saying why, until it has passed from GitHub Actions', async () => {
+    const first = "Guard runs from the default branch's copy of its caller, so it first reports on the pull request after the one that adds it";
+    const cases: [Record<string, Reply>, RegExp][] = [
+      [{ [judged('veda-hq/niyam')]: ran() }, new RegExp(`no check named niyam-guard / judge ran on veda-hq/niyam#8, the last pull request merged into main; ${first} → merge a pull request it passes on, then run this again`)],
+      [{ [judged('veda-hq/niyam')]: ran(run('failure')) }, /niyam-guard \/ judge did not pass on veda-hq\/niyam#8, the last pull request merged into main \(failure\)/],
+      [{ [judged('veda-hq/niyam')]: ran(run('success', LOOKALIKE)) }, /niyam-guard \/ judge on veda-hq\/niyam#8 was reported by Lookalike, not GitHub Actions; Guard runs/],
+      [{ [judged('veda-hq/niyam')]: ran(run('success'), run('success', LOOKALIKE)) }, /more than one app reported niyam-guard \/ judge on veda-hq\/niyam#8/],
+      [{ [callerAt('veda-hq/niyam')]: encoded(`${CALLER}    with:\n      extra: yes\n`) }, /\.github\/workflows\/niyam-guard\.yml on the default branch is not the shared Guard's caller as onboard writes it → rename or delete a \.github\/workflows\/niyam-guard\.yml onboard did not write, then niyam onboard there/],
+      [{ [callerAt('veda-hq/niyam')]: encoded(guardCaller('main', '0.6.5')) }, /\.github\/workflows\/niyam-guard\.yml calls the shared Guard at v0\.6\.5, but \.github\/workflows\/niyam\.yml pins v0\.6\.6 → niyam onboard there, merge its pull request, then run this again/],
+      [{ [callerAt('veda-hq/niyam')]: encoded(guardCaller('trunk', '0.6.6')) }, /runs on pull requests into trunk, not the default branch main/],
+      [{ 'GET repos/veda-hq/niyam/contents/.github/workflows/niyam.yml': encoded('jobs: {}\n') }, /\.github\/workflows\/niyam\.yml on the default branch pins no release/],
+      [{ 'GET repos/veda-hq/niyam/contents/.github/workflows/niyam.yml': encoded(WORKFLOW.replace('niyam-ref: v0.6.6', 'niyam-ref: v0.6.7')) }, /pins more than one release/],
+      [{ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' } } } }, /GitHub did not say veda-hq\/niyam's default branch → run this again/],
+    ];
+    for (const [extra, why] of cases) {
+      const rules = [checks('Guard', 'niyam / PR identity')];
+      const made = setUp('veda-hq/niyam', rules, extra);
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1, String(why));
+      const text = out.join('\n');
+      assert.match(text, new RegExp(`✗ not requiring niyam-guard / judge: (?:.*)${why.source}`));
+      assert.ok(!wrote(made), String(why));
+      assert.deepEqual(made.now(), rules);
+      cleaned(made.sys, out);
+    }
+    // Required already beside Guard: Guard stays, and the ✗ says so.
+    const both = setUp('veda-hq/niyam', [checks('Guard', 'niyam / PR identity', JUDGE)], { [judged('veda-hq/niyam')]: ran() });
+    const said = capture();
+    assert.equal(await ownerStep(both.sys, said.io, step('veda-hq/niyam')), 1);
+    assert.match(said.out.join('\n'), /✗ keeping Guard, not niyam-guard \/ judge in its place: no check named niyam-guard \/ judge ran/);
+    assert.ok(!wrote(both));
+  });
+
+  it('names the policy a public repository needs for pull_request_target', async () => {
+    const made = setUp('veda-hq/niyam', [checks('niyam / PR identity')], {
+      'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 'main', private: false, visibility: 'public' } },
+      [judged('veda-hq/niyam')]: ran(),
+    });
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1);
+    assert.match(
+      out.join('\n'),
+      /so it first reports on the pull request after the one that adds it, and from 2026-12-02 GitHub runs it in a public repository only once a policy allows pull_request_target → Once for veda-hq\/niyam: allow pull_request_target for \.github\/workflows\/niyam-guard\.yml in a new policy under Settings → Actions → Policies, at https:\/\/github\.com\/veda-hq\/niyam\/settings\/actions, .* Then merge a pull request it passes on, then run this again/,
+    );
+  });
+
+  it('takes no --check proof for it, which any one app gives, and names a missing caller when asked for', async () => {
+    const lookalike = setUp('veda-hq/niyam', [checks('niyam / PR identity')], { [judged('veda-hq/niyam')]: ran(run('success', LOOKALIKE)) });
+    const first = capture();
+    assert.equal(await ownerStep(lookalike.sys, first.io, step('veda-hq/niyam', JUDGE)), 1);
+    assert.match(first.out.join('\n'), /✗ not requiring niyam-guard \/ judge: niyam-guard \/ judge on veda-hq\/niyam#8 was reported by Lookalike, not GitHub Actions/);
+    assert.doesNotMatch(first.out.join('\n'), /not adding niyam-guard/);
+    assert.ok(!wrote(lookalike));
+
+    const none = setUp('veda-hq/niyam', [checks('niyam / PR identity')], { [callerAt('veda-hq/niyam')]: { status: 404, json: { message: 'Not Found' } }, [judged('veda-hq/niyam')]: ran(run('success', LOOKALIKE)) });
+    const second = capture();
+    assert.equal(await ownerStep(none.sys, second.io, step('veda-hq/niyam', JUDGE)), 1);
+    assert.match(second.out.join('\n'), /✗ not requiring niyam-guard \/ judge: veda-hq\/niyam has no \.github\/workflows\/niyam-guard\.yml on its default branch, so nothing runs it → niyam onboard there, merge its pull request, then run this again/);
+    assert.ok(!wrote(none));
+
+    const asked = setUp('veda-hq/niyam', [checks('niyam / PR identity')]);
+    const third = capture();
+    assert.equal(await ownerStep(asked.sys, third.io, step('veda-hq/niyam', JUDGE)), 0, third.out.join('\n'));
+    assert.deepEqual(asked.now(), [checks('niyam / PR identity', JUDGE)]);
+  });
+
+  it('stops at a caller GitHub will not give, changing nothing', async () => {
+    const made = setUp('veda-hq/niyam', [checks('Guard', 'niyam / PR identity')], { [callerAt('veda-hq/niyam')]: { status: 502, json: { message: 'Bad Gateway' } } });
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1);
+    assert.match(out.join('\n'), /✗ reading veda-hq\/niyam's \.github\/workflows\/niyam-guard\.yml: gh: Bad Gateway/);
+    assert.ok(!wrote(made));
+    cleaned(made.sys, out);
+  });
+
+  it('swaps a Guard added while the owner read the plan, keeping the edit', async () => {
+    const made = setUp('veda-hq/niyam', [checks('Guard', 'niyam / PR identity')]);
+    made.sys.choose = () => {
+      made.set([{ type: 'deletion' }, checks('Guard', 'niyam / PR identity', 'Secret scans')]);
+      return Promise.resolve(true);
+    };
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 0, out.join('\n'));
+    assert.deepEqual(made.now(), [{ type: 'deletion' }, checks(JUDGE, 'niyam / PR identity', 'Secret scans')]);
+  });
+
+  it('refuses a result that still requires Guard, or lacks its check', async () => {
+    const cases: [(body: { rules: unknown[] }) => unknown[], RegExp][] = [
+      [() => [checks('Guard', JUDGE, 'niyam / PR identity')], /GitHub shows the ruleset still requiring Guard afterwards/],
+      [() => [checks('niyam / PR identity')], /GitHub shows the ruleset without niyam-guard \/ judge afterwards/],
+    ];
+    for (const [put, why] of cases) {
+      const made = setUp('veda-hq/niyam', [checks('Guard', 'niyam / PR identity')], {}, put);
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1);
+      assert.match(out.join('\n'), why);
+    }
   });
 });
