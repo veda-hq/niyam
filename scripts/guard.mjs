@@ -1,19 +1,22 @@
 #!/usr/bin/env node
-// The Guard check (slice #304 of Work item #303). GitHub runs it on
-// pull_request_target, so from main's copy of this file, never the pull
-// request's. It reads the pull request's changed files from GitHub's API as
-// data and passes a change to a guard file (the checks, the hooks and their
-// scripts) only when the pull request's slice names that file in a
-// **Guards:** section the slice already had when the owner approved it.
+// The Guard check (slice #304 of Work item #303; for any repository, slice
+// #469 of Work item #468). GitHub runs it on pull_request_target: niyam's
+// guard.yml from main's copy, and every other repository's niyam-guard.yml
+// caller from its default branch, through shared-guard.yml at the niyam
+// release the caller pins, never the pull request's copy. It reads the pull
+// request's changed files from GitHub's API as data and passes a change to a
+// guard file (the checks, the hooks and their settings) only when the pull
+// request's slice names that file in a **Guards:** section the slice already
+// had when the owner approved it.
 //
 //   guard.mjs        GH_TOKEN, REPO (owner/name) and PR (its number) in the environment
 //
 // Self-contained on purpose: it imports nothing from src/, which is no guard
 // file, so a pull request cannot change what the guard does without naming a
-// guard file. The owner comes from main's .github/niyam.json, read from the
-// working directory. Exit 0: it passes; 1: refused, each refusal naming the
-// file and how to pass; 2: a usage error.
-import { readFileSync } from 'node:fs';
+// guard file. The owner, and the repository's own guard paths, come from the
+// default branch's .github/niyam.json, read through the API. Exit 0: it
+// passes; 1: refused, each refusal naming the file and how to pass; 2: a
+// usage error.
 import { pathToFileURL } from 'node:url';
 
 import { parse as parseYaml } from 'yaml';
@@ -21,14 +24,30 @@ import { parse as parseYaml } from 'yaml';
 /** The branch whose copy runs the guard and whose ruleset names the required checks. */
 const MAIN = 'main';
 
-/** The check this workflow reports: no pull request may add a job by its name, even before the ruleset requires it. */
+/** The repository whose releases ship the guard, and whose main a release tag must be on. */
+const NIYAM = 'veda-hq/niyam';
+
+/** niyam's own Guard check, from guard.yml: no pull request may add a job by its name, even before the ruleset requires it. */
 const OWN_CHECK = 'Guard';
+
+/** The shared Guard's check: the caller's job `niyam-guard` over shared-guard.yml's job `judge`. */
+const SHARED_CHECK = 'niyam-guard / judge';
+
+/** The one job that may report the shared check: the caller onboard writes calls this workflow, at a release. */
+const SHARED_WORKFLOW = `${NIYAM}/.github/workflows/shared-guard.yml@`;
+
+/** The settings file, read at the default branch's tip. */
+const SETTINGS = '.github/niyam.json';
 
 /** GitHub lists at most 3,000 of a pull request's files, 100 a page. */
 const FILES_MOST = 3000;
 
-/** The files that hold niyam's checks, hooks and their scripts: a change to one needs the slice to name it. */
-const GUARD_FILES = [/^\.github\//, /^\.githooks\//, /^\.dvara\.json$/, /^\.dvara\/records-baseline\.json$/, /^\.gitleaks\.toml$/, /^\.trufflehog-exclude$/, /^scripts\/[^/]+\.mjs$/];
+/**
+ * The floor of guard files every repository has: the checks, the hooks and
+ * their settings. A repository adds its own paths as `"guard"` in its
+ * settings; package.json counts only for its `scripts`, which judge compares.
+ */
+const GUARD_FILES = [/^\.github\//, /^\.githooks\//, /^\.husky\//, /^lefthook\.yml$/, /^\.dvara\.json$/, /^\.dvara\/records-baseline\.json$/, /^\.gitleaks\.toml$/, /^\.trufflehog-exclude$/];
 
 /** A test file: `x.test.ts`, `x.spec.mjs` and the like. */
 const TEST_FILE = /(?:^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
@@ -53,9 +72,14 @@ const USES = /^(\s*(?:-\s*)?uses:\s*)([^@\s]+)@([0-9a-f]{40})(?:(\s+#\s*)(\S.*))
 
 const DEPENDABOT = 'dependabot[bot]';
 
-/** Whether `path` is a guard file; package.json counts only for its `scripts`, which the caller compares. */
-export function isGuardFile(path) {
-  return path === 'package.json' || GUARD_FILES.some((pattern) => pattern.test(path));
+/**
+ * Whether `path` is a guard file: in the floor, or named by the repository's
+ * own `paths`, in the **Guards:** syntax. package.json counts only for its
+ * `scripts`, which the caller compares.
+ * @param {string} path @param {string[]} [paths]
+ */
+export function isGuardFile(path, paths = []) {
+  return path === 'package.json' || GUARD_FILES.some((pattern) => pattern.test(path)) || named(paths, path);
 }
 
 /** Whether `path` is a test file. */
@@ -214,6 +238,15 @@ export function versionMoves(runs, to) {
  * @param {string} text @returns {string[] | undefined}
  */
 export function jobNames(text) {
+  return workflowOf(text)?.jobs.map((job) => job.name);
+}
+
+/**
+ * Workflow `text`'s events and jobs: each job's check name (its `name`, else
+ * its id) and the job itself. Undefined when it does not parse as a workflow.
+ * @param {string} text @returns {{ events: string[], jobs: { name: string, job: unknown }[] } | undefined}
+ */
+export function workflowOf(text) {
   let doc;
   try {
     doc = parseYaml(text);
@@ -223,7 +256,23 @@ export function jobNames(text) {
   if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return undefined;
   const jobs = doc.jobs ?? {};
   if (typeof jobs !== 'object' || Array.isArray(jobs) || jobs === null) return undefined;
-  return Object.entries(jobs).map(([id, job]) => (job && typeof job === 'object' && job.name !== undefined ? String(job.name) : id));
+  const on = doc.on;
+  const events = typeof on === 'string' ? [on] : Array.isArray(on) ? on.map(String) : on && typeof on === 'object' ? Object.keys(on) : [];
+  return { events, jobs: Object.entries(jobs).map(([id, job]) => ({ name: job && typeof job === 'object' && job.name !== undefined ? String(job.name) : id, job })) };
+}
+
+/**
+ * Whether `job`, in a workflow run by `events`, is the shared Guard's caller
+ * as onboard writes it: run by pull_request_target alone, so GitHub runs the
+ * default branch's copy, and doing nothing but call shared-guard.yml at a
+ * ref. Only such a job may report the shared check.
+ * @param {string[]} events @param {unknown} job
+ */
+export function isCaller(events, job) {
+  if (events.length !== 1 || events[0] !== 'pull_request_target') return false;
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return false;
+  const { uses, steps } = /** @type {{ uses?: unknown, steps?: unknown }} */ (job);
+  return typeof uses === 'string' && uses.startsWith(SHARED_WORKFLOW) && uses.length > SHARED_WORKFLOW.length && !/\s/.test(uses) && steps === undefined;
 }
 
 /** Whether a job named `name` could report the required check `check`: itself, a matrix leg of it, or a reusable workflow's job under it. */
@@ -241,8 +290,24 @@ const sameLogin = (logins, login) => typeof login === 'string' && logins.some((o
 export function ownersIn(text) {
   const owner = JSON.parse(text).owner;
   const list = Array.isArray(owner) ? owner : [owner];
-  if (list.length === 0 || !list.every((one) => typeof one === 'string' && one !== '')) throw new Error('.github/niyam.json names no owner');
+  if (list.length === 0 || !list.every((one) => typeof one === 'string' && one !== '')) throw new Error(`${SETTINGS} names no owner`);
   return list;
+}
+
+/**
+ * The repository's own guard paths, `"guard"` in main's `.github/niyam.json`:
+ * paths, folders ending in `/` and patterns, as **Guards:** names them. They
+ * only add to the floor. None when the key is not there; anything but a list
+ * of such names refuses.
+ * @param {string} text @returns {string[]}
+ */
+export function guardPathsIn(text) {
+  const paths = JSON.parse(text).guard;
+  if (paths === undefined) return [];
+  if (!Array.isArray(paths) || !paths.every((one) => typeof one === 'string' && guardsNamed(one).length === 1 && guardsNamed(one)[0] === one)) {
+    throw new Error(`${SETTINGS}'s "guard" must be a list of paths, folders ending in / or patterns, such as ["scripts/*.mjs"]`);
+  }
+  return paths;
 }
 
 /**
@@ -384,11 +449,12 @@ async function approvedAt(gh, repo, slice, owners) {
 
 /**
  * Judges pull request `pr` of `repo`: the refusals, each naming its file and
- * how to pass, empty when it passes.
- * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners
+ * how to pass, empty when it passes. `ownPaths` are the repository's own guard
+ * paths, from its settings, beyond the floor.
+ * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} [ownPaths]
  * @returns {Promise<{ file?: string, message: string }[]>}
  */
-export async function judge(gh, repo, pr, owners) {
+export async function judge(gh, repo, pr, owners, ownPaths = []) {
   const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
   const files = await every(gh, `/repos/${repo}/pulls/${pr}/files`, FILES_MOST);
   if (files.length !== pull.changed_files) {
@@ -402,7 +468,8 @@ export async function judge(gh, repo, pr, owners) {
   else if (onboard && mechanical((runs) => versionMoves(runs, onboard) >= 0)) {
     // The version must move somewhere, so a PR that only swaps sha256s is no onboard change.
     const moved = files.reduce((total, file) => total + versionMoves(runsOf.get(file), onboard), 0);
-    exempt = moved > 0 && (await tagOnMain(gh, repo, `v${onboard}`));
+    // The release is niyam's, so its tag is read there, whichever repository onboarded.
+    exempt = moved > 0 && (await tagOnMain(gh, NIYAM, `v${onboard}`));
   }
 
   /** Each file that needs naming, with why. */
@@ -417,14 +484,14 @@ export async function judge(gh, repo, pr, owners) {
     const rules = await read(gh, `/repos/${repo}/rules/branches/${MAIN}`);
     if (!Array.isArray(rules)) throw new Unread(`GitHub did not answer ${MAIN}'s rules as a list`);
     const contexts = rules.filter((rule) => rule.type === 'required_status_checks').flatMap((rule) => rule.parameters?.required_status_checks ?? []).map((check) => check.context);
-    return (required = [...new Set([OWN_CHECK, ...contexts])]);
+    return (required = [...new Set([OWN_CHECK, SHARED_CHECK, ...contexts])]);
   };
 
   for (const file of files) {
     const paths = [...new Set([file.previous_filename, file.filename].filter(Boolean))];
     // A guard file: package.json for its scripts alone.
     for (const path of paths) {
-      if (!isGuardFile(path) || exempt) continue;
+      if (!isGuardFile(path, ownPaths) || exempt) continue;
       if (path === 'package.json') {
         const after = file.status === 'removed' || path !== file.filename ? undefined : await textAt(gh, repo, path, pull.head.sha);
         if (scriptsOf(await textAt(gh, repo, path, await base())) === scriptsOf(after)) continue;
@@ -447,13 +514,23 @@ export async function judge(gh, repo, pr, owners) {
     }
     // A workflow job named after a required check.
     if (isWorkflow(file.filename) && file.status !== 'removed') {
-      const now = jobNames((await textAt(gh, repo, file.filename, pull.head.sha)) ?? '');
+      const workflow = workflowOf((await textAt(gh, repo, file.filename, pull.head.sha)) ?? '');
       const before = isWorkflow(was) && file.status !== 'added' ? jobNames((await textAt(gh, repo, was, await base())) ?? '') ?? [] : [];
-      if (!now) {
+      if (!workflow) {
         refusals.push({ file: file.filename, message: `${file.filename} does not parse as a workflow, so the guard cannot tell which checks its jobs report. Make it valid YAML with a jobs: map.` });
         continue;
       }
-      const checks = await requiredChecks();
+      // Only the caller as onboard writes it may report the shared check: any other job could report it from the
+      // pull request's own copy, and the ruleset cannot tell that run from the guard's, both GitHub Actions'.
+      for (const { name, job } of workflow.jobs) {
+        if (!reports(name, SHARED_CHECK) || isCaller(workflow.events, job)) continue;
+        refusals.push({
+          file: file.filename,
+          message: `${file.filename} has the job "${name}", which could report "${SHARED_CHECK}", the shared Guard's check, but is not its caller as niyam onboard writes it (run by pull_request_target alone, calling ${SHARED_WORKFLOW}<release> and nothing else). Rename the job, or run niyam onboard to write the caller.`,
+        });
+      }
+      const now = workflow.jobs.map((job) => job.name);
+      const checks = (await requiredChecks()).filter((check) => check !== SHARED_CHECK);
       // A job is added when its name is there more times than before: a second job of a name counts.
       const left = [...before];
       const added = now.filter((one) => {
@@ -505,17 +582,24 @@ export async function judge(gh, repo, pr, owners) {
 }
 
 /** Runs the guard from the environment GitHub Actions gives it. */
-export async function main(env = process.env, out = console, gh = undefined, root = '.') {
+export async function main(env = process.env, out = console, gh = undefined) {
   const repo = env.REPO;
   const pr = Number(env.PR);
   if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(pr) || pr <= 0 || (!gh && !env.GH_TOKEN)) {
     out.error('usage: GH_TOKEN=… REPO=owner/name PR=<number> guard.mjs');
     return 2;
   }
+  // Run by any other event, GitHub would have run the calling workflow from the pull request's own copy.
+  if (env.GITHUB_EVENT_NAME !== 'pull_request_target') {
+    out.error(`::error::Guard runs only on pull_request_target, so that GitHub runs its caller from the default branch, never the pull request; this run's event is ${env.GITHUB_EVENT_NAME || 'not given'}. Call it from a workflow run by pull_request_target alone, as niyam onboard writes it.`);
+    return 1;
+  }
   let refusals;
   try {
-    const owners = ownersIn(readFileSync(`${root}/.github/niyam.json`, 'utf8'));
-    refusals = await judge(gh ?? client(env.GH_TOKEN, env.GITHUB_API_URL || undefined), repo, pr, owners);
+    const github = gh ?? client(env.GH_TOKEN, env.GITHUB_API_URL || undefined);
+    const settings = await textAt(github, repo, SETTINGS, MAIN);
+    if (settings === undefined) throw new Unread(`${MAIN} has no ${SETTINGS}; run niyam onboard`);
+    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings));
   } catch (error) {
     // Anything it could not read refuses: the guard fails closed.
     out.error(`::error::Guard could not judge this pull request: ${error.message}. Run Guard again once GitHub answers.`);

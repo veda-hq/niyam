@@ -1,6 +1,10 @@
 # actionlint does not know GitHub's job.workflow_* context properties yet
-# (rhysd/actionlint#707); checks.yml reads them to run the CLI from its own commit.
+# (rhysd/actionlint#707); checks.yml reads them to run the CLI from its own
+# commit, and shared-guard.yml to run the guard from its own.
 paths:
   .github/workflows/checks.yml:
+    ignore:
+      - 'property "workflow_(sha|repository)" is not defined in object type'
+  .github/workflows/shared-guard.yml:
     ignore:
       - 'property "workflow_(sha|repository)" is not defined in object type'

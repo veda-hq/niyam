@@ -4,6 +4,7 @@
 # weakens them, so a pull request that changes one of these waits for Alok.
 # Nothing else gets an owner.
 /.github/workflows/guard.yml @AlokBansal8
+/.github/workflows/shared-guard.yml @AlokBansal8
 /scripts/guard.mjs @AlokBansal8
 /scripts/guard.test.mjs @AlokBansal8
 /.github/CODEOWNERS @AlokBansal8
