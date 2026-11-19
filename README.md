@@ -290,9 +290,9 @@ niyam (`~/.config/process-rules/`, or a keychain entry under the service
 `process-rules`: `▲`, which `niyam machine` removes), and
 what of the owner's an agent session could reach, any `owner-step` folder
 left behind (`▲`, saying whether it still holds a token; see Owner steps), and, in a repository with
-the board on, the organisation's issue types (see Issue types), and, in one with
-`work-rules` on, the shared Guard's caller (`✗` when it is missing or not as
-`onboard` writes it at `niyam.yml`'s release; see The shared Guard). It shows them grouped as
+the board on, the organisation's issue types (see Issue types), and, in every
+onboarded repository, the shared Guard's caller (`✗` when it is missing or not
+as `onboard` writes it at `niyam.yml`'s release; see The shared Guard). It shows them grouped as
 This Mac, GitHub and This repo, one line each: `✓` fine, `▲` worth fixing,
 `✗` broken. Each problem line ends with its fix:
 
@@ -453,7 +453,7 @@ on any platform without a token store, `niyam env` prints the lock alone.
    weekly run, the only one that writes to issues. Each job carries a
    `name:` (`niyam`, `niyam-weekly`, …), so its checks read
    `niyam / Work rules`. With identity alone `onboard` writes no workflow.
-   With `work-rules` on it also writes `.github/workflows/niyam-guard.yml`,
+   Whatever the features, it also writes `.github/workflows/niyam-guard.yml`,
    the shared Guard's caller (see The shared Guard below): run by
    `pull_request_target` on pull requests to the default branch, read-only,
    its one job `niyam-guard` only calling
@@ -1837,6 +1837,15 @@ is a guard change too. A test file needs naming too when a pull request
 deletes it, leaves it fewer `test(`/`it(` calls than the merge base, or adds
 `.skip`, `.only` or `todo`.
 
+A repository whose `.github/niyam.json` turns `work-rules` off has no Work
+items, so no slice to name a change: the shared Guard judges no slice there,
+and its log lists each change it would have asked one to name. It still
+refuses what no slice passes: a job added under the name of a check the
+ruleset requires, a job that could report `niyam-guard / judge` but is not
+the caller `onboard` writes, and a pull request with more files than GitHub
+lists. With `work-rules` on, or no `features` listed, it judges every change;
+a `features` it cannot read refuses.
+
 Two changes pass unnamed: an onboard pull request
 (`chore(niyam): onboard at vX.Y.Z`) whose every changed line only moves the
 niyam version, and a sha256 with it, to that release, tagged on
@@ -1861,7 +1870,7 @@ from a workflow run by `pull_request_target` alone, whose one job,
 a full commit sha, never a branch), read-only, with no inputs or secrets; its
 check is `niyam-guard / judge`. The default branch is the repository's own,
 whatever its name. `niyam onboard` writes that caller,
-`.github/workflows/niyam-guard.yml`, in a repository with `work-rules` on,
+`.github/workflows/niyam-guard.yml`, in every repository it onboards,
 on pull requests to its default branch and at the release `niyam.yml` pins,
 and moves its pin with the rest on every run; `niyam doctor` marks it under
 "This repo", ✗ when it is missing or differs from what `onboard` writes in

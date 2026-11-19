@@ -546,6 +546,8 @@ describe('onboard', () => {
       sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity'] }));
       sys.files.set(HOOKS, JSON.stringify(CLAUDE));
       sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
+      // The shared Guard's caller, which onboard writes whatever the features (#485).
+      sys.files.set(CALLER, guardCaller('main', packageVersion()));
     };
     const older = fresh();
     settled(older);
@@ -1985,11 +1987,11 @@ describe('staged adoption', () => {
     const boardRequest = (r: { url: string; body?: unknown }): boolean =>
       (r.url.endsWith('/graphql') && !JSON.stringify(r.body).includes('enablePullRequestAutoMerge')) || r.url.includes('/labels') || r.url.includes('/issue-types');
     assert.ok(!sys.requests.some(boardRequest), 'no board');
-    assert.deepEqual(planned(out, 'Pull request'), ['niyam.json: new, 1 feature on', 'settings.json: new', `cloud-setup.sh: new, installs v${packageVersion()}`, 'auto-merge: when checks pass']);
+    assert.deepEqual(planned(out, 'Pull request'), ['niyam.json: new, 1 feature on', 'settings.json: new', `guard caller: new, the shared Guard at v${packageVersion()}`, `cloud-setup.sh: new, installs v${packageVersion()}`, 'auto-merge: when checks pass']);
     assert.deepEqual(planned(out, 'GitHub'), [], 'no board, and the agent can push');
     assert.deepEqual(planned(out, 'This Mac'), ['pre-push hook: new']);
     assert.ok(out.includes(`└  ${PULL_URL}  merges itself when checks pass`));
-    assert.deepEqual([...sys.committed.keys()], ['.github/niyam.json', '.claude/settings.json', CLOUD_SETUP_PATH]);
+    assert.deepEqual([...sys.committed.keys()], ['.github/niyam.json', '.claude/settings.json', CLOUD_SETUP_PATH, GUARD_CALLER_PATH]);
     assert.deepEqual(byHand(out), ['Once per claude.ai account: sign in at https://claude.ai/code and connect GitHub as ExampleBot (or change it at https://claude.ai/customize/connectors); skip it if done.']);
     assert.deepEqual(sys.chosen, ['Go ahead?']);
   });
@@ -2012,7 +2014,7 @@ describe('staged adoption', () => {
       project: 'Example work',
       note: 'kept',
     });
-    assert.deepEqual(planned(out, 'Pull request'), ['niyam.json: turn board on', 'workflow: new', `cloud-setup.sh: new, installs v${packageVersion()}`, 'auto-merge: when checks pass']);
+    assert.deepEqual(planned(out, 'Pull request'), ['niyam.json: turn board on', 'workflow: new', `guard caller: new, the shared Guard at v${packageVersion()}`, `cloud-setup.sh: new, installs v${packageVersion()}`, 'auto-merge: when checks pass']);
     assert.ok(planned(out, 'GitHub — signed in as example-owner').includes('board: set up or check'));
     // The board's Needs you labels and the type of each new issue come from the workflow's asks job; its In Progress move, from the board app's secrets.
     assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false, undefined, undefined, true));
@@ -2028,7 +2030,7 @@ describe('staged adoption', () => {
     const pair = await actionsKey(sys);
     const { code, out, err } = await run(sys);
     assert.deepEqual([code, err], [0, []]);
-    assert.deepEqual(planned(out, 'Pull request'), ['niyam.json: design → figma, figma key out', 'workflow: new', `cloud-setup.sh: new, installs v${packageVersion()}`, 'auto-merge: when checks pass']);
+    assert.deepEqual(planned(out, 'Pull request'), ['niyam.json: design → figma, figma key out', 'workflow: new', `guard caller: new, the shared Guard at v${packageVersion()}`, `cloud-setup.sh: new, installs v${packageVersion()}`, 'auto-merge: when checks pass']);
     assert.deepEqual(planned(out, 'GitHub — one sign-in as example-owner'), ['FIGMA_LIBRARY secret']);
     assert.match(
       opened(sys)?.body ?? '',
@@ -2150,6 +2152,7 @@ describe('staged adoption', () => {
     sys.files.set(WORKFLOW, workflow('main', packageVersion(), false));
     sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
     sys.files.set(CLOUD, CLOUD_FILE);
+    sys.files.set(CALLER, CALLER_FILE);
     const before = repo(sys).get(SETTINGS);
     const { out } = await run(sys, ['--add', 'pr-identity']);
     assert.deepEqual(planned(out, 'Pull request'), []);
@@ -2514,7 +2517,7 @@ describe("onboard's pull request", () => {
     await actionsKey(sys);
     const { code } = await run(sys, ['--add', 'board']);
     assert.equal(code, 0);
-    assert.deepEqual([...sys.committed.keys()], ['.github/niyam.json', WORKFLOW_PATH]);
+    assert.deepEqual([...sys.committed.keys()], ['.github/niyam.json', WORKFLOW_PATH, GUARD_CALLER_PATH]);
     const { body } = sys.requests.find((r) => r.method === 'POST' && r.url.endsWith('/pulls'))?.body as { body: string };
     assert.match(body, /^- `\.github\/niyam\.json`: take out "figma" .*; turn board on$/m);
     assert.equal(signIns(sys), 1, 'one sign-in, for the secret and the board');
@@ -3083,17 +3086,19 @@ describe("the shared Guard's caller (#470)", () => {
     }
   });
 
-  it('writes no caller, and leaves a niyam-guard.yml of its own alone, with work rules off', async () => {
-    const sys = fresh();
-    const { code, out } = await run(sys, ['example-owner', AGENT, '--features', 'identity,pr-identity']);
-    assert.equal(code, 0);
-    assert.ok(!planned(out, 'Pull request').some((item) => item.startsWith('guard caller')), out.join('\n'));
-    assert.ok(repo(sys).has(WORKFLOW), 'the workflow is written');
-    assert.equal(repo(sys).has(CALLER), false);
-    const own = fresh();
-    own.files.set(CALLER, 'on: push\n');
-    assert.equal((await run(own, ['example-owner', AGENT, '--features', 'identity,pr-identity'])).code, 0);
-    assert.equal(repo(own).get(CALLER), 'on: push\n');
+  it('writes the caller whatever the features, work rules off or identity alone, and refuses one it did not write (#485)', async () => {
+    for (const features of ['identity,pr-identity', 'identity']) {
+      const sys = fresh();
+      const { code, out } = await run(sys, ['example-owner', AGENT, '--features', features]);
+      assert.equal(code, 0, out.join('\n'));
+      assert.ok(planned(out, 'Pull request').includes(`guard caller: new, the shared Guard at v${packageVersion()}`), out.join('\n'));
+      assert.equal(sys.committed.get(GUARD_CALLER_PATH), CALLER_FILE, features);
+      const own = fresh();
+      own.files.set(CALLER, 'on: push\n');
+      const refused = await run(own, ['example-owner', AGENT, '--features', features]);
+      assert.equal(refused.code, 1, features);
+      assert.equal(repo(own).get(CALLER), 'on: push\n');
+    }
   });
 
   it('asks a public repository, and only a public one, to allow pull_request_target for the caller', async () => {
@@ -3116,10 +3121,10 @@ describe("the shared Guard's caller (#470)", () => {
     const { out } = await run(closed);
     assert.ok(!out.join('\n').includes('pull_request_target'), out.join('\n'));
     assert.ok(!opened(closed)?.body.includes('pull_request_target'), opened(closed)?.body);
-    // With work rules off there is no caller to allow.
+    // With work rules off the caller is still written, so the step is still asked for (#485).
     const off = fresh();
     off.route('GET', REPO, { status: 200, json: { ...repoJson(), private: false } });
-    assert.ok(!(await run(off, ['example-owner', AGENT, '--features', 'identity,pr-identity'])).out.join('\n').includes('pull_request_target'));
+    assert.ok(byHand((await run(off, ['example-owner', AGENT, '--features', 'identity,pr-identity'])).out).includes(step));
   });
 
   it('works out the caller once the agent can push, when the default branch is not known before', async () => {

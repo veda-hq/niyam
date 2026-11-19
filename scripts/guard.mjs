@@ -299,6 +299,20 @@ export function ownersIn(text) {
 }
 
 /**
+ * Whether main's `.github/niyam.json` turns work rules on, so the repository
+ * has Work items whose slices name its guard files: yes when it lists no
+ * `features` (every feature on) or lists `work-rules`; anything but a list of
+ * names refuses. Without work rules, Guard judges no slice (#485).
+ * @param {string} text @returns {boolean}
+ */
+export function workRulesIn(text) {
+  const features = JSON.parse(text).features;
+  if (features === undefined) return true;
+  if (!Array.isArray(features) || !features.every((one) => typeof one === 'string')) throw new Error(`${SETTINGS}'s "features" must be a list of feature names`);
+  return features.some((one) => one.trim() === 'work-rules');
+}
+
+/**
  * The repository's own guard paths, `"guard"` in main's `.github/niyam.json`:
  * paths, folders ending in `/` and patterns, as **Guards:** names them. They
  * only add to the floor. None when the key is not there; anything but a list
@@ -455,11 +469,14 @@ async function approvedAt(gh, repo, slice, owners) {
  * Judges pull request `pr` of `repo`: the refusals, each naming its file and
  * how to pass, empty when it passes. `ownPaths` are the repository's own guard
  * paths, from its settings, beyond the floor; `branch` is its default branch,
- * whose ruleset names the required checks.
+ * whose ruleset names the required checks. `unjudged`, given for a repository
+ * without work rules, takes each change a slice would have to name, which is
+ * then no refusal: there is no Work item to name it (#485).
  * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} [ownPaths] @param {string} [branch]
+ * @param {{ path: string, why: string }[]} [unjudged]
  * @returns {Promise<{ file?: string, message: string }[]>}
  */
-export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN) {
+export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, unjudged = undefined) {
   const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
   const files = await every(gh, `/repos/${repo}/pulls/${pr}/files`, FILES_MOST);
   if (files.length !== pull.changed_files) {
@@ -557,6 +574,10 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN) 
     }
   }
   if (needs.length === 0) return refusals;
+  if (unjudged) {
+    unjudged.push(...needs);
+    return refusals;
+  }
 
   const slice = sliceOf(pull.body ?? '');
   const how = (path) => `name \`${path}\` in the slice's **Guards:** section, and have ${owners.join(' or ')} approve the slice again; then edit or push this pull request so Guard runs again`;
@@ -600,6 +621,8 @@ export async function main(env = process.env, out = console, gh = undefined) {
     return 1;
   }
   let refusals;
+  /** Without work rules, the changes no slice was asked to name. */
+  let unjudged;
   try {
     const github = gh ?? client(env.GH_TOKEN, env.GITHUB_API_URL || undefined);
     // The repository's own default branch, which a pull request cannot change.
@@ -607,7 +630,8 @@ export async function main(env = process.env, out = console, gh = undefined) {
     if (typeof branch !== 'string' || branch === '') throw new Unread(`GitHub named no default branch for ${repo}`);
     const settings = await textAt(github, repo, SETTINGS, encodeURIComponent(branch));
     if (settings === undefined) throw new Unread(`${branch} has no ${SETTINGS}; run niyam onboard`);
-    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings), branch);
+    unjudged = workRulesIn(settings) ? undefined : [];
+    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings), branch, unjudged);
   } catch (error) {
     // Anything it could not read refuses: the guard fails closed.
     out.error(`::error::Guard could not judge this pull request: ${error.message}. Run Guard again once GitHub answers.`);
@@ -615,6 +639,11 @@ export async function main(env = process.env, out = console, gh = undefined) {
   }
   for (const { file, message } of refusals) out.error(`::error${file ? ` file=${file}` : ''}::${message}`);
   if (refusals.length > 0) return 1;
+  if (unjudged) {
+    for (const { path, why } of unjudged) out.log(`Guard: this pull request ${why}, ${path}; ${SETTINGS} turns work rules off, so no slice is asked to name it.`);
+    out.log('Guard: work rules are off here, so only the refusals no slice can pass were judged, and none applies.');
+    return 0;
+  }
   out.log('Guard: no change to a guard file needs naming, or the approved slice names each.');
   return 0;
 }

@@ -1,6 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
 
-import type { Feature } from './features.ts';
 import { GITHUB_WEB } from './host.ts';
 import { CLI, PRODUCT } from './names.ts';
 import { GUARD_CALLER_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
@@ -17,17 +16,6 @@ export const SHARED_GUARD = `${PRODUCT}/.github/workflows/shared-guard.yml`;
 export const CALLER_JOB = `${CLI}-guard`;
 /** The check the caller reports, the same in every client and in niyam. */
 export const CALLER_CHECK = `${CALLER_JOB} / judge`;
-
-/**
- * Whether onboard writes the caller, and doctor checks it, for a repository
- * whose settings turn on what `on` says: with work rules alone, since the
- * Guard refuses a change to a guard file, this one included, that no
- * approved Work item's slice names, and only a repository with work rules
- * has those. The one place that decides it (docs/decisions.md, 2026-11-19).
- */
-export function callerWanted(on: (feature: Feature) => boolean): boolean {
-  return on('work-rules');
-}
 
 /** How the caller's header starts: a file that starts so is onboard's, which onboard writes again whatever it holds. */
 const CALLER_MARK = `# Written by ${CLI} onboard: the shared Guard's caller.`;

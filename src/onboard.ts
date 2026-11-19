@@ -45,7 +45,7 @@ import {
   remoteFile,
 } from './onboard-pull.ts';
 import { SIGNING_KEY_VAR, cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
-import { GUARD_CALLER_PATH, callerAt, callerIsOnboards, callerPins, callerDetail, callerUpdate, callerWanted, callerWhat, policySteps } from './guard-caller.ts';
+import { GUARD_CALLER_PATH, callerAt, callerIsOnboards, callerPins, callerDetail, callerUpdate, callerWhat, policySteps } from './guard-caller.ts';
 import { CLOUD_KEY_TITLE, cloudKeyRefusal, listedKeys, makeCloudKey, pasteLines } from './cloud-key.ts';
 import { newKey, publicLine } from './sshsig.ts';
 import { detail } from './doc-numbers.ts';
@@ -1568,10 +1568,10 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   }
   const on = (feature: Feature): boolean => features.includes(feature);
   const workflowNeeded = on('pr-identity') || on('board') || on('work-rules') || on('figma') || on('decisions') || on('review');
-  // The shared Guard's caller (#470). onboard's own, edited by hand or not, is written again; a file of that name
-  // onboard did not write is the repository's own: refused before any plan, so nothing changes.
-  const callerNeeded = callerWanted(on);
-  const callerBefore = callerNeeded ? fileAt(GUARD_CALLER_PATH) : undefined;
+  // The shared Guard's caller (#470), in every repository whatever its features (#485). onboard's own, edited by
+  // hand or not, is written again; a file of that name onboard did not write is the repository's own: refused
+  // before any plan, so nothing changes.
+  const callerBefore = fileAt(GUARD_CALLER_PATH);
   const callerHad = callerBefore === undefined ? undefined : await callerAt(callerBefore);
   if (callerBefore !== undefined && !(await callerIsOnboards(callerBefore))) {
     io.err(`onboard: ${GUARD_CALLER_PATH} is not the shared Guard's caller as onboard writes it, and onboard does not overwrite a workflow of the repository's own; nothing changed. Rename or delete it, then run onboard again.`);
@@ -1710,11 +1710,9 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     const update = callerUpdate(callerBefore, callerHad, branch, version);
     if (update.kind !== 'same') change(GUARD_CALLER_PATH, update.text, callerWhat(update, version, branch));
   };
-  if (callerNeeded) {
-    const update = planned === undefined ? undefined : callerUpdate(callerBefore, callerHad, planned, version);
-    const detail = update === undefined ? (callerBefore === undefined ? `new, the shared Guard at v${version}` : 'write or update') : update.kind === 'same' ? undefined : callerDetail(update, version);
-    if (detail !== undefined) pull.push({ label: 'guard caller', detail });
-  }
+  const callerUpdated = planned === undefined ? undefined : callerUpdate(callerBefore, callerHad, planned, version);
+  const callerPlan = callerUpdated === undefined ? (callerBefore === undefined ? `new, the shared Guard at v${version}` : 'write or update') : callerUpdated.kind === 'same' ? undefined : callerDetail(callerUpdated, version);
+  if (callerPlan !== undefined) pull.push({ label: 'guard caller', detail: callerPlan });
 
   if (on('board')) {
     github.push({ label: 'board', detail: 'set up or check' });
@@ -1881,14 +1879,12 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     async run(out) {
       if (reach.kind !== 'push') return false;
       if (workflowNeeded) workflowFor(reach.branch);
-      if (callerNeeded) {
-        callerFor(reach.branch);
-        // From 2026-12-02 GitHub runs pull_request_target in a public repository only where a policy allows it.
-        if (reach.public) {
-          const policy = policySteps(slug);
-          byHand.push(policy.byHand);
-          later.push(policy.later);
-        }
+      callerFor(reach.branch);
+      // From 2026-12-02 GitHub runs pull_request_target in a public repository only where a policy allows it.
+      if (reach.public) {
+        const policy = policySteps(slug);
+        byHand.push(policy.byHand);
+        later.push(policy.later);
       }
       // From the workflow the pull request leaves, worked out only now that GitHub has said the branch.
       const text = fileAt(WORKFLOW_PATH);

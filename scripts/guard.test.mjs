@@ -621,6 +621,40 @@ describe('main', () => {
     assert.ok(!gh.calls.some((path) => path.includes('ref=main') || path.endsWith('/rules/branches/main')));
   });
 
+  test('judges no slice where the settings turn work rules off, and still refuses what no slice passes (#485)', async () => {
+    const off = settings({ owner: 'Owner', agent: 'AthyaBot', features: ['identity', 'pr-identity'] });
+    let out = output();
+    const gh = github({ files: [modified('.githooks/pre-push'), modified('package.json')], contents: { ...off, 'package.json@m': '{"scripts":{"a":"x"}}', 'package.json@h': '{"scripts":{"a":"y"}}' } });
+    assert.equal(await main(env, out, gh), 0);
+    assert.deepEqual(out.lines, [
+      ['log', 'Guard: this pull request changes a guard file, .githooks/pre-push; .github/niyam.json turns work rules off, so no slice is asked to name it.'],
+      ['log', 'Guard: this pull request changes the scripts of package.json, a guard file, package.json; .github/niyam.json turns work rules off, so no slice is asked to name it.'],
+      ['log', 'Guard: work rules are off here, so only the refusals no slice can pass were judged, and none applies.'],
+    ]);
+    assert.ok(!gh.calls.some((path) => path.includes('/issues/') || path === '/graphql'), 'no slice or approval read');
+
+    // A job added under a required check's name is still refused.
+    out = output();
+    const files = [{ filename: '.github/workflows/new.yml', status: 'added', patch: '@@ -0,0 +1 @@\n+x' }];
+    const rules = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'Lint' }] } }];
+    assert.equal(await main(env, out, github({ files, contents: { ...off, '.github/workflows/new.yml@h': WORKFLOW([['lint', 'Lint']]) }, over: { [`/repos/${REPO}/rules/branches/main`]: rules } })), 1);
+    assert.match(out.lines[0][1], /reports "Lint", a check main's ruleset requires/);
+    assert.equal(out.lines.length, 1, 'the guard-file change is no refusal of its own');
+
+    // Work rules on, listed with spaces, or every feature on with none listed: the slice is judged as before.
+    for (const json of [{ owner: 'Owner', features: ['identity', ' work-rules '] }, { owner: 'Owner' }]) {
+      out = output();
+      assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')], contents: settings(json) })), 1, JSON.stringify(json));
+      assert.match(out.lines[0][1], /\*\*Guards:\*\* section, as it stood when .*, does not name it/);
+    }
+    // A features value Guard cannot read fails closed.
+    for (const features of ['work-rules', [1]]) {
+      out = output();
+      assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')], contents: settings({ owner: 'Owner', features }) })), 1);
+      assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: \.github\/niyam\.json's "features" must be a list of feature names/);
+    }
+  });
+
   test('refuses any event but pull_request_target', async () => {
     for (const event of ['pull_request', 'push', undefined]) {
       const out = output();
