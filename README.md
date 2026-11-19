@@ -290,7 +290,9 @@ niyam (`~/.config/process-rules/`, or a keychain entry under the service
 `process-rules`: `▲`, which `niyam machine` removes), and
 what of the owner's an agent session could reach, any `owner-step` folder
 left behind (`▲`, saying whether it still holds a token; see Owner steps), and, in a repository with
-the board on, the organisation's issue types (see Issue types). It shows them grouped as
+the board on, the organisation's issue types (see Issue types), and, in one with
+`work-rules` on, the shared Guard's caller (`✗` when it is missing or not as
+`onboard` writes it at `niyam.yml`'s release; see The shared Guard). It shows them grouped as
 This Mac, GitHub and This repo, one line each: `✓` fine, `▲` worth fixing,
 `✗` broken. Each problem line ends with its fix:
 
@@ -378,6 +380,7 @@ on any platform without a token store, `niyam env` prints the lock alone.
    │
    ◇  Pull request
    │    workflow        pins → v0.5.20
+   │    guard caller    new, the shared Guard at v0.5.20
    │    cloud-setup.sh  new, installs v0.5.20
    │    auto-merge      when checks pass
    │
@@ -449,7 +452,21 @@ on any platform without a token store, `niyam env` prints the lock alone.
    on pull requests and pushes, read-only, and `niyam-weekly` on the
    weekly run, the only one that writes to issues. Each job carries a
    `name:` (`niyam`, `niyam-weekly`, …), so its checks read
-   `niyam / Work rules`. With identity alone `onboard` writes no workflow. It writes
+   `niyam / Work rules`. With identity alone `onboard` writes no workflow.
+   With `work-rules` on it also writes `.github/workflows/niyam-guard.yml`,
+   the shared Guard's caller (see The shared Guard below): run by
+   `pull_request_target` on pull requests to the default branch, read-only,
+   its one job `niyam-guard` only calling
+   `veda-hq/niyam/.github/workflows/shared-guard.yml` at the release
+   `niyam.yml` pins, so its check is `niyam-guard / judge`. A run again moves
+   its pin with the rest, and its branch when the default branch changes.
+   `onboard` rewrites a caller it wrote, even one edited by hand, so long as
+   its header is still `onboard`'s. Where the repo has a `niyam-guard.yml`
+   that `onboard` did not write, it refuses, naming the file, and changes
+   nothing. In a
+   public repository "By hand:" adds one step, once: allow
+   `pull_request_target` for the caller under Settings → Actions → Policies,
+   since from 2026-12-02 GitHub blocks it there without such a policy. It writes
    `.github/niyam/cloud-setup.sh`, which installs the CLI in Claude
    cloud sessions at the version the workflow pins, and writes it again on
    every run (see Claude cloud sessions below); a cloud session with no
@@ -1822,9 +1839,15 @@ from a workflow run by `pull_request_target` alone, whose one job,
 `veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z` (a release tag or
 a full commit sha, never a branch), read-only, with no inputs or secrets; its
 check is `niyam-guard / judge`. The default branch is the repository's own,
-whatever its name. From 2026-12-02
+whatever its name. `niyam onboard` writes that caller,
+`.github/workflows/niyam-guard.yml`, in a repository with `work-rules` on,
+on pull requests to its default branch and at the release `niyam.yml` pins,
+and moves its pin with the rest on every run; `niyam doctor` marks it under
+"This repo", ✗ when it is missing or differs from what `onboard` writes in
+its trigger, branch, permissions, job, inputs, secrets, steps or release. From 2026-12-02
 GitHub blocks `pull_request_target` in a public repository unless Settings,
-Actions, Policies allows it for that workflow.
+Actions, Policies allows it for that workflow, so `onboard` names that step
+there.
 
 Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
 `@AlokBansal8` for the guard's files alone: `.github/workflows/guard.yml`,

@@ -7,7 +7,8 @@ import { doctor } from './doctor.ts';
 import { KEYCHAIN } from './token-store.ts';
 import { ISSUE_TYPES, RERUN } from './issue-types.ts';
 import { declinedPath, movedPath, ownerFixes } from './lockout.ts';
-import { CLOUD_SETUP_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
+import { CLOUD_SETUP_PATH, GUARD_CALLER_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
+import { guardCaller } from './guard-caller.ts';
 import { ARTIFACT_RULES, AUTO_FIX_RULES, HOOK_COMMAND, OLDER_GUARD_COMMANDS, workflow } from './onboard.ts';
 import { AGENT, AGENT_ID, CLASSIC, FakeSys, HOME, KEY, NOW, ROOT, TOKEN, capture } from './fake.test.ts';
 import { packageVersion } from './version.ts';
@@ -610,10 +611,17 @@ describe('doctor in a Claude cloud session', () => {
   const v = packageVersion();
   const WORKFLOW = `${ROOT}/${WORKFLOW_PATH}`;
   const CLOUD_FILE = `${ROOT}/${CLOUD_SETUP_PATH}`;
+  const CALLER = `${ROOT}/${GUARD_CALLER_PATH}`;
+
+  /** The repo's workflow and the shared Guard's caller, both pinning `version`, as onboard writes them. */
+  function pinAt(sys: FakeSys, version: string): void {
+    sys.files.set(WORKFLOW, workflow('main', version, false));
+    sys.files.set(CALLER, guardCaller('main', version));
+  }
 
   /**
    * A cloud session session-start gave the agent's identity, in a clone whose
-   * workflow pins this CLI and whose cloud setup file installs it, set up by
+   * workflow and Guard caller pin this CLI and whose cloud setup file installs it, set up by
    * the Setup snippet: no keychain, GitHub reached through the proxy as `login`.
    * Its environment holds the agent's cloud signing key, which session-start
    * used, so the agent authors and signs its commits.
@@ -622,7 +630,7 @@ describe('doctor in a Claude cloud session', () => {
     const sys = new FakeSys();
     sys.platform = 'linux';
     sys.env = { CLAUDE_CODE_REMOTE: 'true', GH_TOKEN: PROXY_TOKEN, NIYAM_AGENT: AGENT, GIT_AUTHOR_NAME: AGENT, GIT_AUTHOR_EMAIL: noreplyEmail(AGENT_ID, AGENT) };
-    sys.files.set(WORKFLOW, workflow('main', v, false));
+    pinAt(sys, v);
     sys.files.set(CLOUD_FILE, cloudRepoScript(v, 'ab'.repeat(32)));
     // The mark the install leaves, naming the file the Setup snippet ran.
     sys.files.set(FROM_SETUP, `/home/user/example-app/${CLOUD_SETUP_PATH}\n`);
@@ -646,6 +654,9 @@ describe('doctor in a Claude cloud session', () => {
         "✓  the proxy acts as ExampleBot, an agent the repo's settings name",
         "✓  session-start gave this session ExampleBot's identity",
         "✓  this session's commits are ExampleBot's, signed with NIYAM_SIGNING_KEY",
+        '│',
+        '◇  This repo',
+        `✓  ${GUARD_CALLER_PATH} calls the shared Guard at v${v}, as ${WORKFLOW_PATH} pins`,
         '│',
         '└  All good',
       ],
@@ -680,7 +691,7 @@ describe('doctor in a Claude cloud session', () => {
 
   it('says to run onboard again when the cloud setup file and the pin disagree', async () => {
     const sys = cloud();
-    sys.files.set(WORKFLOW, workflow('main', '0.0.1', false));
+    pinAt(sys, '0.0.1');
     const { code, out } = await check(sys);
     assert.equal(code, 1);
     assert.deepEqual(marked(out, '✗'), [`✗  ${CLOUD_SETUP_PATH} installs ${v}, but ${WORKFLOW_PATH} pins v0.0.1 → niyam onboard again`]);
@@ -709,13 +720,15 @@ describe('doctor in a Claude cloud session', () => {
       assert.equal(code, 0);
       assert.deepEqual(marked(out, '▲'), [
         `▲  ${WORKFLOW_PATH} is missing or pins no one version, so ${CLOUD_SETUP_PATH} is not checked against it → niyam onboard again`,
+        // With no workflow, the caller is not checked at all.
+        ...(pins === undefined ? [] : [`▲  ${WORKFLOW_PATH} pins no one version, so ${GUARD_CALLER_PATH} is not checked against it → niyam onboard again`]),
       ]);
     }
   });
 
   it('warns when this session runs another release than the repo installs, and still passes', async () => {
     const sys = cloud();
-    sys.files.set(WORKFLOW, workflow('main', '0.0.1', false));
+    pinAt(sys, '0.0.1');
     sys.files.set(CLOUD_FILE, cloudRepoScript('0.0.1', 'ab'.repeat(32)));
     const { code, out } = await check(sys);
     assert.equal(code, 0);
@@ -726,7 +739,7 @@ describe('doctor in a Claude cloud session', () => {
   it('warns about a release the workflow pins that no cloud setup file installs', async () => {
     const sys = cloud();
     sys.files.delete(CLOUD_FILE);
-    sys.files.set(WORKFLOW, workflow('main', '0.0.1', false));
+    pinAt(sys, '0.0.1');
     assert.deepEqual(marked((await check(sys)).out, '▲'), [
       `▲  this session runs niyam ${v}, not the v0.0.1 ${WORKFLOW_PATH} pins → niyam onboard again, then a new session`,
     ]);
@@ -924,12 +937,136 @@ describe('doctor in a Claude cloud session', () => {
     sys.files.set(`${ROOT}/.claude/settings.json`, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'gh pr view' }] }] }, permissions: { allow: [...AUTO_FIX_RULES, ...ARTIFACT_RULES] } }));
     const { code, out } = await check(sys);
     assert.equal(code, 0);
-    assert.deepEqual(out.slice(-5), [
+    assert.deepEqual(out.slice(-6), [
       '│',
       '◇  This repo',
       '▲  .claude/settings.json Stop hook "gh pr view" reaches GitHub outside as-agent, so gets 401 → run its gh or git via niyam as-agent --session <session_id> -- (exit 77 when not the agent)',
+      `✓  ${GUARD_CALLER_PATH} calls the shared Guard at v${v}, as ${WORKFLOW_PATH} pins`,
       '│',
       '└  1 to fix',
     ]);
+  });
+
+  describe("the shared Guard's caller (#470)", () => {
+    const fix = ' → niyam onboard again';
+    const notOnboards = `✗  ${GUARD_CALLER_PATH} is not the caller onboard writes: another trigger, branch, permission, job, with:, secrets: or steps${fix}`;
+    const caller = guardCaller('main', v);
+
+    it('passes a caller as onboard writes it, its comments and layout aside', async () => {
+      const sys = cloud();
+      sys.files.set(CALLER, `# Our own note.\n${caller.replace('branches: ["main"]', 'branches: [main]').replace('    types: [opened, edited, synchronize, reopened]', '    types:\n      - opened\n      - edited\n      - synchronize\n      - reopened')}`);
+      const { code, out } = await check(sys);
+      assert.equal(code, 0, out.join('\n'));
+      assert.ok(out.includes(`✓  ${GUARD_CALLER_PATH} calls the shared Guard at v${v}, as ${WORKFLOW_PATH} pins`), out.join('\n'));
+    });
+
+    it('marks a missing caller, naming onboard', async () => {
+      const sys = cloud();
+      sys.files.delete(CALLER);
+      const { code, out } = await check(sys);
+      assert.equal(code, 1);
+      assert.deepEqual(marked(out, '✗'), [`✗  ${GUARD_CALLER_PATH} missing, so the shared Guard does not run here${fix}`]);
+    });
+
+    it('marks a caller at another release, or on another branch, than the workflow', async () => {
+      const older = cloud();
+      older.files.set(CALLER, guardCaller('main', '0.0.1'));
+      assert.deepEqual(marked((await check(older)).out, '✗'), [`✗  ${GUARD_CALLER_PATH} calls the shared Guard at v0.0.1, but ${WORKFLOW_PATH} pins v${v}${fix}`]);
+      const trunk = cloud();
+      trunk.files.set(CALLER, guardCaller('trunk', v));
+      assert.deepEqual(marked((await check(trunk)).out, '✗'), [`✗  ${GUARD_CALLER_PATH} runs on pull requests to trunk, but ${WORKFLOW_PATH} runs pushes on main${fix}`]);
+      // The workflow on the default branch trunk, and the caller with it.
+      const moved = cloud();
+      moved.files.set(WORKFLOW, workflow('trunk', v, false));
+      moved.files.set(CALLER, guardCaller('trunk', v));
+      assert.equal((await check(moved)).code, 0);
+    });
+
+    it('marks a caller with another trigger, type, branch list, permission, job, input, secret or step than onboard writes', async () => {
+      const job = `    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@v${v}\n`;
+      for (const text of [
+        caller.replace('on:\n', 'on:\n  pull_request:\n'),
+        caller.replace('reopened]', 'reopened, closed]'),
+        caller.replace('branches: ["main"]', 'branches: ["main", "next"]'),
+        caller.replace('    branches: ["main"]\n', ''),
+        caller.replace('  issues: read\n\n', '  issues: write\n\n'),
+        caller.replace('      issues: read\n', '      issues: read\n      actions: write\n'),
+        caller.replace('    name: niyam-guard\n', '    name: Guard\n'),
+        caller.replace('  niyam-guard:\n', '  guard:\n'),
+        `${caller}  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n`,
+        caller.replace(job, `${job}    with:\n      ref: main\n`),
+        caller.replace(job, `${job}    secrets: inherit\n`),
+        caller.replace(job, `${job}    steps:\n      - run: true\n`),
+        caller.replace('veda-hq/niyam/', 'someone/niyam/'),
+        caller.replace('shared-guard.yml', 'guard.yml'),
+        caller.replace(`@v${v}`, `@${'a'.repeat(40)}`),
+        caller.replace(`@v${v}`, '@main'),
+      ]) {
+        const sys = cloud();
+        sys.files.set(CALLER, text);
+        const { code, out } = await check(sys);
+        assert.equal(code, 1, text);
+        assert.deepEqual(marked(out, '✗'), [notOnboards], text);
+      }
+    });
+
+    it('marks a caller it cannot read, and goes on', async () => {
+      const sys = cloud();
+      const read = sys.read.bind(sys);
+      sys.read = (path) => {
+        if (path === CALLER) throw new Error('EACCES');
+        return read(path);
+      };
+      const { code, out } = await check(sys);
+      assert.equal(code, 1);
+      assert.deepEqual(marked(out, '✗'), [`✗  ${GUARD_CALLER_PATH} not checked: EACCES → make the workflow and its caller readable`]);
+    });
+
+    it("marks a niyam-guard.yml onboard did not write, which onboard leaves to the repository", async () => {
+      const own = `✗  ${GUARD_CALLER_PATH} is not the caller onboard writes: another trigger, branch, permission, job, with:, secrets: or steps → rename or delete it, then niyam onboard again`;
+      for (const text of ['on: [', '', 'on: pull_request\njobs:\n  guard:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n']) {
+        const sys = cloud();
+        sys.files.set(CALLER, text);
+        const { code, out } = await check(sys);
+        assert.equal(code, 1, text);
+        assert.deepEqual(marked(out, '✗'), [own], text);
+      }
+    });
+
+    it('checks no caller where work rules are off, nor where the repo has no workflow', async () => {
+      const off = cloud();
+      off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'pr-identity'] }));
+      off.files.delete(CALLER);
+      const { code, out } = await check(off);
+      assert.equal(code, 0, out.join('\n'));
+      assert.ok(!out.some((line) => line.includes(GUARD_CALLER_PATH)), out.join('\n'));
+      const bare = cloud();
+      bare.files.delete(WORKFLOW);
+      bare.files.delete(CALLER);
+      assert.ok(!(await check(bare)).out.some((line) => line.includes(GUARD_CALLER_PATH)));
+      const unread = cloud();
+      unread.files.set(`${ROOT}/.github/niyam.json`, '{');
+      assert.ok(!(await check(unread)).out.some((line) => line.includes(GUARD_CALLER_PATH)), 'settings doctor cannot read say nothing of the caller');
+    });
+
+    it('warns when the workflow pins no one version, so the caller is not checked against it', async () => {
+      const sys = cloud();
+      sys.files.set(WORKFLOW, 'on: [');
+      assert.ok(marked((await check(sys)).out, '▲').includes(`▲  ${WORKFLOW_PATH} pins no one version, so ${GUARD_CALLER_PATH} is not checked against it${fix}`));
+    });
+
+    it("checks all but the branch where the workflow's pushes run on several, which onboard leaves as they are", async () => {
+      const several = workflow('main', v, false).replace('branches: ["main"]', 'branches: ["main", "next"]');
+      const sys = cloud();
+      sys.files.set(WORKFLOW, several);
+      sys.files.set(CALLER, guardCaller('trunk', v));
+      const { code, out } = await check(sys);
+      assert.equal(code, 0, out.join('\n'));
+      assert.ok(out.includes(`✓  ${GUARD_CALLER_PATH} calls the shared Guard at v${v}, as ${WORKFLOW_PATH} pins`), out.join('\n'));
+      const older = cloud();
+      older.files.set(WORKFLOW, several);
+      older.files.set(CALLER, guardCaller('main', '0.0.1'));
+      assert.deepEqual(marked((await check(older)).out, '✗'), [`✗  ${GUARD_CALLER_PATH} calls the shared Guard at v0.0.1, but ${WORKFLOW_PATH} pins v${v}${fix}`]);
+    });
   });
 });

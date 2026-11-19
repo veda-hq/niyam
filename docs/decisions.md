@@ -2318,3 +2318,41 @@
     has (the caller would choose the code); a check posted by niyam's
     GitHub App (the later upgrade #468 names: it closes the same-name case
     for sure, but needs a service); per-repository copies of the guard.
+- **2026-11-19 — Record: onboard writes the shared Guard's caller (Work item
+  #468, slice #470).** Each client gets a thin caller,
+  `.github/workflows/niyam-guard.yml`, which `niyam onboard` writes and moves
+  with every other pin, and `niyam doctor` checks under "This repo".
+  - It is written only with `work-rules` on (`callerWanted`, the one place
+    that decides it). Guard refuses a change to a guard file, this one
+    included, that no approved Work item's slice names, and only a
+    repository with work rules has Work items to name. An assumption, not
+    the owner's word, so it is kept in one function to change.
+  - `branches:` names the repository's default branch, which onboard reads
+    from GitHub as it does for `niyam.yml`'s pushes, not `main`: the shared
+    Guard reads the settings and ruleset of the default branch, whatever its
+    name, and a caller on `main` alone never runs where it is another.
+    Doctor is offline, so it checks the caller's branch against the one
+    `niyam.yml`'s pushes run on, which onboard keeps at the default branch;
+    where those name several, which onboard leaves as they are, it checks
+    the rest and not the branch.
+  - Onboard and doctor share one renderer and one reader (`guardCaller`,
+    `callerAt`): a caller is as onboard writes it when it parses, as YAML,
+    equal to onboard's render at the release and branch it names, so
+    comments and layout do not count, and any other trigger, type, branch,
+    permission, job, `with:`, `secrets:`, step, or pin other than a release
+    tag of `shared-guard.yml` does; doctor marks the rest ✗. A file is
+    onboard's when it is so or starts with onboard's header
+    (`callerIsOnboards`): onboard writes it again, edited by hand or not, so
+    doctor's fix, run onboard, holds. Onboard refuses any other
+    `niyam-guard.yml`, naming it, and changes nothing; doctor's fix for it is
+    to rename or delete it first. Its header names no release, so a run
+    that moves the pin changes the `uses:` line alone, which Guard's onboard
+    exemption takes as a version move.
+  - A public repository, as `GET /repos/{slug}`'s `private: false` or
+    `visibility: public` says, which onboard already reads for access, gets
+    one by-hand step: allow `pull_request_target` for the caller under
+    Settings → Actions → Policies, since from 2026-12-02 GitHub blocks it
+    there without a policy. One GitHub does not call public gets none.
+  - Rejected: writing it with any feature that writes `niyam.yml`, which
+    would add a guard file Guard then refuses to change in a repository with
+    no Work items to name.

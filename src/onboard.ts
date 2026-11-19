@@ -45,6 +45,7 @@ import {
   remoteFile,
 } from './onboard-pull.ts';
 import { SIGNING_KEY_VAR, cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
+import { GUARD_CALLER_PATH, callerAt, callerIsOnboards, callerPins, callerDetail, callerUpdate, callerWanted, callerWhat, policySteps } from './guard-caller.ts';
 import { CLOUD_KEY_TITLE, cloudKeyRefusal, listedKeys, makeCloudKey, pasteLines } from './cloud-key.ts';
 import { newKey, publicLine } from './sshsig.ts';
 import { detail } from './doc-numbers.ts';
@@ -850,13 +851,15 @@ function newest(pins: Pin[], version: string): Pin | undefined {
 
 /**
  * A release newer than `version` that the checkout pins already, in its
- * workflow or its cloud setup file. An older CLI onboarding over it would
- * move the pins back and drop what the newer release added.
+ * workflow, the shared Guard's caller or its cloud setup file. An older CLI
+ * onboarding over it would move the pins back and drop what the newer
+ * release added.
  */
 function newerPinHere(fileAt: (path: string) => string | undefined, version: string): Pin | undefined {
   return newest(
     [
       ...workflowPins(fileAt(WORKFLOW_PATH) ?? '').map((pin) => ({ version: pin, where: `${WORKFLOW_PATH} in this checkout` })),
+      ...callerPins(fileAt(GUARD_CALLER_PATH) ?? '').map((pin) => ({ version: pin, where: `${GUARD_CALLER_PATH} in this checkout` })),
       ...[cloudScriptVersion(fileAt(CLOUD_SETUP_PATH) ?? '')].filter((pin) => pin !== undefined).map((pin) => ({ version: pin, where: `${CLOUD_SETUP_PATH} in this checkout` })),
     ],
     version,
@@ -880,6 +883,9 @@ async function newerPinOnGitHub(sys: Sys, slug: string, token: string, branch: s
     const read = await remoteFile(sys, slug, WORKFLOW_PATH, ref, token);
     if ('problem' in read) return read;
     pins.push(...workflowPins(read.text ?? '').map((pin) => ({ version: pin, where: `${WORKFLOW_PATH} on ${ref}` })));
+    const caller = await remoteFile(sys, slug, GUARD_CALLER_PATH, ref, token);
+    if ('problem' in caller) return caller;
+    pins.push(...callerPins(caller.text ?? '').map((pin) => ({ version: pin, where: `${GUARD_CALLER_PATH} on ${ref}` })));
   }
   return newest(pins, version);
 }
@@ -893,17 +899,20 @@ function refuseOlder(io: Output, slug: string, pin: Pin, version: string): numbe
 
 /** What GitHub says about the agent's access to a repository. */
 type Access =
-  | { kind: 'push'; branch: string }
+  /** `public` when GitHub says the repository is public, as the shared Guard's caller needs a policy there. */
+  | { kind: 'push'; branch: string; public?: true }
   | { kind: 'read'; branch?: string }
   | { kind: 'none' }
   | { kind: 'refused'; reason: string };
 
 async function access(sys: Sys, slug: string, token: string): Promise<Access> {
   const { status, json, headers = {} } = await sys.http(`${API}/repos/${slug}`, { token });
-  const repo = json as { default_branch?: unknown; permissions?: { push?: unknown }; message?: unknown } | null;
+  const repo = json as { default_branch?: unknown; permissions?: { push?: unknown }; private?: unknown; visibility?: unknown; message?: unknown } | null;
   if (status === 200) {
+    // Public only when GitHub says so: a repository it does not say of asks for no policy.
+    const open = repo?.private === false || repo?.visibility === 'public';
     return repo?.permissions?.push === true && typeof repo.default_branch === 'string'
-      ? { kind: 'push', branch: repo.default_branch }
+      ? { kind: 'push', branch: repo.default_branch, ...(open ? { public: true as const } : {}) }
       : { kind: 'read', ...(typeof repo?.default_branch === 'string' ? { branch: repo.default_branch } : {}) };
   }
   if (status === 404) return { kind: 'none' };
@@ -1323,7 +1332,8 @@ function planHead(paint: Paint, head: { from?: string | undefined; version: stri
  * Sets up the client repository the working directory is in, run by its
  * owner on a Mac `machine` has set up for the agent. It first works out
  * everything it would change, changing nothing: the settings file, the
- * Claude Code settings, the workflow and the cloud setup file, opened as the agent's pull request
+ * Claude Code settings, the workflow, the shared Guard's caller (with work
+ * rules on) and the cloud setup file, opened as the agent's pull request
  * so the owner's checkout is never modified; the agent's push access; the
  * work board (issue types, labels, Project, fields and views); the pre-push
  * hook; and one signed test commit GitHub must show as Verified by the
@@ -1558,6 +1568,15 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   }
   const on = (feature: Feature): boolean => features.includes(feature);
   const workflowNeeded = on('pr-identity') || on('board') || on('work-rules') || on('figma') || on('decisions') || on('review');
+  // The shared Guard's caller (#470). onboard's own, edited by hand or not, is written again; a file of that name
+  // onboard did not write is the repository's own: refused before any plan, so nothing changes.
+  const callerNeeded = callerWanted(on);
+  const callerBefore = callerNeeded ? fileAt(GUARD_CALLER_PATH) : undefined;
+  const callerHad = callerBefore === undefined ? undefined : await callerAt(callerBefore);
+  if (callerBefore !== undefined && !(await callerIsOnboards(callerBefore))) {
+    io.err(`onboard: ${GUARD_CALLER_PATH} is not the shared Guard's caller as onboard writes it, and onboard does not overwrite a workflow of the repository's own; nothing changed. Rename or delete it, then run onboard again.`);
+    return 1;
+  }
 
   const existing = fileAt(HOOKS_PATH);
   // Worked out before the plan, so a file onboard cannot edit is refused before any question.
@@ -1684,6 +1703,17 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     const update = planned === undefined ? undefined : workflowUpdate(fileAt(WORKFLOW_PATH), planned, version, passed.figma, schedule, SETTINGS_PATH, passed.board);
     const detail = update === undefined ? (fileAt(WORKFLOW_PATH) === undefined ? 'new' : 'write or update') : update.kind === 'same' ? undefined : workflowDetail(update, version, passed);
     if (detail !== undefined) pull.push({ label: 'workflow', detail });
+  }
+  // The caller runs on pull requests to the default branch, which only GitHub can say: as the workflow, worked out
+  // again in the pull request's step.
+  const callerFor = (branch: string): void => {
+    const update = callerUpdate(callerBefore, callerHad, branch, version);
+    if (update.kind !== 'same') change(GUARD_CALLER_PATH, update.text, callerWhat(update, version, branch));
+  };
+  if (callerNeeded) {
+    const update = planned === undefined ? undefined : callerUpdate(callerBefore, callerHad, planned, version);
+    const detail = update === undefined ? (callerBefore === undefined ? `new, the shared Guard at v${version}` : 'write or update') : update.kind === 'same' ? undefined : callerDetail(update, version);
+    if (detail !== undefined) pull.push({ label: 'guard caller', detail });
   }
 
   if (on('board')) {
@@ -1851,6 +1881,15 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     async run(out) {
       if (reach.kind !== 'push') return false;
       if (workflowNeeded) workflowFor(reach.branch);
+      if (callerNeeded) {
+        callerFor(reach.branch);
+        // From 2026-12-02 GitHub runs pull_request_target in a public repository only where a policy allows it.
+        if (reach.public) {
+          const policy = policySteps(slug);
+          byHand.push(policy.byHand);
+          later.push(policy.later);
+        }
+      }
       // From the workflow the pull request leaves, worked out only now that GitHub has said the branch.
       const text = fileAt(WORKFLOW_PATH);
       const unpassed = workflowNeeded && on('figma') && text !== undefined ? jobsWithoutLibrary(text) : [];
