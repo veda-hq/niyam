@@ -1,9 +1,8 @@
-# The guard's own files (#309, docs/decisions.md P-63). The Guard check on
-# main judges every other change to niyam's checks against the slice's
+# The guard's own files (#309, docs/decisions.md P-63). The shared Guard (#472)
+# judges every other change to niyam's checks against the slice's
 # **Guards:** section, but it cannot tell whether a change to its own rules
 # weakens them, so a pull request that changes one of these waits for Alok.
 # Nothing else gets an owner.
-/.github/workflows/guard.yml @AlokBansal8
 /.github/workflows/niyam-guard.yml @AlokBansal8
 /.github/workflows/shared-guard.yml @AlokBansal8
 /scripts/guard.mjs @AlokBansal8
