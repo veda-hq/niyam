@@ -488,8 +488,16 @@ describe('judging a pull request', () => {
     assert.deepEqual(await one(WORKFLOW([['check', 'Typecheck, test, build']]), WORKFLOW([['check', 'Typecheck, test, build']])), []);
     let [refusal] = await one(WORKFLOW([['check', 'Typecheck, test, build'], ['copy', 'Typecheck, test, build']]).replace('copy:', 'copy2:'), WORKFLOW([['other']]));
     assert.match(refusal.message, /adds the job "Typecheck, test, build", which reports "Typecheck, test, build", a check main's ruleset requires/);
-    [refusal] = await one(WORKFLOW([['g', 'Guard']]), undefined, 'added');
-    assert.match(refusal.message, /reports "Guard"/);
+    // Guard is no name of niyam's own any more (#494): a job of that name passes unless the ruleset requires it.
+    assert.deepEqual(await one(WORKFLOW([['g', 'Guard']]), undefined, 'added'), []);
+    const guardRequired = { [`/repos/${REPO}/rules/branches/main`]: [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'Guard' }] } }] };
+    [refusal] = await judge(
+      github({ files: [modified('.github/workflows/ci.yml', '@@ -1 +1 @@\n-a\n+b', { status: 'added' })], contents: { '.github/workflows/ci.yml@h': WORKFLOW([['g', 'Guard']]) }, over: guardRequired }),
+      REPO,
+      1,
+      OWNERS,
+    );
+    assert.match(refusal.message, /reports "Guard", a check main's ruleset requires/);
     [refusal] = await one(WORKFLOW([['niyam']]), WORKFLOW([['other']]));
     assert.match(refusal.message, /reports "niyam \/ Work rules"/);
     // An expression could report any check: the shared Guard's too.
@@ -501,8 +509,8 @@ describe('judging a pull request', () => {
     [refusal] = await one(WORKFLOW([['check', 'Typecheck, test, build'], ['again', 'Typecheck, test, build']]), WORKFLOW([['check', 'Typecheck, test, build']]));
     assert.match(refusal.message, /adds the job "Typecheck, test, build"/);
     // A base that no longer parses keeps no names.
-    [refusal] = await one(WORKFLOW([['g', 'Guard']]), 'jobs: [');
-    assert.match(refusal.message, /reports "Guard"/);
+    [refusal] = await one(WORKFLOW([['check', 'Typecheck, test, build']]), 'jobs: [');
+    assert.match(refusal.message, /reports "Typecheck, test, build"/);
   });
 
   test("only the caller as onboard writes it may report the shared Guard's check, Guards: or not", async () => {

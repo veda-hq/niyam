@@ -2417,3 +2417,10 @@
     Guard still refuses a job named `Guard` (`OWN_CHECK`), which no longer
     reports anything here; dropping it changes `scripts/guard.mjs`, a slice
     of its own.
+- **2026-11-19 — Decision: Guard no longer refuses a job named `Guard`
+  (Work item #468, slice #494).** Alok: "file the slice to drop OWN_CHECK",
+  then `Decision: #494 as written.` With `guard.yml` gone nothing reports
+  `Guard`, and the shared Guard refused a client's own job of that name.
+  Guard now refuses a job by a check's name only when the default branch's
+  ruleset requires it, besides `niyam-guard / judge`, which it always keeps
+  for onboard's caller.
