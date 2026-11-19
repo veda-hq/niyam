@@ -1332,8 +1332,8 @@ function planHead(paint: Paint, head: { from?: string | undefined; version: stri
  * Sets up the client repository the working directory is in, run by its
  * owner on a Mac `machine` has set up for the agent. It first works out
  * everything it would change, changing nothing: the settings file, the
- * Claude Code settings, the workflow, the shared Guard's caller (with work
- * rules on) and the cloud setup file, opened as the agent's pull request
+ * Claude Code settings, the workflow, the shared Guard's caller and the
+ * cloud setup file, opened as the agent's pull request
  * so the owner's checkout is never modified; the agent's push access; the
  * work board (issue types, labels, Project, fields and views); the pre-push
  * hook; and one signed test commit GitHub must show as Verified by the
