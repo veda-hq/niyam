@@ -1813,11 +1813,14 @@ which fails the lint until `pnpm lint --prune-suppressions` drops it.
 
 ### Guard
 
-The `guard` workflow (`.github/workflows/guard.yml`) runs on
-`pull_request_target`, so GitHub runs it from `main`'s copy, never the pull
-request's. Its job, `Guard`, checks out `main` alone, reads the pull
-request's changed files from GitHub's API as data, and runs
-`scripts/guard.mjs` (tested in `scripts/guard.test.mjs`). A change to a guard
+niyam runs the shared Guard (below) as every client does, through the caller
+`onboard` writes, `.github/workflows/niyam-guard.yml`, at the release
+`niyam.yml` pins; its check is `niyam-guard / judge` (#472). It runs on
+`pull_request_target`, so GitHub runs `main`'s copy of the caller, never the
+pull request's, and the Guard it calls runs from that release: a fix to
+`scripts/guard.mjs` (tested in `scripts/guard.test.mjs`) holds niyam's own
+pull requests once it is released. It reads the pull request's changed files
+from GitHub's API as data and never checks out its code. A change to a guard
 file passes only when the pull request's slice names it in a `**Guards:**`
 section, one already in the slice when the owner put `approved` on its Work
 item (for a slice added later, when the owner's `Decision:` settled it):
@@ -1881,7 +1884,7 @@ Actions, Policies allows it for that workflow, so `onboard` names that step
 there.
 
 Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
-`@AlokBansal8` for the guard's files alone: `.github/workflows/guard.yml`, the caller `.github/workflows/niyam-guard.yml`,
+`@AlokBansal8` for the guard's files alone: the caller `.github/workflows/niyam-guard.yml`,
 `.github/workflows/shared-guard.yml`, `scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
 itself. With "Require review from Code Owners" on in the `main` ruleset, a
 pull request that changes one of them waits for his approval. Every other

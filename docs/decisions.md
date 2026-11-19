@@ -2398,3 +2398,22 @@
   - Rejected: the full rules everywhere, which hold every `.github/` change
     in a repository that cannot name a slice. Also rejected: an owner's
     review in place of a slice, which needs new code to read reviews.
+- **2026-11-19 — Record: niyam runs the shared Guard through the caller its
+  clients run (Work item #468, slice #472).** In order, so every niyam pull
+  request stayed held by a Guard from `main` or a release:
+  - 0.7.5 released #485 (#487). Alok allowed `pull_request_target` for
+    `guard.yml` and `niyam-guard.yml` alone in the Actions policy "Guard on
+    pull_request_target", since from 2026-12-02 GitHub blocks it in public
+    repositories without one
+    (https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2,
+    read 2026-11-19).
+  - `onboard` at v0.7.5 added the caller (#490), and CODEOWNERS named Alok
+    for it. `niyam-guard / judge` passed from GitHub Actions on #492, the
+    next pull request merged, and Alok's `owner-step required-checks`
+    replaced `Guard` with it in `main`'s ruleset.
+  - Then `guard.yml`, which ran `main`'s copy of `scripts/guard.mjs`, and its
+    CODEOWNERS line went. niyam's Guard now runs from its last release: a
+    fix to `scripts/guard.mjs` holds niyam's pull requests once released.
+    Guard still refuses a job named `Guard` (`OWN_CHECK`), which no longer
+    reports anything here; dropping it changes `scripts/guard.mjs`, a slice
+    of its own.
