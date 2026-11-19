@@ -17,8 +17,17 @@ import { SESSION_0610, SESSION_069 } from './older-texts.test.ts';
 const SESSION = `${HOME}/.config/niyam/examplebot/session.sh`;
 const LAUNCHER = launcherPath(HOME);
 
+/** `sys` with the shared Guard's caller, which onboard writes in every repository it onboards (#485). */
+function onboarded(sys: FakeSys): FakeSys {
+  sys.files.set(`/repo/${GUARD_CALLER_PATH}`, guardCaller('main', '0.7.3'));
+  return sys;
+}
+
+/** What doctor says of that caller in a repository with no niyam.yml to pin it. */
+const CALLER_OK = `✓  ${GUARD_CALLER_PATH} calls the shared Guard at v0.7.3, as onboard writes it`;
+
 function healthy(): FakeSys {
-  const sys = new FakeSys().ready();
+  const sys = onboarded(new FakeSys().ready());
   sys.files.set(SESSION, sessionScript(AGENT, AGENT_ID, pathsFor(HOME, AGENT)));
   return sys;
 }
@@ -71,6 +80,9 @@ describe('doctor', () => {
         '✓  signing key registered',
         '✓  issue types in example-org: the work model’s alone, and every open issue here has one',
         '│',
+        '◇  This repo',
+        CALLER_OK,
+        '│',
         '└  All good',
       ],
       err: [],
@@ -93,10 +105,11 @@ describe('doctor', () => {
     sys.files.set('/repo/.claude/settings.json', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'gh pr view' }] }] }, permissions: { allow: [...AUTO_FIX_RULES, ...ARTIFACT_RULES] } }));
     const { code, out, err } = await check(sys);
     assert.deepEqual({ code, err }, { code: 0, err: [] });
-    assert.deepEqual(out.slice(-5), [
+    assert.deepEqual(out.slice(-6), [
       '│',
       '◇  This repo',
       '▲  .claude/settings.json Stop hook "gh pr view" reaches GitHub outside as-agent, so gets 401 → run its gh or git via niyam as-agent --session <session_id> -- (exit 77 when not the agent)',
+      CALLER_OK,
       '│',
       '└  1 to fix',
     ]);
@@ -142,10 +155,11 @@ describe('doctor', () => {
     settings(['Bash(pnpm test)']);
     const fresh = await check(sys);
     assert.deepEqual({ code: fresh.code, err: fresh.err }, { code: 0, err: [] });
-    assert.deepEqual(fresh.out.slice(-5), [
+    assert.deepEqual(fresh.out.slice(-6), [
       '│',
       '◇  This repo',
       `▲  .claude/settings.json does not allow ${AUTO_FIX_RULES.join(', ')}, so agent sessions cannot turn Auto-fix on → niyam onboard again`,
+      CALLER_OK,
       '│',
       '└  1 to fix',
     ]);
@@ -167,10 +181,11 @@ describe('doctor', () => {
     settings(['Bash(pnpm test)']);
     const fresh = await check(sys);
     assert.deepEqual({ code: fresh.code, err: fresh.err }, { code: 0, err: [] });
-    assert.deepEqual(fresh.out.slice(-5), [
+    assert.deepEqual(fresh.out.slice(-6), [
       '│',
       '◇  This repo',
       `▲  .claude/settings.json does not allow ${ARTIFACT_RULES.join(', ')}, so agent sessions cannot publish the page an ask to the owner links → niyam onboard again`,
+      CALLER_OK,
       '│',
       '└  1 to fix',
     ]);
@@ -197,10 +212,11 @@ describe('doctor', () => {
       settings([...AUTO_FIX_RULES], ['Artifact', server]);
       const { code, out } = await check(sys);
       assert.equal(code, 0);
-      assert.deepEqual(out.slice(-5), [
+      assert.deepEqual(out.slice(-6), [
         '│',
         '◇  This repo',
         `✓  .claude/settings.json denies ${server} on purpose, so agent sessions do not publish pages`,
+        CALLER_OK,
         '│',
         '└  All good',
       ]);
@@ -268,7 +284,7 @@ describe('doctor', () => {
   });
 
   it('refuses a machine never set up, each problem with its fix', async () => {
-    const { code, out, err } = await check(new FakeSys());
+    const { code, out, err } = await check(onboarded(new FakeSys()));
     assert.deepEqual({ code, err }, { code: 1, err: [] });
     assert.deepEqual(out, [
       '◆  niyam doctor   ExampleBot',
@@ -282,6 +298,9 @@ describe('doctor', () => {
       '◇  GitHub — as ExampleBot',
       "✗  no token in this Mac's keychain → niyam machine",
       '✗  signing key not registered → niyam machine',
+      '│',
+      '◇  This repo',
+      CALLER_OK,
       '│',
       '└  5 to fix',
     ]);
@@ -437,7 +456,7 @@ describe('doctor', () => {
     sys.http = () => Promise.reject(new Error('rate limited'));
     const { code, out } = await check(sys);
     assert.equal(code, 1);
-    assert.deepEqual(marked(out, '✓'), ['✓  signing key ~/.ssh/examplebot_signing', '✓  launcher']);
+    assert.deepEqual(marked(out, '✓'), ['✓  signing key ~/.ssh/examplebot_signing', '✓  launcher', CALLER_OK]);
     assert.deepEqual(marked(out, '✗'), [
       '✗  session file: cannot ask GitHub (rate limited) → niyam doctor again',
       '✗  token: cannot ask GitHub (rate limited) → niyam doctor again',
@@ -1033,20 +1052,28 @@ describe('doctor in a Claude cloud session', () => {
       }
     });
 
-    it('checks no caller where work rules are off, nor where the repo has no workflow', async () => {
+    it('checks the caller whatever the features, its shape alone where the repo has no workflow, and none outside an onboarded repo (#485)', async () => {
       const off = cloud();
       off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'pr-identity'] }));
-      off.files.delete(CALLER);
       const { code, out } = await check(off);
       assert.equal(code, 0, out.join('\n'));
-      assert.ok(!out.some((line) => line.includes(GUARD_CALLER_PATH)), out.join('\n'));
+      assert.ok(out.includes(`✓  ${GUARD_CALLER_PATH} calls the shared Guard at v${v}, as ${WORKFLOW_PATH} pins`), out.join('\n'));
+      off.files.delete(CALLER);
+      assert.deepEqual(marked((await check(off)).out, '✗'), [`✗  ${GUARD_CALLER_PATH} missing, so the shared Guard does not run here → niyam onboard again`]);
       const bare = cloud();
       bare.files.delete(WORKFLOW);
-      bare.files.delete(CALLER);
-      assert.ok(!(await check(bare)).out.some((line) => line.includes(GUARD_CALLER_PATH)));
+      bare.files.set(CALLER, guardCaller('trunk', '0.0.1'));
+      assert.ok((await check(bare)).out.includes(`✓  ${GUARD_CALLER_PATH} calls the shared Guard at v0.0.1, as onboard writes it`), 'no niyam.yml to pin its release or branch');
+      bare.files.set(CALLER, 'on: push\n');
+      assert.ok(marked((await check(bare)).out, '✗').some((line) => line.includes('is not the caller onboard writes')), 'its shape still checked');
+      const none = cloud();
+      none.files.delete(`${ROOT}/.github/niyam.json`);
+      none.files.delete(CALLER);
+      assert.ok(!(await check(none)).out.some((line) => line.includes(GUARD_CALLER_PATH)), 'a repo onboard never ran in has no caller to check');
       const unread = cloud();
       unread.files.set(`${ROOT}/.github/niyam.json`, '{');
-      assert.ok(!(await check(unread)).out.some((line) => line.includes(GUARD_CALLER_PATH)), 'settings doctor cannot read say nothing of the caller');
+      // No feature decides it now, so settings doctor cannot read still have the caller checked.
+      assert.ok((await check(unread)).out.includes(`✓  ${GUARD_CALLER_PATH} calls the shared Guard at v${v}, as ${WORKFLOW_PATH} pins`), 'settings doctor cannot read still have the caller checked');
     });
 
     it('warns when the workflow pins no one version, so the caller is not checked against it', async () => {

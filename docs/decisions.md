@@ -2322,11 +2322,9 @@
   #468, slice #470).** Each client gets a thin caller,
   `.github/workflows/niyam-guard.yml`, which `niyam onboard` writes and moves
   with every other pin, and `niyam doctor` checks under "This repo".
-  - It is written only with `work-rules` on (`callerWanted`, the one place
-    that decides it). Guard refuses a change to a guard file, this one
-    included, that no approved Work item's slice names, and only a
-    repository with work rules has Work items to name. An assumption, not
-    the owner's word, so it is kept in one function to change.
+  - It was written only with `work-rules` on (`callerWanted`), an
+    assumption, not the owner's word. Superseded by the record below (slice
+    #485): every onboarded repository gets it.
   - `branches:` names the repository's default branch, which onboard reads
     from GitHub as it does for `niyam.yml`'s pushes, not `main`: the shared
     Guard reads the settings and ruleset of the default branch, whatever its
@@ -2381,3 +2379,22 @@
   - The caller runs on pull requests into the default branch alone, so the
     step says that a ruleset also targeting other branches would hold
     theirs; it does not read the ruleset's conditions to refuse that.
+- **2026-11-19 — Decision: every onboarded repository gets the shared Guard,
+  and one without work rules gets its refusals alone (Work item #468, slice
+  #485).** Alok: "Every onboarded repo should get the Guard, not just
+  work-rules ones." Asked how Guard judges a repository without work rules,
+  he chose "Refusals only".
+  - `onboard` writes the caller, and `doctor` checks it, whatever the
+    features; `callerWanted` is gone. Where there is no `niyam.yml` to pin a
+    release or name a branch, doctor checks the caller's shape alone.
+  - Guard reads `features` from the default branch's settings
+    (`workRulesIn`). With `work-rules` off it judges no slice, since there
+    are no Work items to name one, and logs each change it would have asked
+    one to name. It keeps the refusals no slice passes: a job added under a
+    required check's name, a job that could report `niyam-guard / judge`
+    other than onboard's caller, and too many files to list. No `features`
+    means every feature on, so it judges as before; a value it cannot read
+    refuses.
+  - Rejected: the full rules everywhere, which hold every `.github/` change
+    in a repository that cannot name a slice. Also rejected: an owner's
+    review in place of a slice, which needs new code to read reviews.

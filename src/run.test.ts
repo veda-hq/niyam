@@ -90,7 +90,8 @@ describe('run', () => {
     const { code, out } = await capture(['doctor'], () => new FakeSys());
     assert.equal(code, 1);
     assert.equal(out[0], '◆  niyam doctor   ExampleBot');
-    assert.equal(out.at(-1), '└  5 to fix');
+    // A machine never set up, in a repository with no shared Guard caller yet (#485).
+    assert.equal(out.at(-1), '└  6 to fix');
   });
 
   it('runs session-start, which always exits 0', async () => {

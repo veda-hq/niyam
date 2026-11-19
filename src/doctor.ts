@@ -22,8 +22,8 @@ import {
 import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
 import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
 import { GITHUB_NOREPLY } from './host.ts';
-import { featuresIn, isOn } from './features.ts';
-import { callerAt, callerIsOnboards, callerWanted, pushBranch } from './guard-caller.ts';
+import { featuresIn } from './features.ts';
+import { callerAt, callerIsOnboards, pushBranch } from './guard-caller.ts';
 import { typesDrift } from './issue-types.ts';
 import { type Finding, closing, findingLines, heading, painter, tilde } from './layout.ts';
 import { exposure, exposureFindings, movedFindings, readDeclined, setAside } from './lockout.ts';
@@ -247,46 +247,45 @@ async function repoFindings(sys: Sys): Promise<Finding[]> {
 
 /**
  * Whether the shared Guard's caller is as onboard writes it, pinned with the
- * rest: checked in an onboarded repo whose settings have onboard write it
- * (`callerWanted`) and whose niyam.yml is there. Offline, so the caller's
- * branch is checked against the one niyam.yml's pushes run on, which onboard
- * keeps at the default branch; its release against the one niyam.yml pins.
+ * rest: checked in every onboarded repo, since onboard writes it in every one
+ * (#485). Offline, so the caller's branch is checked against the one
+ * niyam.yml's pushes run on, which onboard keeps at the default branch; its
+ * release against the one niyam.yml pins. A repo with no niyam.yml has
+ * neither to check against, so only the caller's shape is checked there.
  */
 async function callerFindings(sys: Sys): Promise<Finding[]> {
   let root: string;
-  let wanted: boolean;
   try {
     root = repoRoot(sys);
-    if (!hasSettings(sys, root) || !sys.exists(`${root}/${WORKFLOW_PATH}`)) return [];
-    const here = root;
-    wanted = callerWanted((feature) => isOn(sys, here, feature));
+    if (!hasSettings(sys, root)) return [];
   } catch {
     // fail-open: outside a clone, or settings doctor cannot read, there is no caller to check; onboard says what is wrong with them.
     return [];
   }
-  if (!wanted) return [];
   const file = `${root}/${GUARD_CALLER_PATH}`;
   if (!sys.exists(file)) return [{ mark: '✗', text: `${GUARD_CALLER_PATH} missing, so the shared Guard does not run here`, fix: ONBOARD }];
-  const { pinned } = repoReleases(sys, root);
-  if (pinned === undefined) {
-    return [{ mark: '▲', text: `${WORKFLOW_PATH} pins no one version, so ${GUARD_CALLER_PATH} is not checked against it`, fix: ONBOARD }];
-  }
-  let workflow: string;
+  const workflowFile = `${root}/${WORKFLOW_PATH}`;
+  let workflow: string | undefined;
   let text: string;
   try {
-    workflow = sys.read(`${root}/${WORKFLOW_PATH}`);
+    workflow = sys.exists(workflowFile) ? sys.read(workflowFile) : undefined;
     text = sys.read(file);
   } catch (error) {
     // fail-open: a file doctor cannot read is marked ✗, naming why, and the rest of the report still runs.
     return [{ mark: '✗', text: `${GUARD_CALLER_PATH} not checked: ${message(error)}`, fix: 'make the workflow and its caller readable' }];
   }
-  const branch = await pushBranch(workflow);
   const at = await callerAt(text);
   if (at === undefined) {
     // onboard writes its own file again, but leaves one it did not write to the repository.
     const fix = (await callerIsOnboards(text)) ? ONBOARD : `rename or delete it, then ${ONBOARD}`;
     return [{ mark: '✗', text: `${GUARD_CALLER_PATH} is not the caller onboard writes: another trigger, branch, permission, job, with:, secrets: or steps`, fix }];
   }
+  if (workflow === undefined) return [{ mark: '✓', text: `${GUARD_CALLER_PATH} calls the shared Guard at v${at.version}, as onboard writes it` }];
+  const { pinned } = repoReleases(sys, root);
+  if (pinned === undefined) {
+    return [{ mark: '▲', text: `${WORKFLOW_PATH} pins no one version, so ${GUARD_CALLER_PATH} is not checked against it`, fix: ONBOARD }];
+  }
+  const branch = await pushBranch(workflow);
   if (at.version !== pinned) return [{ mark: '✗', text: `${GUARD_CALLER_PATH} calls the shared Guard at v${at.version}, but ${WORKFLOW_PATH} pins v${pinned}`, fix: ONBOARD }];
   // A push trigger of several branches, which onboard leaves as the client has it, says no one branch: the rest is still checked.
   if (branch !== undefined && at.branch !== branch) return [{ mark: '✗', text: `${GUARD_CALLER_PATH} runs on pull requests to ${at.branch}, but ${WORKFLOW_PATH} runs pushes on ${branch}`, fix: ONBOARD }];
