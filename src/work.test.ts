@@ -848,7 +848,14 @@ describe('prWorkRules', () => {
 
     it('passes one changing only the files onboard writes, naming no slice', async () => {
       const sys = actions(onboardPull('Example-Org/Example-App'));
-      files(sys, [{ filename: '.github/niyam.json', status: 'modified' }, { filename: '.claude/settings.json', status: 'added' }, { filename: '.github/workflows/niyam.yml' }, { filename: '.github/niyam/cloud-setup.sh', status: 'added' }]);
+      files(sys, [
+        { filename: '.github/niyam.json', status: 'modified' },
+        { filename: '.claude/settings.json', status: 'added' },
+        { filename: '.github/workflows/niyam.yml' },
+        // The shared Guard's caller (#470).
+        { filename: '.github/workflows/niyam-guard.yml', status: 'added' },
+        { filename: '.github/niyam/cloud-setup.sh', status: 'added' },
+      ]);
       assert.deepEqual(await check(sys), { code: 0, out: ["✓ pr-work-rules: #42 is onboard's, changing only the files onboard writes, so it names no slice"], err: [] });
       assert.equal(sys.requests[0]?.token, 'ghs_run');
     });

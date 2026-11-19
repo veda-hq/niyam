@@ -22,11 +22,12 @@ import {
 import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
 import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
 import { GITHUB_NOREPLY } from './host.ts';
-import { featuresIn } from './features.ts';
+import { featuresIn, isOn } from './features.ts';
+import { callerAt, callerIsOnboards, callerWanted, pushBranch } from './guard-caller.ts';
 import { typesDrift } from './issue-types.ts';
 import { type Finding, closing, findingLines, heading, painter, tilde } from './layout.ts';
 import { exposure, exposureFindings, movedFindings, readDeclined, setAside } from './lockout.ts';
-import { CLOUD_SETUP_PATH, HOOKS_PATH, SARATHI_PATH } from './onboard-pull.ts';
+import { CLOUD_SETUP_PATH, GUARD_CALLER_PATH, HOOKS_PATH, SARATHI_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
 import { leftoverDir, leftoverToken } from './machine.ts';
 import { BOARD_SECRETS, GUARD_COMMAND, HOOK_COMMAND, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, ARTIFACT_RULES, AUTO_FIX_RULES, type RuleNeeds, artifactRuleNeeds, autoFixRuleNeeds, sarathiRunner } from './onboard.ts';
 import { secretNames } from './secrets.ts';
@@ -118,7 +119,7 @@ export async function doctor(sys: Sys, io: Output, named?: string): Promise<numb
   return report(sys, io, agent, [
     ['This Mac', mac],
     [`GitHub — as ${agent}`, github],
-    ['This repo', repoFindings(sys)],
+    ['This repo', await repoFindings(sys)],
   ]);
 }
 
@@ -226,9 +227,10 @@ async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Fi
 /**
  * Client hooks that reach GitHub outside `as-agent` where doctor runs, a Mac
  * or a cloud session, and the Auto-fix and artifact rules an onboarded repo's
- * Claude Code settings lack.
+ * Claude Code settings lack, and whether its shared Guard caller is pinned
+ * with the rest.
  */
-function repoFindings(sys: Sys): Finding[] {
+async function repoFindings(sys: Sys): Promise<Finding[]> {
   return [
     ...hooksHittingLock(sys).map(
       (hook): Finding => ({
@@ -239,7 +241,48 @@ function repoFindings(sys: Sys): Finding[] {
     ),
     ...allowFindings(sys),
     ...twiceFindings(sys),
+    ...(await callerFindings(sys)),
   ];
+}
+
+/**
+ * Whether the shared Guard's caller is as onboard writes it, pinned with the
+ * rest: checked in an onboarded repo whose settings have onboard write it
+ * (`callerWanted`) and whose niyam.yml is there. Offline, so the caller's
+ * branch is checked against the one niyam.yml's pushes run on, which onboard
+ * keeps at the default branch; its release against the one niyam.yml pins.
+ */
+async function callerFindings(sys: Sys): Promise<Finding[]> {
+  let root: string;
+  let wanted: boolean;
+  try {
+    root = repoRoot(sys);
+    if (!hasSettings(sys, root) || !sys.exists(`${root}/${WORKFLOW_PATH}`)) return [];
+    const here = root;
+    wanted = callerWanted((feature) => isOn(sys, here, feature));
+  } catch {
+    // fail-open: outside a clone, or settings doctor cannot read, there is no caller to check; onboard says what is wrong with them.
+    return [];
+  }
+  if (!wanted) return [];
+  const file = `${root}/${GUARD_CALLER_PATH}`;
+  if (!sys.exists(file)) return [{ mark: '✗', text: `${GUARD_CALLER_PATH} missing, so the shared Guard does not run here`, fix: ONBOARD }];
+  const { pinned } = repoReleases(sys, root);
+  const branch = await pushBranch(sys.read(`${root}/${WORKFLOW_PATH}`));
+  if (pinned === undefined) {
+    return [{ mark: '▲', text: `${WORKFLOW_PATH} pins no one version, so ${GUARD_CALLER_PATH} is not checked against it`, fix: ONBOARD }];
+  }
+  const text = sys.read(file);
+  const at = await callerAt(text);
+  if (at === undefined) {
+    // onboard writes its own file again, but leaves one it did not write to the repository.
+    const fix = (await callerIsOnboards(text)) ? ONBOARD : `rename or delete it, then ${ONBOARD}`;
+    return [{ mark: '✗', text: `${GUARD_CALLER_PATH} is not the caller onboard writes: another trigger, branch, permission, job, with:, secrets: or steps`, fix }];
+  }
+  if (at.version !== pinned) return [{ mark: '✗', text: `${GUARD_CALLER_PATH} calls the shared Guard at v${at.version}, but ${WORKFLOW_PATH} pins v${pinned}`, fix: ONBOARD }];
+  // A push trigger of several branches, which onboard leaves as the client has it, says no one branch: the rest is still checked.
+  if (branch !== undefined && at.branch !== branch) return [{ mark: '✗', text: `${GUARD_CALLER_PATH} runs on pull requests to ${at.branch}, but ${WORKFLOW_PATH} runs pushes on ${branch}`, fix: ONBOARD }];
+  return [{ mark: '✓', text: `${GUARD_CALLER_PATH} calls the shared Guard at v${pinned}, as ${WORKFLOW_PATH} pins` }];
 }
 
 /** niyam's own hook commands, this release's and older ones, by what they do. */
@@ -426,7 +469,7 @@ async function cloudDoctor(sys: Sys, io: Output, named?: string): Promise<number
   return report(sys, io, about, [
     ['This cloud session', session],
     [`GitHub — as ${about}`, github],
-    ['This repo', repoFindings(sys)],
+    ['This repo', await repoFindings(sys)],
   ]);
 }
 
