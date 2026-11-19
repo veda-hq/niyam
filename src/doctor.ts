@@ -268,11 +268,19 @@ async function callerFindings(sys: Sys): Promise<Finding[]> {
   const file = `${root}/${GUARD_CALLER_PATH}`;
   if (!sys.exists(file)) return [{ mark: '✗', text: `${GUARD_CALLER_PATH} missing, so the shared Guard does not run here`, fix: ONBOARD }];
   const { pinned } = repoReleases(sys, root);
-  const branch = await pushBranch(sys.read(`${root}/${WORKFLOW_PATH}`));
   if (pinned === undefined) {
     return [{ mark: '▲', text: `${WORKFLOW_PATH} pins no one version, so ${GUARD_CALLER_PATH} is not checked against it`, fix: ONBOARD }];
   }
-  const text = sys.read(file);
+  let workflow: string;
+  let text: string;
+  try {
+    workflow = sys.read(`${root}/${WORKFLOW_PATH}`);
+    text = sys.read(file);
+  } catch (error) {
+    // fail-open: a file doctor cannot read is marked ✗, naming why, and the rest of the report still runs.
+    return [{ mark: '✗', text: `${GUARD_CALLER_PATH} not checked: ${message(error)}`, fix: 'make the workflow and its caller readable' }];
+  }
+  const branch = await pushBranch(workflow);
   const at = await callerAt(text);
   if (at === undefined) {
     // onboard writes its own file again, but leaves one it did not write to the repository.

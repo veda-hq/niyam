@@ -87,6 +87,18 @@ const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\
 /** The caller's `uses:`, at the release tag onboard pins. */
 const CALLER_PIN = new RegExp(`^${escape(SHARED_GUARD)}@v(\\d+\\.\\d+\\.\\d+)$`);
 
+/** A `uses:` line calling the shared Guard at a release, whatever else the file holds. */
+const PIN_LINE = new RegExp(`^\\s*uses:\\s*["']?${escape(SHARED_GUARD)}@v(\\d+\\.\\d+\\.\\d+)["']?\\s*(?:#.*)?$`, 'gm');
+
+/**
+ * The releases of the shared Guard that `text` calls, read line by line so a
+ * caller edited by hand still counts: onboard's downgrade guard reads them
+ * beside niyam.yml's, so an older CLI never moves the caller's pin back.
+ */
+export function callerPins(text: string): string[] {
+  return [...text.matchAll(PIN_LINE)].map((match) => match[1] as string);
+}
+
 /**
  * The release and branch of `text` when it is the caller as onboard writes
  * it at some release and branch, read as YAML, so its comments and layout do

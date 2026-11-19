@@ -12,7 +12,7 @@ import { AGENT, AGENT_ID, FakeSys, HOME, PULL_URL, RELEASE_SHA256, ROOT, TOKEN, 
 import { cloudRepoScript } from './cloud.ts';
 import { tarballName } from './names.ts';
 import { CLOUD_SETUP_PATH, GUARD_CALLER_PATH, LEFTOVER_CLOUD_SETUP_PATH } from './onboard-pull.ts';
-import { CALLER_CHECK, callerAt, callerDetail, callerUpdate, callerWhat, guardCaller } from './guard-caller.ts';
+import { CALLER_CHECK, callerAt, callerPins, callerDetail, callerUpdate, callerWhat, guardCaller, pushBranch } from './guard-caller.ts';
 import type { HttpResult } from './types.ts';
 import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
@@ -3214,6 +3214,39 @@ describe('onboard never moves the pin backwards', () => {
       assert.equal(sys.calls.some((call) => call.command === 'git' && call.args.includes('push')), false, 'pushes nothing');
     });
   }
+
+  it("refuses when the shared Guard's caller pins a newer release, here or on GitHub, edited by hand or not", async () => {
+    const here = fresh();
+    here.files.set(CALLER, guardCaller('main', newer).replace('    uses:', '    with:\n      ref: x\n    uses:'));
+    const fromHere = await run(here);
+    assert.equal(fromHere.code, 1);
+    assert.match(fromHere.err.join('\n'), new RegExp(`v${newer} \\(${GUARD_CALLER_PATH.replaceAll('.', '\\.')} in this checkout\\)`));
+
+    const remote = fresh();
+    remote.route('GET', `${REPO}/contents/${GUARD_CALLER_PATH}?ref=main`, encoded(guardCaller('main', newer)));
+    const fromGitHub = await run(remote);
+    assert.equal(fromGitHub.code, 1);
+    assert.match(fromGitHub.err.join('\n'), new RegExp(`v${newer} \\(${GUARD_CALLER_PATH.replaceAll('.', '\\.')} on main\\)`));
+    assert.equal(opened(remote), undefined);
+
+    const unanswered = fresh();
+    unanswered.route('GET', `${REPO}/contents/${GUARD_CALLER_PATH}?ref=main`, { status: 502, json: null });
+    const silent = await run(unanswered);
+    assert.equal(silent.code, 1);
+    assert.match(silent.err.join('\n'), /niyam-guard\.yml on main \(HTTP 502\)/);
+  });
+
+  it("pushBranch reads niyam.yml's one push branch, and none from a file that is not YAML", async () => {
+    assert.equal(await pushBranch('on:\n  push:\n    branches: [trunk]\n'), 'trunk');
+    assert.equal(await pushBranch('on:\n  push:\n    branches: [a, b]\n'), undefined);
+    assert.equal(await pushBranch('on: ['), undefined);
+  });
+
+  it('callerPins reads every release of the shared Guard a file calls, quoted or commented', () => {
+    assert.deepEqual(callerPins(guardCaller('main', '1.2.3')), ['1.2.3']);
+    assert.deepEqual(callerPins("    uses: 'veda-hq/niyam/.github/workflows/shared-guard.yml@v1.0.0' # pinned\n  b:\n    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@v2.0.0\n"), ['1.0.0', '2.0.0']);
+    assert.deepEqual(callerPins('    uses: veda-hq/niyam/.github/workflows/checks.yml@v9.0.0\n    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@main\n'), []);
+  });
 
   it('leaves alone an onboard branch no open pull request uses', async () => {
     const sys = fresh();

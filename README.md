@@ -460,9 +460,10 @@ on any platform without a token store, `niyam env` prints the lock alone.
    `veda-hq/niyam/.github/workflows/shared-guard.yml` at the release
    `niyam.yml` pins, so its check is `niyam-guard / judge`. A run again moves
    its pin with the rest, and its branch when the default branch changes.
-   A caller of its own edited by hand (its header still `onboard`'s) it
-   writes again; where the repo has a `niyam-guard.yml` `onboard` did not
-   write, it refuses, naming the file, and changes nothing. In a
+   `onboard` rewrites a caller it wrote, even one edited by hand, so long as
+   its header is still `onboard`'s. Where the repo has a `niyam-guard.yml`
+   that `onboard` did not write, it refuses, naming the file, and changes
+   nothing. In a
    public repository "By hand:" adds one step, once: allow
    `pull_request_target` for the caller under Settings → Actions → Policies,
    since from 2026-12-02 GitHub blocks it there without such a policy. It writes

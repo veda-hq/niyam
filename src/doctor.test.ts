@@ -1010,6 +1010,18 @@ describe('doctor in a Claude cloud session', () => {
       }
     });
 
+    it('marks a caller it cannot read, and goes on', async () => {
+      const sys = cloud();
+      const read = sys.read.bind(sys);
+      sys.read = (path) => {
+        if (path === CALLER) throw new Error('EACCES');
+        return read(path);
+      };
+      const { code, out } = await check(sys);
+      assert.equal(code, 1);
+      assert.deepEqual(marked(out, '✗'), [`✗  ${GUARD_CALLER_PATH} not checked: EACCES → make the workflow and its caller readable`]);
+    });
+
     it("marks a niyam-guard.yml onboard did not write, which onboard leaves to the repository", async () => {
       const own = `✗  ${GUARD_CALLER_PATH} is not the caller onboard writes: another trigger, branch, permission, job, with:, secrets: or steps → rename or delete it, then niyam onboard again`;
       for (const text of ['on: [', '', 'on: pull_request\njobs:\n  guard:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n']) {

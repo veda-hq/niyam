@@ -45,7 +45,7 @@ import {
   remoteFile,
 } from './onboard-pull.ts';
 import { SIGNING_KEY_VAR, cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
-import { GUARD_CALLER_PATH, callerAt, callerIsOnboards, callerDetail, callerUpdate, callerWanted, callerWhat, policySteps } from './guard-caller.ts';
+import { GUARD_CALLER_PATH, callerAt, callerIsOnboards, callerPins, callerDetail, callerUpdate, callerWanted, callerWhat, policySteps } from './guard-caller.ts';
 import { CLOUD_KEY_TITLE, cloudKeyRefusal, listedKeys, makeCloudKey, pasteLines } from './cloud-key.ts';
 import { newKey, publicLine } from './sshsig.ts';
 import { detail } from './doc-numbers.ts';
@@ -851,13 +851,15 @@ function newest(pins: Pin[], version: string): Pin | undefined {
 
 /**
  * A release newer than `version` that the checkout pins already, in its
- * workflow or its cloud setup file. An older CLI onboarding over it would
- * move the pins back and drop what the newer release added.
+ * workflow, the shared Guard's caller or its cloud setup file. An older CLI
+ * onboarding over it would move the pins back and drop what the newer
+ * release added.
  */
 function newerPinHere(fileAt: (path: string) => string | undefined, version: string): Pin | undefined {
   return newest(
     [
       ...workflowPins(fileAt(WORKFLOW_PATH) ?? '').map((pin) => ({ version: pin, where: `${WORKFLOW_PATH} in this checkout` })),
+      ...callerPins(fileAt(GUARD_CALLER_PATH) ?? '').map((pin) => ({ version: pin, where: `${GUARD_CALLER_PATH} in this checkout` })),
       ...[cloudScriptVersion(fileAt(CLOUD_SETUP_PATH) ?? '')].filter((pin) => pin !== undefined).map((pin) => ({ version: pin, where: `${CLOUD_SETUP_PATH} in this checkout` })),
     ],
     version,
@@ -881,6 +883,9 @@ async function newerPinOnGitHub(sys: Sys, slug: string, token: string, branch: s
     const read = await remoteFile(sys, slug, WORKFLOW_PATH, ref, token);
     if ('problem' in read) return read;
     pins.push(...workflowPins(read.text ?? '').map((pin) => ({ version: pin, where: `${WORKFLOW_PATH} on ${ref}` })));
+    const caller = await remoteFile(sys, slug, GUARD_CALLER_PATH, ref, token);
+    if ('problem' in caller) return caller;
+    pins.push(...callerPins(caller.text ?? '').map((pin) => ({ version: pin, where: `${GUARD_CALLER_PATH} on ${ref}` })));
   }
   return newest(pins, version);
 }
