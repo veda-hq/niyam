@@ -1306,7 +1306,8 @@ with no type, waits 30 seconds, then reads it again from GitHub and decides
 from that read. A type set by then stands, and a parent or sub-issues added
 by then count. Every write, the hourly one's too, reads the issue once more
 just before it and writes only when it is still open with no type, so an
-issue typed or closed since the job read it is left as it is.
+issue typed or closed since the job read it is left as it is. The hourly
+run leaves an issue opened under 30 seconds before to its own run.
 GitHub starts no run for an issue a workflow's own `GITHUB_TOKEN` opens, such
 as a monthly reminder a client's workflow files, so the job also runs on the
 asks job's hourly cron and types every open issue in the repository with

@@ -638,6 +638,25 @@ describe('issueType', () => {
     ]);
     assert.ok(!raced.requests.some((request) => request.method === 'PATCH'));
     assert.deepEqual(raced.slept, [], 'the sweep does not wait: the issues it lists are not new');
+    // One opened within the wait is left to its opener and its own run, which waits; an older one is typed.
+    const young = job({ schedule: '41 * * * *' }, undefined, 'schedule');
+    const ago = (ms: number) => `${new Date(young.now().getTime() - ms).toISOString().slice(0, 19)}Z`;
+    young.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, {
+      status: 200,
+      // #10's time names no real instant, so it is not read as new.
+      json: [row(8, { created_at: ago(5_000) }), row(9, { created_at: ago(OPENER_WAIT_MS + 1_000) }), row(10, { created_at: `${ago(0).slice(0, 8)}32T00:00:00Z` })],
+    });
+    for (const number of [9, 10]) {
+      young.route('GET', `/repos/${SLUG}/issues/${number}`, { status: 200, json: row(number) });
+      young.route('PATCH', `/repos/${SLUG}/issues/${number}`, { status: 200, json: { type: { name: 'Brief' } } });
+    }
+    assert.deepEqual((await run(young)).out, [
+      'issue-type: #8 opened under 30 seconds ago; left for its opener, and its own run',
+      'issue-type: #9 had no type; now a Brief: it has no parent and no sub-issues',
+      'issue-type: #10 had no type; now a Brief: it has no parent and no sub-issues',
+      'issue-type: 2 open issues with no type typed',
+    ]);
+    assert.ok(!young.requests.some((request) => request.url.endsWith('/issues/8')));
     const personal = job({ schedule: '41 * * * *' }, undefined, 'schedule');
     personal.ownerType = 'User';
     assert.deepEqual(await run(personal), { code: 0, out: ['issue-type: GitHub has issue types for organisations only; nothing to do'] });

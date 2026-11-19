@@ -119,11 +119,13 @@ interface Holder {
   from: string;
   parent: string | null;
   subIssues: number;
+  /** When it was opened, as GitHub lists it; undefined where the row says nothing. */
+  opened?: string;
 }
 
 /** A listed issue as a Holder, without its repository's archived flag; undefined for a pull request or a row it cannot read. */
 function asHolder(repo: string, row: unknown, from: string): Omit<Holder, 'archived'> | undefined {
-  const issue = row as { number?: unknown; url?: unknown; pull_request?: unknown; parent_issue_url?: unknown; sub_issues_summary?: { total?: unknown } };
+  const issue = row as { number?: unknown; url?: unknown; pull_request?: unknown; parent_issue_url?: unknown; sub_issues_summary?: { total?: unknown }; created_at?: unknown };
   if (issue.pull_request || typeof issue.number !== 'number' || typeof issue.url !== 'string') return undefined;
   return {
     repo,
@@ -132,6 +134,7 @@ function asHolder(repo: string, row: unknown, from: string): Omit<Holder, 'archi
     from,
     parent: typeof issue.parent_issue_url === 'string' ? issue.parent_issue_url : null,
     subIssues: typeof issue.sub_issues_summary?.total === 'number' ? issue.sub_issues_summary.total : 0,
+    ...(typeof issue.created_at === 'string' ? { opened: issue.created_at } : {}),
   };
 }
 
@@ -459,6 +462,20 @@ export async function typesDrift(sys: Sys, token: string, org: string, slug: str
  */
 export const OPENER_WAIT_MS = 30_000;
 
+/**
+ * The instant GitHub's `created_at` names, in milliseconds; undefined unless
+ * it is UTC to the second (`2026-11-17T09:15:16Z`), as GitHub writes it, and
+ * a real date, so a repaired one (30 February) is not read as another.
+ */
+function openedAt(text: string | undefined): number | undefined {
+  const parts = text === undefined ? null : /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)Z$/.exec(text);
+  if (!parts || text === undefined) return undefined;
+  const [year, month, day, hour, minute, second] = parts.slice(1).map(Number) as [number, number, number, number, number, number];
+  const at = Date.UTC(year, month - 1, day, hour, minute, second);
+  // Date.UTC carries an impossible field into the next one: a round trip that differs names no real instant.
+  return new Date(at).toISOString() === `${text.slice(0, 19)}.000Z` ? at : undefined;
+}
+
 interface IssueEvent {
   action?: string;
   schedule?: string;
@@ -561,7 +578,12 @@ export async function issueType(sys: Sys, io: Output): Promise<number> {
       io.out('issue-type: GitHub has issue types for organisations only; nothing to do');
       return 0;
     }
-    const bare = (await untyped(sys, token, slug)).filter((issue) => issue.number !== approvals);
+    // An issue opened within the wait is its own run's to type, once its opener has had the time; the next hour types it if not.
+    const since = sys.now().getTime() - OPENER_WAIT_MS;
+    const listed = (await untyped(sys, token, slug)).filter((issue) => issue.number !== approvals);
+    const young = listed.filter((issue) => (openedAt(issue.opened) ?? 0) > since);
+    for (const issue of young) io.out(`issue-type: #${issue.number} opened under ${OPENER_WAIT_MS / 1000} seconds ago; left for its opener, and its own run`);
+    const bare = listed.filter((issue) => !young.includes(issue));
     const types = await decideAll(sys, token, bare);
     let typed = 0;
     for (const issue of bare) {
