@@ -2251,3 +2251,25 @@
     listed again; the line says to skip it.
   - Rejected: widening the weekly job's verdict match to `Held for`, which
     would take off the `needs-owner` the routine's own hold puts on.
+- **2026-11-19 — Record: the issue-type job waits for an issue's opener
+  (Work item #466, slice #467).** On #453 an agent typed the issue Work item
+  with `gh api` about ten seconds after `gh issue create`. In the same second,
+  the `Issue type` job, started by the `opened` event, read the issue with no
+  type and wrote Brief. Both writes saw an issue with no type, so a read
+  just before the write alone would not have caught it.
+  - On `opened` or `reopened`, an issue found with no type is read again
+    after 30 seconds (`OPENER_WAIT_MS`). The job decides from that read:
+    type, parent and sub-issues. An issue with a type exits at once.
+  - Every write, the hourly sweep's too, reads the issue just before it and
+    writes only to one still open with no type.
+  - The sweep leaves an issue GitHub shows changed (`updated_at`) under 30
+    seconds before, so it cannot beat that issue's own run to it. Not
+    `created_at`, which a reopen leaves as the first opening. An issue
+    edited in that time, or one no run started for, waits for the next
+    hour.
+  - GitHub's issue PATCH cannot be made conditional on the current type, so
+    an opener whose type lands in the instant between the last read and the
+    write can still lose it. A type written after the job's wins anyway.
+  - Rejected: reading the timeline after the write and putting back another
+    actor's type (timeline events lag the write, and a second write is one
+    more to race); a shorter wait (#453's opener took ten seconds).

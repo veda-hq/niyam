@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ISSUE_TYPES, applyTypes, issueType, typeFor, typesChange, typesDetail, typesLines, typesPlan, typesQuestion, withinApproved } from './issue-types.ts';
+import { ISSUE_TYPES, OPENER_WAIT_MS, applyTypes, issueType, typeFor, typesChange, typesDetail, typesLines, typesPlan, typesQuestion, withinApproved } from './issue-types.ts';
 import { Board, OWNER_TOKEN, SLUG } from './fake-board.test.ts';
 import { FakeSys, ROOT, capture } from './fake.test.ts';
 
@@ -503,6 +503,62 @@ describe('issueType', () => {
     }
   });
 
+  /** Issue #7 as GitHub holds it, read live, and a job whose wait lets `opener` change it, as #453's opener did. */
+  function race(opener: (issue: Record<string, unknown>) => void): { sys: FakeSys; issue: Record<string, unknown> } {
+    const sys = job(opened());
+    const issue: Record<string, unknown> = { number: 7, state: 'open', type: null, sub_issues_summary: { total: 0 } };
+    sys.route('GET', URL, () => ({ status: 200, json: { ...issue } }));
+    sys.route('PATCH', URL, () => {
+      issue.type = { name: (sys.requests.at(-1)?.body as { type: string }).type };
+      return { status: 200, json: { ...issue } };
+    });
+    sys.sleep = (ms: number) => {
+      sys.slept.push(ms);
+      opener(issue);
+      return Promise.resolve();
+    };
+    return { sys, issue };
+  }
+
+  it('leaves the type an opener sets in a second call, while the job waits, as on #453', async () => {
+    const { sys, issue } = race((it) => {
+      it.type = { name: 'Work item' };
+    });
+    assert.deepEqual(await run(sys), { code: 0, out: ['issue-type: #7 is a Work item already; nothing to do'] });
+    assert.deepEqual(sys.slept, [OPENER_WAIT_MS]);
+    assert.ok(!sys.requests.some((request) => request.method === 'PATCH'));
+    assert.deepEqual(issue.type, { name: 'Work item' });
+  });
+
+  it('decides from the issue after the wait, so a parent or sub-issues added since count', async () => {
+    const parented = race((it) => {
+      it.parent_issue_url = `https://api.github.com/repos/${SLUG}/issues/2`;
+    });
+    parented.sys.route('GET', `/repos/${SLUG}/issues/2`, { status: 200, json: { number: 2, type: { name: 'Work item' } } });
+    assert.deepEqual((await run(parented.sys)).out, ['issue-type: #7 had no type; now a Slice: its parent #2 is a Work item']);
+    const parent = race((it) => {
+      it.sub_issues_summary = { total: 2 };
+    });
+    assert.deepEqual((await run(parent.sys)).out, ['issue-type: #7 had no type; now a Work item: it has 2 sub-issues']);
+    assert.deepEqual(parent.issue.type, { name: 'Work item' });
+  });
+
+  it('reads the type once more just before it writes, and leaves one set since', async () => {
+    const sys = job(opened());
+    let reads = 0;
+    sys.route('GET', URL, () => ({ status: 200, json: { number: 7, state: 'open', type: ++reads > 2 ? { name: 'Work item' } : null } }));
+    assert.deepEqual((await run(sys)).out, ['issue-type: #7 is a Work item now, typed since the job read it; left as it is']);
+    assert.equal(reads, 3);
+    assert.ok(!sys.requests.some((request) => request.method === 'PATCH'));
+  });
+
+  it('waits only for an issue with no type', async () => {
+    const typed = job(opened());
+    typed.route('GET', URL, { status: 200, json: { number: 7, state: 'open', type: { name: 'Decision' } } });
+    await run(typed);
+    assert.deepEqual(typed.slept, []);
+  });
+
   it('gives an issue with no parent and no sub-issues a Brief', async () => {
     const sys = job(opened());
     sys.route('GET', URL, { status: 200, json: { number: 7, state: 'open', type: null } });
@@ -538,12 +594,13 @@ describe('issueType', () => {
 
   it('types, hourly, every open issue here with no type but the Approvals issue, as a workflow token opens issues no run sees', async () => {
     const sys = job({ schedule: '41 * * * *' }, undefined, 'schedule');
-    const row = (number: number, extra: object = {}) => ({ number, url: `https://api.github.com/repos/${SLUG}/issues/${number}`, type: null, ...extra });
+    const row = (number: number, extra: object = {}) => ({ number, url: `https://api.github.com/repos/${SLUG}/issues/${number}`, state: 'open', type: null, ...extra });
     sys.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, {
       status: 200,
       json: [row(3), row(8), row(9, { parent_issue_url: `https://api.github.com/repos/${SLUG}/issues/2` }), row(10, { pull_request: {} })],
     });
     sys.route('GET', `/repos/${SLUG}/issues/2`, { status: 200, json: { number: 2, type: { name: 'Slice' } } });
+    for (const number of [8, 9]) sys.route('GET', `/repos/${SLUG}/issues/${number}`, { status: 200, json: row(number) });
     sys.route('PATCH', `/repos/${SLUG}/issues/8`, { status: 200, json: { type: { name: 'Brief' } } });
     sys.route('PATCH', `/repos/${SLUG}/issues/9`, { status: 200, json: { type: { name: 'State' } } });
     assert.deepEqual(await run(sys), {
@@ -560,13 +617,51 @@ describe('issueType', () => {
       status: 200,
       json: [row(12, { parent_issue_url: `https://api.github.com/repos/${SLUG}/issues/11` }), row(11, { sub_issues_summary: { total: 1 } })],
     });
+    for (const number of [11, 12]) family.route('GET', `/repos/${SLUG}/issues/${number}`, { status: 200, json: row(number) });
     family.route('PATCH', `/repos/${SLUG}/issues/12`, { status: 200, json: { type: { name: 'Slice' } } });
     family.route('PATCH', `/repos/${SLUG}/issues/11`, { status: 200, json: { type: { name: 'Work item' } } });
     assert.deepEqual((await run(family)).out.slice(0, 2), [
       'issue-type: #12 had no type; now a Slice: its parent #11 is a Work item',
       'issue-type: #11 had no type; now a Work item: it has 1 sub-issue',
     ]);
-    assert.ok(!family.requests.some((request) => request.method === 'GET' && request.url.endsWith('/issues/11')), 'a parent being typed is not asked of GitHub');
+    // #11 is read once, just before its own write; its type as #12's parent is the one it is about to get.
+    assert.equal(family.requests.filter((request) => request.method === 'GET' && request.url.endsWith('/issues/11')).length, 1, 'a parent being typed is not asked of GitHub');
+    // An issue typed after the sweep listed it keeps that type, and is not counted.
+    const raced = job({ schedule: '41 * * * *' }, undefined, 'schedule');
+    raced.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, { status: 200, json: [row(8), row(9)] });
+    raced.route('GET', `/repos/${SLUG}/issues/8`, { status: 200, json: row(8, { type: { name: 'Work item' } }) });
+    raced.route('GET', `/repos/${SLUG}/issues/9`, { status: 200, json: row(9, { state: 'closed' }) });
+    assert.deepEqual((await run(raced)).out, [
+      'issue-type: #8 is a Work item now, typed since the job read it; left as it is',
+      'issue-type: #9 is closed now, since the job read it; left as it is',
+      'issue-type: 0 open issues with no type typed',
+    ]);
+    assert.ok(!raced.requests.some((request) => request.method === 'PATCH'));
+    assert.deepEqual(raced.slept, [], 'the sweep does not wait: the issues it lists are not new');
+    // One opened or reopened within the wait (GitHub's updated_at; created_at stays the first opening) is left to its
+    // opener and a later run; an older one is typed.
+    const young = job({ schedule: '41 * * * *' }, undefined, 'schedule');
+    const ago = (ms: number) => `${new Date(young.now().getTime() - ms).toISOString().slice(0, 19)}Z`;
+    young.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, {
+      status: 200,
+      // #10's time names no real instant, so it is not read as new.
+      json: [
+        row(8, { created_at: '2026-01-05T10:00:00Z', updated_at: ago(5_000) }),
+        row(9, { updated_at: ago(OPENER_WAIT_MS + 1_000) }),
+        row(10, { updated_at: `${ago(0).slice(0, 8)}32T00:00:00Z` }),
+      ],
+    });
+    for (const number of [9, 10]) {
+      young.route('GET', `/repos/${SLUG}/issues/${number}`, { status: 200, json: row(number) });
+      young.route('PATCH', `/repos/${SLUG}/issues/${number}`, { status: 200, json: { type: { name: 'Brief' } } });
+    }
+    assert.deepEqual((await run(young)).out, [
+      'issue-type: #8 changed under 30 seconds ago; left for its opener, and the next run',
+      'issue-type: #9 had no type; now a Brief: it has no parent and no sub-issues',
+      'issue-type: #10 had no type; now a Brief: it has no parent and no sub-issues',
+      'issue-type: 2 open issues with no type typed',
+    ]);
+    assert.ok(!young.requests.some((request) => request.url.endsWith('/issues/8')));
     const personal = job({ schedule: '41 * * * *' }, undefined, 'schedule');
     personal.ownerType = 'User';
     assert.deepEqual(await run(personal), { code: 0, out: ['issue-type: GitHub has issue types for organisations only; nothing to do'] });
