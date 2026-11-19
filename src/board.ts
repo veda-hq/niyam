@@ -844,12 +844,15 @@ export async function boardStarted(sys: Sys, token: string, slug: string, slice:
   const items = await projectItems(sys, token, slug);
   const steps = stepMoves(items.step, parent);
   const held = items.status.filter((item) => item.number === slice);
-  const moved = await move(sys, token, [...held.map((item) => ({ item, option: 'In Progress', name: `slice #${slice}`, what: `slice #${slice} is In Progress` })), ...steps.moves]);
-  // A slice on no Project has nothing to move: say so, rather than let "nothing moved" read as "in place".
+  const movable = held.filter((item) => optionOf(item.field, 'In Progress'));
+  const moved = await move(sys, token, [...movable.map((item) => ({ item, option: 'In Progress', name: `slice #${slice}`, what: `slice #${slice} is In Progress` })), ...steps.moves]);
+  // A slice on no Project, or on one whose Status cannot take it, has nothing to move: say so, rather than let "nothing moved" read as "in place".
   const missing =
     held.length === 0
       ? [`! board: slice #${slice} is not on the board: no open Project of ${slug.split('/')[0]} with a Status field holds it unarchived, so it did not move to In Progress`]
-      : [];
+      : held
+          .filter((item) => !movable.includes(item))
+          .map((item) => `! board: Status in "${item.project}" has no option In Progress, so slice #${slice} stays where it is; add the option to the Project's Status field`);
   return [...moved, ...missing, ...steps.lacking];
 }
 

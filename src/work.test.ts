@@ -1269,7 +1269,11 @@ describe('prePush', () => {
         { number: 5, title: 'other', fields: { Title: null, Status: ['Todo'], Notes: null }, items: [{ issue: 12, values: { Status: 'Todo' } }, { issue: 20, values: {} }] },
         { number: 6, title: 'no board', fields: { Title: null }, items: [{ issue: 12, values: {} }] },
       );
-      assert.deepEqual(await push(sys, pushing), { code: 0, err: [] });
+      // The Project whose Status cannot take In Progress is named, not passed over as in place (#473).
+      assert.deepEqual(await push(sys, pushing), {
+        code: 0,
+        err: [`! board: Status in "other" has no option In Progress, so slice #12 stays where it is; add the option to the Project's Status field`],
+      });
       assert.deepEqual(moves(board), []);
       // A Project with neither field is not read for its items.
       assert.ok(!sys.requests.some((r) => r.url.includes('/projectsV2/6/items')));
@@ -1590,6 +1594,23 @@ describe('prStarted', () => {
     assert.deepEqual(await run(sys), {
       code: 0,
       out: ['! board: slice #12 is not on the board: no open Project of example-org with a Status field holds it unarchived, so it did not move to In Progress'],
+      err: [],
+    });
+    assert.deepEqual(writes(board), []);
+  });
+
+  it("says the Project's Status has no option In Progress, not that the slice is in place", async () => {
+    const sys = actions('Slice: #12');
+    const board = new RestBoard(sys);
+    board.projects[0]!.fields.Status = ['Todo', 'Done'];
+    board.projects[0]!.items = [
+      { issue: 12, values: { Status: 'Todo' } },
+      { issue: 10, values: { Status: 'Todo', Step: 'Build' } },
+    ];
+    board.workItems = [10];
+    assert.deepEqual(await run(sys), {
+      code: 0,
+      out: [`! board: Status in "example-app work" has no option In Progress, so slice #12 stays where it is; add the option to the Project's Status field`],
       err: [],
     });
     assert.deepEqual(writes(board), []);

@@ -519,6 +519,21 @@ describe('boardStarted', () => {
     ]);
   });
 
+  it("says when a Project's Status has no option In Progress, and still makes the other moves", async () => {
+    const sys = new FakeSys();
+    slice(sys);
+    const board = new RestBoard(sys);
+    board.projects[0]!.fields.Status = ['Todo', 'Done'];
+    board.projects.push({ number: 5, title: 'roadmap', fields: { Title: null, Status: STATUS_OPTIONS }, items: [{ issue: 12, values: { Status: 'Todo' } }] });
+    board.workItems = [10];
+    assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+      '✓ board: slice #12 is In Progress in "roadmap"',
+      '✓ board: work item #10 is at Step Build in "example-app work"',
+      `! board: Status in "example-app work" has no option In Progress, so slice #12 stays where it is; add the option to the Project's Status field`,
+    ]);
+    assert.equal(board.projects[0]!.items[0]!.values.Status, 'Todo');
+  });
+
   it('writes nothing for a slice In Progress already and a work item at Build', async () => {
     const sys = new FakeSys();
     slice(sys);

@@ -667,8 +667,9 @@ after Work rules on every event Work rules runs on (the pull request opening
 or reopening, a push to it, an edit of it) and again when a failed Work rules
 is re-run, so a slice that could not be built when its pull request opened
 moves once it can. A slice and work item already where they belong are not
-written again, and a slice no open Project holds gets a line saying it is
-not on the board. The client's
+written again. A slice no open Project holds gets a line saying it is not
+on the board, and one on a Project whose Status has no In Progress option
+gets a line naming that Project. The client's
 workflow passes it the app's client id and private key as the
 `NIYAM_BOARD_APP_ID` and `NIYAM_BOARD_APP_KEY` secrets. With `board` on,
 onboard writes them under the `niyam` job's secrets, the pull request job
