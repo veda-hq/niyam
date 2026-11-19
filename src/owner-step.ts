@@ -1,9 +1,11 @@
 import { SETTINGS_PATH, sameLogin } from './agent.ts';
 import { type Feature, featuresIn } from './features.ts';
+import { CALLER_CHECK, GUARD_CALLER_PATH, callerAt, policySteps } from './guard-caller.ts';
 import { GITHUB_HOST, GITHUB_WEB } from './host.ts';
 import { ISSUE_TYPES } from './issue-types.ts';
 import type { Finding } from './layout.ts';
-import { CLI } from './names.ts';
+import { CLI, PRODUCT } from './names.ts';
+import { workflowPins } from './onboard.ts';
 import { WORKFLOW_PATH } from './onboard-pull.ts';
 import { signInLines } from './owner-login.ts';
 import { agentSession } from './push-identity.ts';
@@ -31,6 +33,12 @@ export const FEATURE_CHECKS: Partial<Record<Feature, string>> = {
 };
 /** GitHub Actions' app, which reports the workflow's checks. */
 const ACTIONS_APP = 15368;
+/**
+ * niyam's own Guard check, which the shared Guard's takes the place of in
+ * niyam's ruleset alone (#472): in any other repository a check of that
+ * name is its own, and stays.
+ */
+const OWN_GUARD = 'Guard';
 /** How long one gh call gets. */
 const GH_MS = 60_000;
 /** How long the event loop gets between gh calls, for a Ctrl-C's handler. */
@@ -447,12 +455,51 @@ function passedOnPull(gh: Gh, repo: string, names: string[]): Map<string, Passed
   return found;
 }
 
+/** Whether the shared Guard's check may be required: yes with a note on its proof, no with why, or undefined when the repository has no caller and none was asked for. */
+type SharedGuard = { note: string } | { skipped: Finding } | undefined;
+
+/**
+ * Whether the ruleset may require the shared Guard's check: only when the
+ * default branch's caller is as onboard writes it, at the release
+ * niyam.yml pins, on the default branch, and the check reported `success`
+ * from GitHub Actions on the head of the last pull request merged there.
+ * Another app reporting that name proves nothing: it is the spoof the
+ * shared Guard is there to stop. `asked`: the owner named the check, so a
+ * repository with no caller is a ✗, not silence. `what`: how a ✗ starts.
+ */
+async function sharedGuard(gh: Gh, repo: string, asked: boolean, what: string): Promise<SharedGuard> {
+  const not = (why: string, fix: string): SharedGuard => ({ skipped: { mark: '✗', text: `${what}: ${why}`, fix } });
+  const onboard = `${CLI} onboard there, merge its pull request, then run this again`;
+  const text = fileIn(gh, repo, GUARD_CALLER_PATH);
+  if (text === undefined) return asked ? not(`${repo} has no ${GUARD_CALLER_PATH} on its default branch, so nothing runs it`, onboard) : undefined;
+  const at = await callerAt(text.replaceAll('\r\n', '\n'));
+  if (at === undefined) {
+    return not(`${GUARD_CALLER_PATH} on the default branch is not the shared Guard's caller as onboard writes it`, `rename or delete a ${GUARD_CALLER_PATH} onboard did not write, then ${onboard}`);
+  }
+  const pins = [...new Set(workflowPins(workflowIn(gh, repo).text ?? ''))];
+  if (pins.length !== 1) return not(`${WORKFLOW_PATH} on the default branch pins ${pins.length === 0 ? 'no' : 'more than one'} release, so the caller's is not known to be the one`, onboard);
+  if (at.version !== pins[0]) return not(`${GUARD_CALLER_PATH} calls the shared Guard at v${at.version}, but ${WORKFLOW_PATH} pins v${String(pins[0])}`, onboard);
+  const about = must(gh.api(`repos/${repo}`), `reading ${repo}`) as { default_branch?: unknown; private?: unknown; visibility?: unknown } | null;
+  const branch = about?.default_branch;
+  if (typeof branch !== 'string' || !branch) return not(`GitHub did not say ${repo}'s default branch`, 'run this again');
+  if (at.branch !== branch) return not(`${GUARD_CALLER_PATH} runs on pull requests into ${at.branch}, not the default branch ${branch}`, onboard);
+  const passed = passedOnPull(gh, repo, [CALLER_CHECK]).get(CALLER_CHECK) as Passed;
+  if ('app' in passed && passed.app === ACTIONS_APP) {
+    return { note: `${CALLER_CHECK} passed on ${repo}#${passed.pull}, reported by ${passed.appName}; ${GUARD_CALLER_PATH} runs it on pull requests into ${branch} alone, so a ruleset that also targets other branches would hold theirs` };
+  }
+  const why = 'app' in passed ? `${CALLER_CHECK} on ${repo}#${passed.pull} was reported by ${passed.appName}, not GitHub Actions` : passed.problem;
+  const visible = about?.private === false || about?.visibility === 'public';
+  const runs = `Guard runs from the default branch's copy of its caller, so it first reports on the pull request after the one that adds it${visible ? ', and from 2026-12-02 GitHub runs it in a public repository only once a policy allows pull_request_target' : ''}`;
+  const merge = 'merge a pull request it passes on, then run this again';
+  return not(`${why}; ${runs}`, visible ? `${policySteps(repo).byHand} Then ${merge}` : merge);
+}
+
 /**
  * The ruleset's required checks, with the checks of the features the
  * repository's settings turn on added; every other check and rule stays as
  * it is, and none is taken away.
  */
-function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<Step, { step: 'required-checks' }>): Found {
+async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<Step, { step: 'required-checks' }>): Promise<Found> {
   const listed = must(gh.api(`repos/${repo}/rulesets?includes_parents=false&per_page=100`), `listing ${repo}'s rulesets`) as { id?: unknown; name?: unknown }[] | null;
   const matches = (listed ?? []).filter((one) => String(one.id) === ruleset || (typeof one.name === 'string' && same(one.name, ruleset)));
   if (matches.length !== 1) {
@@ -478,10 +525,25 @@ function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<S
   const jobs = turnedOn.some((check) => !had.includes(check)) || required.some(stale) ? workflowJobs(gh, repo) : new Set<string>();
   const runs = (check: string): boolean => had.includes(check) || (jobs instanceof Set && jobs.has(check.slice(CHECK_PREFIX.length)));
   const swaps = [...new Set(required.filter(stale))].map((from) => ({ from, to: runs(renamed(from)) ? renamed(from) : undefined }));
-  const target = (check: string): string | undefined => (stale(check) ? swaps.find((swap) => swap.from === check)?.to : check);
   const checks = turnedOn.filter(runs);
+  // The shared Guard's check, on its own proof (sharedGuard), never --check's, which any one app passes.
+  const own = same(repo, PRODUCT);
+  // Required already from another app, or from any, it is the spoof itself: it is bound to GitHub Actions, on the same proof.
+  const bound = (rules: Rule[]): { context: string; integration_id?: number }[] => rules.find((rule) => rule.type === 'required_status_checks')?.parameters?.required_status_checks ?? [];
+  const loose = (rules: Rule[]): { context: string; integration_id?: number } | undefined => bound(rules).find((check) => check.context === CALLER_CHECK && check.integration_id !== ACTIONS_APP);
+  const looseBefore = loose(before.rules);
+  const from = looseBefore?.integration_id === undefined ? 'any app' : `app ${looseBefore.integration_id}`;
+  const sound = had.includes(CALLER_CHECK) && looseBefore === undefined;
+  const what = looseBefore ? `leaving ${CALLER_CHECK} required from ${from}, not bound to GitHub Actions` : sound ? `keeping ${OWN_GUARD}, not ${CALLER_CHECK} in its place` : `not requiring ${CALLER_CHECK}`;
+  const guard = !sound || (own && required.includes(OWN_GUARD)) ? await sharedGuard(gh, repo, named.includes(CALLER_CHECK) || looseBefore !== undefined, what) : undefined;
+  const guardRuns = guard !== undefined && 'note' in guard;
+  const guardRebind = guardRuns && looseBefore !== undefined;
+  // In niyam's ruleset its own Guard check goes, the shared one in its place, once that has passed (#472).
+  const swapsGuard = (check: string): boolean => own && guardRuns && check === OWN_GUARD;
+  const guardAdded = guardRuns && !had.includes(CALLER_CHECK) ? [CALLER_CHECK] : [];
+  const target = (check: string): string | undefined => (stale(check) ? swaps.find((swap) => swap.from === check)?.to : swapsGuard(check) ? CALLER_CHECK : check);
   // Each check the owner named, unless required already or a feature's: added only with proof that pull requests run it.
-  const toProve = named.filter((check) => !had.includes(check) && !turnedOn.includes(check));
+  const toProve = named.filter((check) => check !== CALLER_CHECK && !had.includes(check) && !turnedOn.includes(check));
   const proof = passedOnPull(gh, repo, toProve);
   const proven = toProve.flatMap((context) => {
     const passed = proof.get(context);
@@ -495,6 +557,7 @@ function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<S
       text: `not adding ${check}: ${why(check)}, so it would never report and would hold every pull request`,
       fix: `${CLI} onboard there, then run this again`,
     }));
+  if (guard !== undefined && 'skipped' in guard) skipped.push(guard.skipped);
   for (const check of toProve) {
     const passed = proof.get(check);
     if (passed && 'problem' in passed) {
@@ -503,7 +566,7 @@ function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<S
   }
   const unique = (names: string[]): string[] => [...new Set(names)];
   const afterSwaps = unique(required.flatMap((check) => target(check) ?? []));
-  const missing = [...checks, ...proven.map((check) => check.context)].filter((check) => !afterSwaps.includes(check));
+  const missing = [...checks, ...proven.map((check) => check.context), ...guardAdded].filter((check) => !afterSwaps.includes(check));
   const after = [...afterSwaps, ...missing];
   const list = (names: string[]): string => (names.length === 0 ? 'none' : names.join(', '));
   const notes = [`${file} turns on the checks ${list(turnedOn)}`];
@@ -511,23 +574,27 @@ function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<S
     const passed = proof.get(check.context) as Extract<Passed, { app: number }>;
     notes.push(`${check.context} passed on ${repo}#${passed.pull}, reported by ${passed.appName}; a check that runs only for some paths would hold a pull request it skips`);
   }
+  if (guard !== undefined && 'note' in guard) notes.push(guard.note);
   notes.push(`before: ${list(required)}`, `after:  ${list(after)}`);
   const namedHad = named.filter((check) => had.includes(check) && !turnedOn.includes(check));
-  if (missing.length === 0 && swaps.length === 0) {
+  const guardSwap = required.some(swapsGuard);
+  if (missing.length === 0 && swaps.length === 0 && !guardSwap && !guardRebind) {
     return { changes: [], notes, skipped, already: `the ruleset ${before.name} requires every check ${file} turns on${namedHad.length > 0 ? `, and ${list(namedHad)}` : ''}` };
   }
   // Built on the ruleset as it is just before the write, so an edit made while the owner read the plan is kept.
   const withChecks = (current: Rule[]): Rule[] => {
-    // Each check before P-53 in its place under its niyam name, its app kept, or gone; a second copy of a name goes.
+    // Each check before P-53 in its place under its niyam name, its app kept, or gone; niyam's Guard as the shared
+    // Guard's, from GitHub Actions; a second copy of a name goes.
     const moved = (list: { context: string; integration_id?: number }[]): { context: string; integration_id?: number }[] =>
       list
         .flatMap((check) => {
+          if (swapsGuard(check.context) || (guardRuns && check.context === CALLER_CHECK)) return [{ context: CALLER_CHECK, integration_id: ACTIONS_APP }];
           const to = stale(check.context) ? (runs(renamed(check.context)) ? renamed(check.context) : undefined) : check.context;
           return to === undefined ? [] : [{ ...check, context: to }];
         })
         .filter((check, at, all) => all.findIndex((one) => one.context === check.context) === at);
     const kept = moved(current.find((rule) => rule.type === 'required_status_checks')?.parameters?.required_status_checks ?? []).map((check) => check.context);
-    const added = [...checks.map((context) => ({ context, integration_id: ACTIONS_APP })), ...proven].filter((check) => !kept.includes(check.context));
+    const added = [...[...checks, ...guardAdded].map((context) => ({ context, integration_id: ACTIONS_APP })), ...proven].filter((check) => !kept.includes(check.context));
     return current.some((rule) => rule.type === 'required_status_checks')
       ? current.map((rule) =>
           rule.type === 'required_status_checks'
@@ -541,6 +608,8 @@ function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<S
       {
         plan: [
           ...swaps.map(({ from, to }) => (to ? `require ${to} in place of ${from}` : `drop ${from}, which no workflow reports since P-53`)),
+          ...(guardSwap ? [`require ${CALLER_CHECK} in place of ${OWN_GUARD}`] : []),
+          ...(guardRebind ? [`require ${CALLER_CHECK} from GitHub Actions, not ${from}`] : []),
           ...(missing.length > 0 ? [`also require ${missing.join(', ')}`] : []),
         ].reduce((plan, part, at) => `${plan}${at === 0 ? ' ' : ', and '}${part}`, `make the ruleset ${before.name} of ${repo}`),
         apply: async (checkpoint) => {
@@ -548,10 +617,13 @@ function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<S
           await checkpoint();
           must(gh.api(`repos/${repo}/rulesets/${id}`, { method: 'PUT', body: { rules: withChecks(current.rules) } }), `updating the ruleset ${before.name}`);
           const now = read();
-          const lacking = unique([...checks, ...proven.map((check) => check.context), ...swaps.flatMap(({ to }) => to ?? [])]).filter((check) => !contexts(now.rules).includes(check));
+          const lacking = unique([...checks, ...proven.map((check) => check.context), ...guardAdded, ...swaps.flatMap(({ to }) => to ?? []), ...(guardSwap ? [CALLER_CHECK] : [])]).filter(
+            (check) => !contexts(now.rules).includes(check),
+          );
           if (lacking.length > 0) throw new Error(`GitHub shows the ruleset without ${lacking.join(', ')} afterwards`);
-          const left = contexts(now.rules).filter(stale);
+          const left = contexts(now.rules).filter((check) => stale(check) || swapsGuard(check));
           if (left.length > 0) throw new Error(`GitHub shows the ruleset still requiring ${left.join(', ')} afterwards`);
+          if (guardRuns && loose(now.rules)) throw new Error(`GitHub shows the ruleset requiring ${CALLER_CHECK} from another app than GitHub Actions afterwards`);
           if (others(now.rules) !== others(current.rules)) throw new Error(`GitHub shows the ruleset's other rules changed afterwards; check it at ${GITHUB_WEB}/${repo}/rules/${id}`);
           return `the ruleset ${now.name} requires ${list(contexts(now.rules))}`;
         },
@@ -676,7 +748,7 @@ async function signedIn(
   const notOwner = step.step === 'issue-types' ? (ownsOrg(gh, step.org) ? undefined : `${login} is not an owner of the organisation ${step.org}`) : notRepoOwner(gh, login, step.repo);
   if (notOwner) throw new Error(`${notOwner}; sign in to ${GITHUB_HOST} in the browser as the owner and run it again. Nothing changed`);
 
-  const found = step.step === 'issue-types' ? issueTypes(gh, step.org) : step.step === 'label' ? label(gh, step) : requiredChecks(gh, step);
+  const found = step.step === 'issue-types' ? issueTypes(gh, step.org) : step.step === 'label' ? label(gh, step) : await requiredChecks(gh, step);
   for (const note of found.notes) io.out(`  ${note}`);
   results.push(...found.skipped);
   const skipped = found.skipped.length > 0 ? 1 : 0;

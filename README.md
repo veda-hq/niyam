@@ -1653,6 +1653,27 @@ niyam owner-step required-checks <owner/repo> <ruleset id or name> [--check <nam
   workflow runs only for some paths can pass there and then never report
   on a pull request that skips them, holding it: name only checks that run
   on every pull request.
+- `required-checks` also requires the shared Guard's check,
+  `niyam-guard / judge`, when the default branch's
+  `.github/workflows/niyam-guard.yml` is the caller `onboard` writes, on the
+  default branch, at the release `niyam.yml` pins. It adds the check only
+  once it reported `success` on the head commit of the last pull request
+  merged into the default branch from GitHub Actions alone, and requires it
+  from GitHub Actions: another app reporting that name is the spoof the
+  shared Guard stops. `--check niyam-guard / judge` gets this proof, never
+  the one-app proof of any other `--check`. A ruleset that requires the
+  check already from another app, or from any, gets it bound to GitHub
+  Actions on the same proof. Until then it is a `✗` saying why. Guard runs
+  from the default branch's copy of its caller, so it first reports on the
+  pull request after the one that adds the caller; in a public repository,
+  from 2026-12-02, it runs only once a policy allows `pull_request_target`,
+  and the `✗` names where. A repository with no caller hears nothing of the
+  check unless it is named with `--check` or required already from another
+  app. In
+  niyam's own ruleset, once the check has passed, it takes the place of
+  niyam's `Guard`, as a `process-rules / …` check gives way to its
+  `niyam / …` one; in any other repository a check named `Guard` is its
+  own, and stays.
 
 It refuses in an agent session (`NIYAM_AGENT` set, or `CLAUDECODE=1`)
 and without a terminal. It makes a new folder in the user's temporary folder
