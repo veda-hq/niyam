@@ -1,0 +1,21 @@
+# A live test of the shared Guard (#496): two jobs that report the names of
+# checks main's ruleset requires, and pass without checking anything. Guard
+# must refuse this pull request, which is never merged.
+name: spoof-test
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  ci:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"
+  judge:
+    name: niyam-guard / judge
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"
