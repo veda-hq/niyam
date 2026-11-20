@@ -526,9 +526,12 @@ describe('judging a pull request', () => {
       const files = [modified('.githooks/pre-push'), modified('.husky/pre-commit')];
       const pull = draft('merge queue: checking #2 on main (0aa2f20), stacked on #3');
       const over = { ...tested(2, 'Slice: #10'), ...tested(3, 'no slice') };
-      const refusals = await judge(github({ files, body: githooks, pull, over }), REPO, 1, OWNERS);
+      const gh = github({ files, body: githooks, pull, over });
+      const refusals = await judge(gh, REPO, 1, OWNERS);
       // .githooks/ passes as #2, though #3 names no slice; .husky/ passes as neither.
       assert.deepEqual(refusals.map((one) => one.file), ['.husky/pre-commit']);
+      // The draft's diff is read once, however many pull requests it tests.
+      assert.equal(gh.calls.filter((call) => call.startsWith(`/repos/${REPO}/pulls/1/files`)).length, 1);
       assert.match(refusals[0].message, /^This is Mergify's merge-queue draft testing #2, #3, and none of them passes this\. As #2: /);
     });
 

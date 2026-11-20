@@ -1845,7 +1845,7 @@ goes on. Any other failure to read it fails closed.
 - opened as `mergify[bot]` on a `mergify/merge-queue/` branch of the repository;
 - titled `merge queue: checking #A on main (sha)`, with `, stacked on #B` when it tests several.
 
-Guard judges that draft's own diff once with each tested pull request's title, author and body. It refuses a file only when every tested pull request leads to that refusal. So a guard file passes when one tested pull request's approved slice names it, or when its onboard or Dependabot exemption holds for the draft's diff. Guard never passes a draft for being Mergify's: whatever is pushed to it still needs the owner's approval.
+Guard judges that draft's own diff once with each tested pull request's title, author and body. It refuses a file only when every tested pull request leads to that refusal. So a guard file passes when one tested pull request's approved slice names it, or when its onboard or Dependabot exemption holds for the draft's diff. Guard never passes a draft solely because it is Mergify's: a file still needs a tested pull request's owner-approved slice, unless an existing onboard or Dependabot exemption applies.
 
 Any other draft, or one whose title names no pull request, is judged as itself, and so is any draft where work rules are off. A tested pull request GitHub cannot give fails closed.
 

@@ -535,11 +535,21 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, 
   // Without work rules no slice is judged, so a draft is judged as itself: no tested pull request changes that.
   const tested = unjudged ? undefined : mergifyTests(pull, repo, pr);
   if (!tested) return judgeAs(gh, repo, pr, pull, pull, owners, ownPaths, branch, unjudged, approvals);
-  // Mergify's merge-queue draft: its own diff, judged once as each pull request it tests (#507).
+  // Mergify's merge-queue draft: its own diff, judged once as each pull request it tests (#507). Each REST read
+  // is made once across the runs, so a stack costs a read per tested pull request and slice, not another of the diff.
+  const reads = new Map();
+  const once = {
+    get: (path, options) => {
+      const key = `${options?.raw ? 'raw' : 'json'} ${path}`;
+      if (!reads.has(key)) reads.set(key, gh.get(path, options));
+      return reads.get(key);
+    },
+    post: (path, body) => gh.post(path, body),
+  };
   const runs = [];
   for (const number of tested) {
-    const as = await read(gh, `/repos/${repo}/pulls/${number}`);
-    runs.push(await judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals));
+    const as = await read(once, `/repos/${repo}/pulls/${number}`);
+    runs.push(await judgeAs(once, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals));
   }
   // A refusal stands only where every tested pull request leads to one, file by file.
   const key = (refusal) => refusal.file ?? refusal.message;

@@ -2448,9 +2448,10 @@
     tested it in draft #3822, which Guard judged as a pull request of its
     own, with no onboard title and no `Slice:` line. Mergify then dropped
     #3821 from the queue, and it was merged directly at 13:01Z.
-  - Guard now judges such a draft's own diff once as each pull request its
-    title names. It keeps a refusal only where every one of them leads to
-    it, file by file.
+  - With work rules on, Guard now judges such a draft's own diff once as
+    each pull request its title names. It keeps a refusal only where every
+    one of them leads to it, file by file. With work rules off, no slice is
+    judged, so the draft is judged as itself.
   - It identifies a Mergify draft as PR identity does (`src/identity.ts`):
     `mergify[bot]`, a Bot; a `mergify/merge-queue/` head branch; and a head
     in the repository itself.
