@@ -36,8 +36,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Its own group, not guard.yml's guard-<number>, so niyam's two Guards do not cancel each other while both run.
+    # A pull request's newer run cancels its older one, except on Mergify's merge-queue draft (as mergifyTests in
+    # scripts/guard.mjs knows it), where each run has a group of its own. Mergify edits the draft's body many times
+    # a minute, and a cancelled required check makes it drop the pull request it tests (CHECKS_INTERRUPTED,
+    # athya_mono #3829). The draft's body is not judged, so each run reaches the same verdict, and none is skipped:
+    # a skipped run would pass the check over a refusal. Waiting instead (queue: max) is no way out either: GitHub
+    # refuses it with cancel-in-progress, which an ordinary pull request keeps.
     concurrency:
-      group: niyam-guard-${{ github.event.pull_request.number }}
+      group: niyam-guard-${{ github.event.pull_request.number }}-${{ github.event.pull_request.user.login == 'mergify[bot]' && github.event.pull_request.user.type == 'Bot' && startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/') && github.event.pull_request.head.repo.full_name == github.repository && github.run_id || 'pull' }}
       cancel-in-progress: true
     steps:
       # No fallback to an input, a branch or main: the caller's file must not decide what runs.
