@@ -616,7 +616,8 @@ passes with nothing to check, since each queued pull request was checked on its
 own. So does Mergify's merge-queue draft, but only when it carries nothing else
 (#524). That draft is a pull request `mergify[bot]`, a Bot, opened from a
 `mergify/merge-queue/` branch of the repository itself, whose title names the
-pull requests it tests, as Guard reads it (see Guard). Every commit on it must be
+pull requests it tests (for a deep stack, the title counts those ahead and the
+body's list names them), as Guard reads it (see Guard). Every commit on it must be
 one of two kinds:
 - one GitHub lists for a pull request it tests;
 - Mergify's own merge of one: two parents, `Merge of PR N`, by `mergify[bot]`
