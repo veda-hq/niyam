@@ -2424,3 +2424,20 @@
   Guard now refuses a job by a check's name only when the default branch's
   ruleset requires it, besides `niyam-guard / judge`, which it always keeps
   for onboard's caller.
+- **2026-11-20 — Decision: Guard takes the owner's batch answer on the
+  Approvals issue (Work item #468, slice #501).** Alok: "file the slice to
+  make Guard read the Approvals issue", then `Decision: #501 as written`.
+  - On athya_mono, `Decision: approve #3789` on Approvals issue #3376 passed
+    the work rules, but Guard failed on #3806 until Alok repeated the
+    Decision on #3789 itself.
+  - For a slice added after its Work item's approval, Guard now also counts
+    an owner's unedited comment on the Approvals issue (`"approvals": N`),
+    made after the slice joined, whose first line opens `Decision: approve`
+    and names it. It reads that line with the patterns of
+    `src/approvals.ts`, which a test holds it to.
+  - The earliest answer of the three places sets when **Guards:** counts
+    from. An Approvals issue GitHub cannot find (404) counts nothing; any
+    other failure to read it fails closed, so a lost read cannot let a later
+    Decision pin a newer **Guards:**.
+  - Guard stays stricter than the work rules here: an edited batch answer
+    does not count, even one edited by owners alone.

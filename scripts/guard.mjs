@@ -333,6 +333,36 @@ export function guardPathsIn(text) {
 }
 
 /**
+ * The Approvals issue main's `.github/niyam.json` names as `"approvals": N`,
+ * or undefined when it names none; anything but an issue number refuses, as
+ * the work rules refuse it (`src/agent.ts`).
+ * @param {string} text @returns {number | undefined}
+ */
+export function approvalsIn(text) {
+  const value = JSON.parse(text).approvals;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${SETTINGS}'s "approvals" must be the number of the repository's Approvals issue, such as 42`);
+  }
+  return value;
+}
+
+/**
+ * A batch answer's first line: `Decision: approve`, then the issues it
+ * approves. Only that line approves; the lines under it are reasons. As
+ * `src/approvals.ts` reads it, which a test holds this to.
+ */
+export const BATCH = /^\s*Decision:\s*approve\b(.*)$/i;
+/** An issue of this repository as `#N`, not another's `owner/repo#N` nor an HTML entity such as `&#35;` or `&amp;#35;`. */
+export const ISSUE = /(?<![\w/.&-])(?<!&\w*;)#(\d+)\b/g;
+
+/** The issues a comment approves as a batch: every `#N` on its first line when that line opens `Decision: approve`; none otherwise. @param {string} body @returns {number[]} */
+export function approvedIn(body) {
+  const first = BATCH.exec(body.split(/\r?\n/, 1)[0]);
+  return first ? [...new Set([...first[1].matchAll(ISSUE)].map((match) => Number(match[1])))] : [];
+}
+
+/**
  * The slice's body as it stood at `at`, from its GraphQL revisions, which
  * hold the whole text, newest first, the body as written last. Undefined
  * when the slice did not exist yet or its history cannot be read in full.
@@ -383,18 +413,23 @@ export function client(token, api = 'https://api.github.com', doFetch = fetch) {
 /** A read that failed: the guard fails closed. */
 class Unread extends Error {}
 
-/** `path`'s JSON, or a failed read. */
-async function read(gh, path) {
+/** `path`'s JSON, or a failed read; with `missing`, undefined where GitHub answers 404. */
+async function read(gh, path, missing = false) {
   const { status, json } = await gh.get(path);
+  if (missing && status === 404) return undefined;
   if (status !== 200 || json === undefined) throw new Unread(`GitHub did not answer ${path.split('?')[0]} (HTTP ${status}${json?.message ? `: ${json.message}` : ''})`);
   return json;
 }
 
-/** Every item of a REST list, 100 a page, up to `most`. */
-async function every(gh, path, most = 3000) {
+/**
+ * Every item of a REST list, 100 a page, up to `most`; with `missing`, none
+ * where GitHub answers 404 for its first page. Any other failure still fails.
+ */
+async function every(gh, path, most = 3000, missing = false) {
   const items = [];
   for (let page = 1; items.length < most; page++) {
-    const json = await read(gh, `${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
+    const json = await read(gh, `${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`, missing && page === 1);
+    if (json === undefined) return items;
     if (!Array.isArray(json)) throw new Unread(`GitHub did not answer a list for ${path}`);
     items.push(...json);
     if (json.length < 100) break;
@@ -441,9 +476,12 @@ async function tagOnMain(gh, repo, tag) {
  * When the slice's **Guards:** counts from: the owner's last approval of its
  * Work item, or, for a slice added to it after that, the first `Decision:`
  * the owner wrote since, unedited, on the slice or on the Work item naming
- * it. With what it is, for the refusals, or why there is none.
+ * it, or the first batch answer on the Approvals issue `approvals` whose first
+ * line approves it (#501). An Approvals issue GitHub cannot find answers
+ * nothing, as for the work rules. With what it is, for the refusals, or why
+ * there is none.
  */
-async function approvedAt(gh, repo, slice, owners) {
+async function approvedAt(gh, repo, slice, owners, approvals) {
   const parent = await gh.get(`/repos/${repo}/issues/${slice}/parent`);
   if (parent.status !== 200) return { problem: `slice #${slice} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})` };
   const item = parent.json.number;
@@ -454,19 +492,24 @@ async function approvedAt(gh, repo, slice, owners) {
   }
   const joined = (await every(gh, `/repos/${repo}/issues/${slice}/timeline`)).filter((event) => event.event === 'parent_issue_added').map((event) => event.created_at).sort().at(-1);
   if (!joined || joined <= approval.created_at) return { at: approval.created_at, item, what: `Work item #${item} got the approved label` };
-  const decision = (comment, mention) =>
-    sameLogin(owners, comment.user?.login) &&
-    /^\s*Decision:/i.test(comment.body ?? '') &&
-    comment.created_at > joined &&
-    comment.updated_at <= comment.created_at &&
-    (!mention || new RegExp(`#${slice}\\b`).test(comment.body));
+  const since = (comment) => sameLogin(owners, comment.user?.login) && comment.created_at > joined && comment.updated_at <= comment.created_at;
+  const decision = (comment, mention) => since(comment) && /^\s*Decision:/i.test(comment.body ?? '') && (!mention || new RegExp(`#${slice}\\b`).test(comment.body));
+  const who = owners.join(' or ');
+  const settled = `${who}'s Decision: settled slice #${slice}`;
+  const batch = approvals === undefined ? [] : await every(gh, `/repos/${repo}/issues/${approvals}/comments`, 3000, true);
   const decisions = [
-    ...(await every(gh, `/repos/${repo}/issues/${slice}/comments`)).filter((comment) => decision(comment, false)),
-    ...events.filter((event) => event.event === 'commented' && decision(event, true)),
-  ].sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+    ...(await every(gh, `/repos/${repo}/issues/${slice}/comments`)).filter((comment) => decision(comment, false)).map((comment) => ({ at: comment.created_at, what: settled })),
+    ...events.filter((event) => event.event === 'commented' && decision(event, true)).map((event) => ({ at: event.created_at, what: settled })),
+    ...batch
+      .filter((comment) => since(comment) && approvedIn(comment.body ?? '').includes(slice))
+      .map((comment) => ({ at: comment.created_at, what: `${who}'s batch answer on the Approvals issue, #${approvals}, settled slice #${slice}` })),
+  ].sort((a, b) => (a.at < b.at ? -1 : 1));
   const first = decisions[0];
-  if (!first) return { problem: `slice #${slice} joined Work item #${item} after its approval, and ${owners.join(' or ')} has written no unedited Decision: settling it since` };
-  return { at: first.created_at, item, what: `${owners.join(' or ')}'s Decision: settled slice #${slice}` };
+  if (!first) {
+    const where = approvals === undefined ? '' : `, on the slice, on Work item #${item} or in a batch answer on the Approvals issue, #${approvals}`;
+    return { problem: `slice #${slice} joined Work item #${item} after its approval, and ${who} has written no unedited Decision: settling it since${where}` };
+  }
+  return { ...first, item };
 }
 
 /**
@@ -475,12 +518,13 @@ async function approvedAt(gh, repo, slice, owners) {
  * paths, from its settings, beyond the floor; `branch` is its default branch,
  * whose ruleset names the required checks. `unjudged`, given for a repository
  * without work rules, takes each change a slice would have to name, which is
- * then no refusal: there is no Work item to name it (#485).
+ * then no refusal: there is no Work item to name it (#485). `approvals` is
+ * the Approvals issue the settings name, whose batch answers count too (#501).
  * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} [ownPaths] @param {string} [branch]
- * @param {{ path: string, why: string }[]} [unjudged]
+ * @param {{ path: string, why: string }[]} [unjudged] @param {number} [approvals]
  * @returns {Promise<{ file?: string, message: string }[]>}
  */
-export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, unjudged = undefined) {
+export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, unjudged = undefined, approvals = undefined) {
   const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
   const files = await every(gh, `/repos/${repo}/pulls/${pr}/files`, FILES_MOST);
   if (files.length !== pull.changed_files) {
@@ -588,7 +632,7 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, 
   if (slice === undefined) {
     return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${how(path)}.` }))];
   }
-  const approval = await approvedAt(gh, repo, slice, owners);
+  const approval = await approvedAt(gh, repo, slice, owners, approvals);
   if (approval.problem) {
     return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${how(path)}.` }))];
   }
@@ -635,7 +679,7 @@ export async function main(env = process.env, out = console, gh = undefined) {
     const settings = await textAt(github, repo, SETTINGS, encodeURIComponent(branch));
     if (settings === undefined) throw new Unread(`${branch} has no ${SETTINGS}; run niyam onboard`);
     unjudged = workRulesIn(settings) ? undefined : [];
-    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings), branch, unjudged);
+    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings), branch, unjudged, approvalsIn(settings));
   } catch (error) {
     // Anything it could not read refuses: the guard fails closed.
     out.error(`::error::Guard could not judge this pull request: ${error.message}. Run Guard again once GitHub answers.`);

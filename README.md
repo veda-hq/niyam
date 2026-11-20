@@ -646,7 +646,8 @@ names the slice and was made after the slice was last added, and for a
 dropped State when it names the State and was made after the State was
 closed. They read the Approvals issue's comments once a check, only when a
 decision is owed. If GitHub cannot find the Approvals issue, it answers
-nothing and the check goes on.
+nothing and the check goes on. The shared Guard takes the same answer, if it
+is unedited, for a slice added after the approval (#501; see Guard).
 
 A `Decision:` comment, a batch answer included, counts only while it says
 what owners wrote: unedited, or edited by owners alone. Repo writers, agents included, can edit anyone's
@@ -1828,6 +1829,17 @@ item (for a slice added later, when the owner's `Decision:` settled it):
 ```markdown
 **Guards:** `.github/workflows/ci.yml`, `scripts/*.mjs`, `.githooks/`
 ```
+
+For a slice added later, the first unedited answer from an owner since the
+slice joined counts, wherever it is:
+- a `Decision:` on the slice;
+- a `Decision:` on its Work item naming it;
+- a batch answer on the Approvals issue the default branch's settings name
+  (`"approvals": N`), whose first line opens `Decision: approve` and names the
+  slice, as the work rules read it (#501).
+
+If GitHub cannot find the Approvals issue, Guard counts nothing from it and
+goes on. Any other failure to read it fails closed.
 
 A name is a path, a folder ending in `/`, or a pattern where `*` matches
 within one folder and `**` across them. The guard files are a floor every
