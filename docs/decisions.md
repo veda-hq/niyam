@@ -2505,8 +2505,8 @@
     `main`.
   - Guard does not hold the rest of the file: another job added to it,
     as to any workflow, passes only when an approved slice names the file.
-    That is the rule every other workflow in niyam already has with no
-    owner. Cubic's review of #523 found the first wording ("judges the
+    That is the rule every workflow in niyam but `shared-guard.yml` already
+    has with no owner. Cubic's review of #523 found the first wording ("judges the
     caller whole") overstated this.
   - He still owns the Guard's own rules: `shared-guard.yml`,
     `scripts/guard.mjs`, its tests and CODEOWNERS.
