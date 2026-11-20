@@ -25,6 +25,7 @@ import {
   newer,
   onlyShaMoves,
   ownersIn,
+  pinsIn,
   reports,
   section,
   sliceOf,
@@ -82,6 +83,18 @@ function github({ files = [], body = '**Guards:** `.github/workflows/ci.yml`', p
 }
 
 const modified = (filename, patch = '@@ -1 +1 @@\n-a\n+b', extra = {}) => ({ filename, status: 'modified', patch, ...extra });
+
+/** niyam's release tags `tags`, each a lightweight tag on a commit of niyam's main. */
+const onMain = (...tags) =>
+  Object.fromEntries(
+    tags.flatMap((tag, i) => {
+      const sha = String(i + 1).repeat(40).slice(0, 40);
+      return [
+        [`/repos/${NIYAM}/git/ref/tags/${tag}`, { object: { type: 'commit', sha } }],
+        [`/repos/${NIYAM}/compare/main...${sha}`, { status: 'behind' }],
+      ];
+    }),
+  );
 
 describe('which files the guard watches', () => {
   test('the floor of guard files', () => {
@@ -710,6 +723,7 @@ describe('judging a pull request', () => {
           files: [modified('.github/workflows/niyam-guard.yml', '@@ -1 +1 @@\n-a\n+b', { status })],
           contents: { '.github/workflows/niyam-guard.yml@h': now, ...(before ? { '.github/workflows/niyam-guard.yml@m': before } : {}) },
           body: '**Guards:** `.github/workflows/niyam-guard.yml`',
+          over: onMain('v0.8.0', 'v0.8.1'),
         }),
         REPO,
         1,
@@ -730,6 +744,55 @@ describe('judging a pull request', () => {
     // And a job named after the whole check.
     [refusal] = await one(WORKFLOW([['x', 'niyam-guard / judge']]), WORKFLOW([['other']]));
     assert.match(refusal.message, /has the job "niyam-guard \/ judge"/);
+  });
+
+  test("the caller's pin only moves forward to a niyam release on niyam's main, Guards: or not (#512)", async () => {
+    const caller = (ref) => `name: niyam guard\non:\n  pull_request_target:\n    branches: [main]\njobs:\n  niyam-guard:\n    name: niyam-guard\n    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@${ref}\n`;
+    /** The pull request's caller at `ref`, the default branch's at `held` (none when undefined), the slice naming it. */
+    const one = (ref, held, status = 'modified') =>
+      judge(
+        github({
+          files: [modified('.github/workflows/niyam-guard.yml', '@@ -1 +1 @@\n-a\n+b', { status })],
+          contents: { '.github/workflows/niyam-guard.yml@h': caller(ref), ...(held ? { '.github/workflows/niyam-guard.yml@main': caller(held) } : {}) },
+          body: '**Guards:** `.github/workflows/niyam-guard.yml`',
+          over: onMain('v0.7.8', 'v0.8.0', 'v0.10.0'),
+        }),
+        REPO,
+        1,
+        OWNERS,
+      );
+    // Forward to a release on niyam's main, the same release, or a new caller: it passes.
+    assert.deepEqual(await one('v0.8.0', 'v0.7.8'), []);
+    assert.deepEqual(await one('v0.10.0', 'v0.8.0'), [], 'versions compare as numbers');
+    assert.deepEqual(await one('v0.8.0', 'v0.8.0'), []);
+    assert.deepEqual(await one('v0.8.0', undefined, 'added'), []);
+    // Backwards, a commit sha, or a tag off niyam's main is refused, though the approved slice names the file.
+    let [refusal, ...rest] = await one('v0.7.8', 'v0.8.0');
+    assert.deepEqual(rest, []);
+    assert.equal(refusal.file, '.github/workflows/niyam-guard.yml');
+    assert.match(refusal.message, /calls the shared Guard at v0\.7\.8, older than v0\.8\.0, which main's copy pins\. The caller's pin picks which Guard judges every pull request/);
+    [refusal] = await one('0'.repeat(40), 'v0.8.0');
+    assert.match(refusal.message, /at 0{40}, which is not a niyam release tag \(vX\.Y\.Z\)/);
+    [refusal] = await one('v0.9.0', 'v0.8.0');
+    assert.match(refusal.message, /at v0\.9\.0, a tag that is not on veda-hq\/niyam's main/);
+    // A default branch copy pinned at no release holds nothing back.
+    assert.deepEqual(await one('v0.8.0', 'main'), []);
+    // Two callers at one release read its tag once.
+    const gh = github({
+      files: ['a', 'b'].map((name) => modified(`.github/workflows/${name}.yml`)),
+      contents: { '.github/workflows/a.yml@h': caller('v0.8.0'), '.github/workflows/b.yml@h': caller('v0.8.0').replace(/niyam-guard/g, 'other-guard') },
+      body: '**Guards:** `.github/workflows/`',
+      over: onMain('v0.8.0'),
+    });
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.equal(gh.calls.filter((call) => call === `/repos/${NIYAM}/git/ref/tags/v0.8.0`).length, 1);
+  });
+
+  test('pinsIn reads the refs a workflow calls the shared Guard at', () => {
+    assert.deepEqual(pinsIn('on: push\njobs:\n  a:\n    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@v1.2.3\n  b:\n    uses: ./x.yml\n  c:\n    runs-on: x\n'), ['v1.2.3']);
+    assert.deepEqual(pinsIn('not: [yaml'), []);
+    assert.deepEqual(pinsIn(undefined), []);
+    assert.deepEqual(pinsIn('on: push\njobs:\n  a: null\n'), []);
   });
 
   test('a workflow change when the ruleset cannot be read fails closed', async () => {
