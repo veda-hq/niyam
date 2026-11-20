@@ -1898,8 +1898,8 @@ gives none), never the calling repository or the pull request, and judges
 the caller's pull request with the caller's token. A repository calls it
 from a workflow run by `pull_request_target` alone, whose one job,
 `niyam-guard` (id and name), only calls
-`veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z` (a release tag or
-a full commit sha, never a branch), read-only, with no inputs or secrets; its
+`veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z` (a release tag on
+niyam's `main`, never a branch or a commit sha), read-only, with no inputs or secrets; its
 check is `niyam-guard / judge`. The default branch is the repository's own,
 whatever its name. `niyam onboard` writes that caller,
 `.github/workflows/niyam-guard.yml`, in every repository it onboards,

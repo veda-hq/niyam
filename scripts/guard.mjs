@@ -290,7 +290,9 @@ export function workflowOf(text) {
  * as onboard writes it: run by pull_request_target alone, so GitHub runs the
  * default branch's copy, and doing nothing but call shared-guard.yml at a
  * release tag or a full commit sha, never a branch. Only such a job may
- * report the shared check.
+ * report the shared check. Its shape alone: whether the pin is a release on
+ * niyam's main, no older than the default branch's, is judge's (#512), which
+ * refuses a commit sha there.
  * @param {string[]} events @param {unknown} job
  */
 export function isCaller(events, job) {
@@ -605,13 +607,19 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
   const runsOf = new Map(files.map((file) => [file, changeRuns(file.patch)]));
   const mechanical = (test) => files.every((file) => file.status === 'modified' && runsOf.get(file) && test(runsOf.get(file)));
   const onboard = ONBOARD_TITLE.exec(as.title ?? '')?.[1];
+  // Whether niyam's tag `ref` is on niyam's main, read once a run however many files name it.
+  const tags = new Map();
+  const released = (ref) => {
+    if (!tags.has(ref)) tags.set(ref, tagOnMain(gh, NIYAM, ref));
+    return tags.get(ref);
+  };
   let exempt = false;
   if (as.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = true;
   else if (onboard && mechanical((runs) => versionMoves(runs, onboard) >= 0)) {
     // The version must move somewhere, so a PR that only swaps sha256s is no onboard change.
     const moved = files.reduce((total, file) => total + versionMoves(runsOf.get(file), onboard), 0);
     // The release is niyam's, so its tag is read there, whichever repository onboarded.
-    exempt = moved > 0 && (await tagOnMain(gh, NIYAM, `v${onboard}`));
+    exempt = moved > 0 && (await released(`v${onboard}`));
   }
 
   /** Each file that needs naming, with why. */
@@ -685,7 +693,7 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
             ? 'which is not a niyam release tag (vX.Y.Z)'
             : held !== undefined && newer(held, ref.slice(1))
               ? `older than v${held}, which ${branch}'s copy pins`
-              : (await tagOnMain(gh, NIYAM, ref))
+              : (await released(ref))
                 ? undefined
                 : `a tag that is not on ${NIYAM}'s ${MAIN}`;
           if (why === undefined) continue;

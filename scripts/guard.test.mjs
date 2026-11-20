@@ -777,6 +777,15 @@ describe('judging a pull request', () => {
     assert.match(refusal.message, /at v0\.9\.0, a tag that is not on veda-hq\/niyam's main/);
     // A default branch copy pinned at no release holds nothing back.
     assert.deepEqual(await one('v0.8.0', 'main'), []);
+    // Two callers at one release read its tag once.
+    const gh = github({
+      files: ['a', 'b'].map((name) => modified(`.github/workflows/${name}.yml`)),
+      contents: { '.github/workflows/a.yml@h': caller('v0.8.0'), '.github/workflows/b.yml@h': caller('v0.8.0').replace(/niyam-guard/g, 'other-guard') },
+      body: '**Guards:** `.github/workflows/`',
+      over: onMain('v0.8.0'),
+    });
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.equal(gh.calls.filter((call) => call === `/repos/${NIYAM}/git/ref/tags/v0.8.0`).length, 1);
   });
 
   test('pinsIn reads the refs a workflow calls the shared Guard at', () => {
