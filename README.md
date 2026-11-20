@@ -774,7 +774,9 @@ where the owner reacts, never the slice's top or the `needs-owner` list. A
 waiting decision with no proposal yet gets the command that posts one,
 `niyam propose <issue> --page <page url>` with its number. A
 reaction does not re-run a pull request's checks: the agent proposes before
-it starts, and pre-push or a re-run of Work rules sees the 👍.
+it starts, and pre-push or a re-run of Work rules sees the 👍. The shared
+Guard takes the same 👍 for a slice that changes a guard file (#515), so one
+👍 settles both.
 
 **Many at once.** `propose` takes several issues, `niyam propose 12
 30 41 --page <url>`, and asks for each in turn, each comment linking that page. Where the settings name an Approvals issue
@@ -1836,7 +1838,12 @@ slice joined counts, wherever it is:
 - a `Decision:` on its Work item naming it;
 - a batch answer on the Approvals issue the default branch's settings name
   (`"approvals": N`), whose first line opens `Decision: approve` and names the
-  slice, as the work rules read it (#501).
+  slice, as the work rules read it (#501);
+- a 👍 on a proposal for it by an agent the settings name (`"agent"`), whose
+  first line opens `Proposal:` and names the slice as its first `#N`. The 👍
+  must be made after the slice joined and after the proposal's last edit, as
+  the work rules read it (#515). A proposal GitHub no longer has counts
+  nothing.
 
 If GitHub cannot find the Approvals issue, Guard counts nothing from it and
 goes on. Any other failure to read it fails closed.

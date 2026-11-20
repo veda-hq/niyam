@@ -2461,3 +2461,17 @@
     first.
   - Not done here: PR identity still skips these drafts without checking
     their commits.
+- **2026-11-20 — Decision: Guard takes the owner's 👍 on the agent's
+  proposal (Work item #468, slice #515).** Alok asked why he writes in some
+  places and reacts in others, then: "Yes, file it", and `Decision: #515 as
+  written`.
+  - The work rules took the 👍 from P-20 (2026-10-31). Guard (P-62) read
+    only `Decision:` comments, and P-62 gave no reason, so on #512 and #513
+    he wrote a Decision on top of his 👍.
+  - For a slice added after the approval, Guard now also counts an owner's
+    👍 on a `Proposal:` comment by an agent the settings name, whose first
+    `#N` is the slice. The 👍 must be made after the slice joined and after
+    the proposal's last edit, as `thumbsUp` in `src/work.ts` reads it. A
+    test holds `PROPOSAL` to `src/work.ts`'s.
+  - Settings with no `"agent"` count no 👍. A malformed one fails closed.
+    So does any failed read of reactions but a deleted proposal's.
