@@ -2441,3 +2441,22 @@
     Decision pin a newer **Guards:**.
   - Guard stays stricter than the work rules here: an edited batch answer
     does not count, even one edited by owners alone.
+- **2026-11-20 — Decision: Guard judges Mergify's merge-queue draft as the
+  pull requests it tests (Work item #468, slice #507).** Alok: "We need to
+  fix the guard", then `Decision: #507 as written.`
+  - athya_mono #3821, the onboard at v0.7.7, passed Guard itself. Mergify
+    tested it in draft #3822, which Guard judged as a pull request of its
+    own, with no onboard title and no `Slice:` line. Mergify then dropped
+    #3821 from the queue, and it was merged directly at 13:01Z.
+  - Guard now judges such a draft's own diff once as each pull request its
+    title names. It keeps a refusal only where every one of them leads to
+    it, file by file.
+  - It identifies a Mergify draft as PR identity does (`src/identity.ts`):
+    `mergify[bot]`, a Bot; a `mergify/merge-queue/` head branch; and a head
+    in the repository itself.
+  - Rejected: passing the draft outright. The caller does not run on
+    `ready_for_review`, so a pass would survive a writer pushing to the draft
+    and merging it. Mergify also queues a pull request without needing Guard
+    first.
+  - Not done here: PR identity still skips these drafts without checking
+    their commits.
