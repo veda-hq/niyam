@@ -1866,9 +1866,17 @@ items, so no slice to name a change: the shared Guard judges no slice there,
 and its log lists each change it would have asked one to name. It still
 refuses what no slice passes: a job added under the name of a check the
 ruleset requires, a job that could report `niyam-guard / judge` but is not
-the caller `onboard` writes, and a pull request with more files than GitHub
-lists. With `work-rules` on, or no `features` listed, it judges every change;
-a `features` it cannot read refuses.
+the caller `onboard` writes, a caller pinned off a niyam release, and a pull
+request with more files than GitHub lists. With `work-rules` on, or no
+`features` listed, it judges every change; a `features` it cannot read
+refuses.
+
+**The caller's pin only moves forward (#512).** The caller's pin picks which Guard judges every pull request, so with work rules on or off, Guard refuses a changed workflow that calls `shared-guard.yml` at:
+- anything but a `vX.Y.Z` tag, such as a commit sha;
+- a tag not on niyam's `main`;
+- a release older than the one the default branch's copy of that file pins.
+
+No `**Guards:**` line passes these. `onboard` writes only a forward move to a release, so its pull requests pass.
 
 Two changes pass unnamed: an onboard pull request
 (`chore(niyam): onboard at vX.Y.Z`) whose every changed line only moves the

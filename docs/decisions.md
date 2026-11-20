@@ -2461,3 +2461,16 @@
     first.
   - Not done here: PR identity still skips these drafts without checking
     their commits.
+- **2026-11-20 — Decision: the Guard caller's pin only moves forward to a
+  niyam release (Work item #468, slice #512).** Alok: "file the slice to
+  narrow CODEOWNERS", then approved #512.
+  - The caller's pin picks which Guard runs. `isCaller` took any `v` tag or
+    any commit sha, so a pull request whose approved slice named the caller
+    could pin an older Guard, or an unreleased commit, and pass.
+  - Only niyam's CODEOWNERS caught that. veda and athya_mono own no caller.
+  - Guard now refuses, whatever the slice names, a changed caller pinned at
+    anything but a `vX.Y.Z` tag on niyam's `main`, or at a release older than
+    the default branch's copy pins.
+  - `onboard` writes only forward moves, so its pull requests pass. With
+    this released and onboarded, #513 drops the caller from niyam's
+    CODEOWNERS.
