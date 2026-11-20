@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
+  BATCH,
   FEATURES,
+  ISSUE,
   RENAMED_FEATURES,
+  approvalsIn,
+  approvedIn,
   bodyAt,
   changeRuns,
   client,
@@ -162,6 +166,28 @@ describe('reading the slice', () => {
     assert.deepEqual(ownersIn('{"owner":["A","B"]}'), ['A', 'B']);
     assert.throws(() => ownersIn('{"owner":[]}'), /no owner/);
     assert.throws(() => ownersIn('{}'), /no owner/);
+  });
+
+  test('approvalsIn reads the Approvals issue, or none (#501)', () => {
+    assert.equal(approvalsIn('{"owner":"A"}'), undefined);
+    assert.equal(approvalsIn('{"approvals":42}'), 42);
+    for (const bad of ['"42"', '0', '-1', '1.5', 'null', '[42]']) {
+      assert.throws(() => approvalsIn(`{"approvals":${bad}}`), /"approvals" must be the number of the repository's Approvals issue/, bad);
+    }
+  });
+
+  test("approvedIn reads a batch answer's first line alone, as the work rules do (#501)", () => {
+    assert.deepEqual(approvedIn('Decision: approve #31 #12 #31\nNot #44 yet'), [31, 12]);
+    assert.deepEqual(approvedIn('  decision:  APPROVE #5, and #6.'), [5, 6]);
+    assert.deepEqual(approvedIn('Decision: approve #11\r\n#10'), [11]);
+    assert.deepEqual(approvedIn('Decision: approve o/r#10 &#35;10 &amp;#35;10 #100'), [100]);
+    for (const none of ['Decision: approved #10', 'Decision: yes #10', 'Approve #10', 'x\nDecision: approve #10', '']) assert.deepEqual(approvedIn(none), [], none);
+  });
+
+  test('reads a batch answer with the patterns src/approvals.ts reads it with (#501)', () => {
+    const source = readFileSync(new URL('../src/approvals.ts', import.meta.url), 'utf8');
+    assert.ok(source.includes(`const BATCH = ${BATCH};`), 'src/approvals.ts reads the first line as BATCH does');
+    assert.ok(source.includes(`const ISSUE = ${ISSUE};`), 'src/approvals.ts reads an issue as ISSUE does');
   });
 });
 
@@ -382,6 +408,65 @@ describe('judging a pull request', () => {
     const edited = { [`/repos/${REPO}/issues/10/comments`]: [decision('2026-01-06T00:00:00Z', { updated_at: '2026-01-07T00:00:00Z' }), decision('2026-01-06T00:00:00Z', { user: { login: 'AthyaBot' } })] };
     [refusal] = await judge(github({ files, over: { ...joined, ...graphql, ...edited } }), REPO, 1, OWNERS);
     assert.match(refusal.message, /no unedited Decision:/);
+  });
+
+  test("a slice added after approval counts from the owner's batch answer on the Approvals issue (#501)", async () => {
+    const joined = { [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }] };
+    const issue = {
+      body: '**Guards:** `.githooks/`',
+      createdAt: '2026-01-03T00:00:00Z',
+      lastEditedAt: '2026-01-05T00:00:00Z',
+      userContentEdits: { totalCount: 2, nodes: [{ editedAt: '2026-01-05T00:00:00Z', diff: '**Guards:** `.githooks/`' }, { editedAt: '2026-01-03T00:00:00Z', diff: 'none' }] },
+    };
+    const graphql = { '/graphql': { data: { repository: { issue } } } };
+    const answer = (body, at = '2026-01-06T00:00:00Z', extra = {}) => ({ user: { login: 'Owner' }, body, created_at: at, updated_at: at, ...extra });
+    const batch = (...comments) => ({ [`/repos/${REPO}/issues/7/comments`]: comments });
+    const files = [modified('.githooks/pre-push')];
+    const run = (over, approvals = { at: 7 }) => {
+      const gh = github({ files, over: { ...joined, ...graphql, ...over } });
+      return judge(gh, REPO, 1, OWNERS, [], 'main', undefined, approvals.at).then((refusals) => ({ refusals, calls: gh.calls }));
+    };
+
+    // A batch answer whose first line approves the slice, after it joined: it counts from then.
+    assert.deepEqual((await run(batch(answer('Decision: approve #12 #10\nNot #44 yet')))).refusals, []);
+
+    // One that names another issue only, names the slice under its first line, was edited, came before the slice
+    // joined, or is another login's, does not count; the refusal names the Approvals issue.
+    for (const comment of [
+      answer('Decision: approve #11'),
+      answer('Decision: approve #11\n#10 too'),
+      answer('Decision: approve o/r#10 &#35;10'),
+      answer('Decision: approve #10', '2026-01-06T00:00:00Z', { updated_at: '2026-01-07T00:00:00Z' }),
+      answer('Decision: approve #10', '2026-01-02T12:00:00Z'),
+      answer('Decision: approve #10', '2026-01-06T00:00:00Z', { user: { login: 'AthyaBot' } }),
+    ]) {
+      const [refusal, ...rest] = (await run(batch(comment))).refusals;
+      assert.match(refusal.message, /has written no unedited Decision: settling it since, on the slice, on Work item #9 or in a batch answer on the Approvals issue, #7\./, comment.body);
+      assert.deepEqual(rest, []);
+    }
+
+    // The earliest of the three places counts: a batch answer before the Guards: line, a Decision on the slice after it.
+    const later = { [`/repos/${REPO}/issues/10/comments`]: [answer('Decision: yes', '2026-01-06T00:00:00Z')] };
+    let [refusal] = (await run({ ...later, ...batch(answer('Decision: approve #10', '2026-01-04T00:00:00Z')) })).refusals;
+    assert.match(refusal.message, /as it stood when Owner's batch answer on the Approvals issue, #7, settled slice #10 \(2026-01-04T00:00:00Z\)/);
+
+    // An Approvals issue GitHub cannot find answers nothing, and the slice still passes on its own Decision.
+    assert.deepEqual((await run(later)).refusals, []);
+    [refusal] = (await run({})).refusals;
+    assert.match(refusal.message, /in a batch answer on the Approvals issue, #7\./);
+
+    // Any other failure to read it fails closed.
+    await assert.rejects(run({ [`/repos/${REPO}/issues/7/comments`]: { status: 502, json: { message: 'Bad gateway' } } }), /GitHub did not answer \/repos\/o\/r\/issues\/7\/comments \(HTTP 502: Bad gateway\)/);
+
+    // Settings with no Approvals issue read none, and the refusal does not name one.
+    const none = await run(batch(answer('Decision: approve #10')), { at: undefined });
+    assert.match(none.refusals[0].message, /has written no unedited Decision: settling it since\./);
+    assert.ok(!none.calls.some((call) => call.includes('/issues/7/')));
+
+    // A slice there before the approval reads no Approvals issue either.
+    const gh = github({ files, over: batch(answer('Decision: approve #10')) });
+    await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 7);
+    assert.ok(!gh.calls.some((call) => call.includes('/issues/7/')));
   });
 
   test('package.json counts for its scripts alone', async () => {
@@ -673,6 +758,22 @@ describe('main', () => {
     // The older name design is still a feature, and turns work rules off.
     out = output();
     assert.equal(await main(env, out, github({ files: [modified('.githooks/pre-push')], contents: settings({ owner: 'Owner', features: ['identity', 'design'] }) })), 0);
+  });
+
+  test("reads the settings' Approvals issue for a slice added after approval, and fails closed on a bad one (#501)", async () => {
+    const over = {
+      [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }],
+      [`/repos/${REPO}/issues/7/comments`]: [{ user: { login: 'Owner' }, body: 'Decision: approve #10', created_at: '2026-01-04T00:00:00Z', updated_at: '2026-01-04T00:00:00Z' }],
+    };
+    const files = [modified('.github/workflows/ci.yml')];
+    let out = output();
+    assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', approvals: 7 }) }, over })), 0, JSON.stringify(out.lines));
+    out = output();
+    assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner' }) }, over })), 1);
+    assert.match(out.lines[0][1], /has written no unedited Decision: settling it since\./);
+    out = output();
+    assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', approvals: '7' }) }, over })), 1);
+    assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: \.github\/niyam\.json's "approvals" must be the number/);
   });
 
   test('knows the features src/features.ts lists, and its renamed ones (#485)', () => {
