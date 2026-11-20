@@ -2510,3 +2510,21 @@
     caller whole") overstated this.
   - He still owns the Guard's own rules: `shared-guard.yml`,
     `scripts/guard.mjs`, its tests and CODEOWNERS.
+- **2026-11-20 — Decision: Guard's runs on Mergify's merge-queue draft never
+  cancel each other (Work item #468, slice #526).** Alok approved #526 with a
+  👍 on its proposal (19:27Z).
+  - athya_mono draft #3829, testing #3828, had its body edited 19 times in
+    five minutes by `mergify` and `blacksmith-sh`. Each edit ran the judge,
+    whose one group per pull request with `cancel-in-progress: true` left 14
+    of 19 runs `cancelled`. The check is required, so Mergify dropped #3828
+    ("checks interrupted").
+  - On a draft as `mergifyTests` knows it, each run now has a group of its
+    own; every other pull request keeps one group, its newer run cancelling
+    the older. The draft's body is not judged, so the verdicts agree.
+  - Rejected (GitHub Docs, workflow syntax, read 2026-11-20):
+    `cancel-in-progress: false`, which still cancels the pending run; a
+    group on the head sha, which an edit keeps; `queue: max`, refused with
+    `cancel-in-progress: true`; and an `if:` skip, which reports success
+    and would pass a draft over an earlier refusal.
+  - Cost: each edit's run finishes, about 25 seconds and 5 API reads (20 or
+    more for a guard-file draft) against the caller's token.
