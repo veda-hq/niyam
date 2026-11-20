@@ -6,6 +6,8 @@ import {
   BATCH,
   FEATURES,
   ISSUE,
+  PROPOSAL,
+  agentsIn,
   RENAMED_FEATURES,
   approvalsIn,
   approvedIn,
@@ -188,6 +190,20 @@ describe('reading the slice', () => {
     for (const bad of ['"42"', '0', '-1', '1.5', 'null', '[42]']) {
       assert.throws(() => approvalsIn(`{"approvals":${bad}}`), /"approvals" must be the number of the repository's Approvals issue/, bad);
     }
+  });
+
+  test('agentsIn reads one agent or a list, or none (#515)', () => {
+    assert.deepEqual(agentsIn('{"owner":"O","agent":"A"}'), ['A']);
+    assert.deepEqual(agentsIn('{"owner":"O","agent":["A","B"]}'), ['A', 'B']);
+    assert.deepEqual(agentsIn('{"owner":"O"}'), []);
+    for (const bad of ['[]', '""', '1', '[1]', 'null']) assert.throws(() => agentsIn(`{"owner":"O","agent":${bad}}`), /"agent" must be the agent account's login, or a list of them/, bad);
+    // An agent that is also an owner, in any case, refuses: the owner's 👍 on their own proposal would approve it.
+    assert.throws(() => agentsIn('{"owner":["O","P"],"agent":["A","p"]}'), /names P as both owner and agent; they must be different accounts/);
+  });
+
+  test('reads a proposal with the pattern src/work.ts reads it with (#515)', () => {
+    const source = readFileSync(new URL('../src/work.ts', import.meta.url), 'utf8');
+    assert.ok(source.includes(`const PROPOSAL = ${PROPOSAL};`), 'src/work.ts reads a proposal as PROPOSAL does');
   });
 
   test("approvedIn reads a batch answer's first line alone, as the work rules do (#501)", () => {
@@ -481,6 +497,59 @@ describe('judging a pull request', () => {
     const gh = github({ files, over: batch(answer('Decision: approve #10')) });
     await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 7);
     assert.ok(!gh.calls.some((call) => call.includes('/issues/7/')));
+  });
+
+  test("a slice added after approval counts from the owner's 👍 on the agent's proposal (#515)", async () => {
+    const joined = { [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }] };
+    const issue = {
+      body: '**Guards:** `.githooks/`',
+      createdAt: '2026-01-03T00:00:00Z',
+      lastEditedAt: '2026-01-05T00:00:00Z',
+      userContentEdits: { totalCount: 2, nodes: [{ editedAt: '2026-01-05T00:00:00Z', diff: '**Guards:** `.githooks/`' }, { editedAt: '2026-01-03T00:00:00Z', diff: 'none' }] },
+    };
+    const graphql = { '/graphql': { data: { repository: { issue } } } };
+    const AGENTS = ['AthyaBot'];
+    /** A comment on slice 10, `id` 1 unless given. */
+    const comment = (body, at = '2026-01-05T12:00:00Z', extra = {}) => ({ id: 1, user: { login: 'athyabot' }, body, created_at: at, updated_at: at, ...extra });
+    const proposal = (extra = {}) => comment('Proposal: add #10 (x) to work item #9.\n\nPage: https://example.com', '2026-01-05T12:00:00Z', extra);
+    const thumbs = (at, login = 'owner', id = 1) => ({ [`/repos/${REPO}/issues/comments/${id}/reactions`]: [{ user: { login }, content: '+1', created_at: at }] });
+    const files = [modified('.githooks/pre-push')];
+    const run = (over, agents = AGENTS) => judge(github({ files, over: { ...joined, ...graphql, ...over } }), REPO, 1, OWNERS, [], 'main', undefined, undefined, agents);
+    const onSlice = (...comments) => ({ [`/repos/${REPO}/issues/10/comments`]: comments });
+
+    // The owner's 👍 after the Guards: line, on the agent's proposal: it counts from then.
+    assert.deepEqual(await run({ ...onSlice(proposal()), ...thumbs('2026-01-06T00:00:00Z') }), []);
+
+    // A 👍 from another login, before the slice joined, or before the proposal's last edit does not count; nor does one
+    // on a proposal by someone else, one naming another issue first, a proposal with no agents named, or one deleted.
+    const refused = [
+      [{ ...onSlice(proposal()), ...thumbs('2026-01-06T00:00:00Z', 'AthyaBot') }, AGENTS],
+      [{ ...onSlice(proposal()), ...thumbs('2026-01-02T12:00:00Z') }, AGENTS],
+      [{ ...onSlice(proposal({ updated_at: '2026-01-07T00:00:00Z' })), ...thumbs('2026-01-06T00:00:00Z') }, AGENTS],
+      [{ ...onSlice(proposal({ user: { login: 'someone' } })), ...thumbs('2026-01-06T00:00:00Z') }, AGENTS],
+      [{ ...onSlice(comment('Proposal: add #11 and #10 to work item #9.')), ...thumbs('2026-01-06T00:00:00Z') }, AGENTS],
+      [{ ...onSlice(proposal()), ...thumbs('2026-01-06T00:00:00Z') }, []],
+      [onSlice(proposal()), AGENTS],
+    ];
+    for (const [over, agents] of refused) {
+      const [refusal, ...rest] = await run(over, agents);
+      // With no agents named no 👍 can count, so the refusal does not offer one.
+      assert.match(refusal.message, agents.length > 0 ? /has written no unedited Decision: settling it since, nor reacted 👍 to an agent's proposal for it\./ : /has written no unedited Decision: settling it since\./);
+      assert.deepEqual(rest, []);
+    }
+
+    // The earliest answer counts: a 👍 before the Guards: line, a Decision after it.
+    const early = onSlice(proposal({ created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' }), comment('Decision: yes', '2026-01-06T00:00:00Z', { id: 2, user: { login: 'Owner' } }));
+    let [refusal] = await run({ ...early, ...thumbs('2026-01-04T00:00:00Z') });
+    assert.match(refusal.message, /as it stood when Owner's 👍 on athyabot's proposal settled slice #10 \(2026-01-04T00:00:00Z\)/);
+
+    // A proposal made after the earliest other answer cannot come first, so its reactions are not read: their failure
+    // refuses nothing an earlier Decision settled.
+    const decided = onSlice(comment('Decision: yes', '2026-01-05T06:00:00Z', { id: 2, user: { login: 'Owner' } }), proposal());
+    assert.deepEqual(await run({ ...decided, [`/repos/${REPO}/issues/comments/1/reactions`]: { status: 502, json: { message: 'Bad gateway' } } }), []);
+
+    // Reactions GitHub will not give fail closed.
+    await assert.rejects(run({ ...onSlice(proposal()), [`/repos/${REPO}/issues/comments/1/reactions`]: { status: 502, json: { message: 'Bad gateway' } } }), /GitHub did not answer \/repos\/o\/r\/issues\/comments\/1\/reactions \(HTTP 502: Bad gateway\)/);
   });
 
   describe("Mergify's merge-queue draft (#507)", () => {
@@ -941,6 +1010,23 @@ describe('main', () => {
     out = output();
     assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', approvals: '7' }) }, over })), 1);
     assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: \.github\/niyam\.json's "approvals" must be the number/);
+  });
+
+  test("reads the settings' agents for the owner's 👍 on a proposal, and fails closed on a bad one (#515)", async () => {
+    const over = {
+      [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }],
+      [`/repos/${REPO}/issues/10/comments`]: [{ id: 5, user: { login: 'AthyaBot' }, body: 'Proposal: add #10 (x) to work item #9.', created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' }],
+      [`/repos/${REPO}/issues/comments/5/reactions`]: [{ user: { login: 'Owner' }, content: '+1', created_at: '2026-01-04T00:00:00Z' }],
+    };
+    const files = [modified('.github/workflows/ci.yml')];
+    let out = output();
+    assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', agent: 'AthyaBot' }) }, over })), 0, JSON.stringify(out.lines));
+    out = output();
+    assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', agent: ['Other'] }) }, over })), 1);
+    assert.match(out.lines[0][1], /nor reacted 👍 to an agent's proposal for it/);
+    out = output();
+    assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', agent: 7 }) }, over })), 1);
+    assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: \.github\/niyam\.json's "agent" must be the agent account's login/);
   });
 
   test('knows the features src/features.ts lists, and its renamed ones (#485)', () => {

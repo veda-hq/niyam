@@ -323,6 +323,27 @@ export function ownersIn(text) {
 }
 
 /**
+ * The agent accounts main's `.github/niyam.json` names, one or a list, whose
+ * proposals an owner's 👍 settles (#515). None when it names no `"agent"`, so
+ * no 👍 counts; anything but logins refuses, and so does an agent that is
+ * also an owner, as the work rules refuse it (`src/agent.ts`): the owner's 👍
+ * on their own proposal would approve it.
+ * @param {string} text @returns {string[]}
+ */
+export function agentsIn(text) {
+  const agent = JSON.parse(text).agent;
+  if (agent === undefined) return [];
+  const list = Array.isArray(agent) ? agent : [agent];
+  if (list.length === 0 || !list.every((one) => typeof one === 'string' && one !== '')) throw new Error(`${SETTINGS}'s "agent" must be the agent account's login, or a list of them`);
+  const both = ownersIn(text).find((owner) => sameLogin(list, owner));
+  if (both) throw new Error(`${SETTINGS} names ${both} as both owner and agent; they must be different accounts`);
+  return list;
+}
+
+/** A proposal's first line, and the issue it names first: what the proposal is for, as src/work.ts reads it. */
+export const PROPOSAL = /^\s*Proposal:[^#\n]*#(\d+)\b/i;
+
+/**
  * Whether main's `.github/niyam.json` turns work rules on, so the repository
  * has Work items whose slices name its guard files: yes when it lists no
  * `features` (every feature on) or lists `work-rules`; anything but a list of
@@ -504,7 +525,7 @@ async function tagOnMain(gh, repo, tag) {
  * nothing, as for the work rules. With what it is, for the refusals, or why
  * there is none.
  */
-async function approvedAt(gh, repo, slice, owners, approvals) {
+async function approvedAt(gh, repo, slice, owners, approvals, agents) {
   const parent = await gh.get(`/repos/${repo}/issues/${slice}/parent`);
   if (parent.status !== 200) return { problem: `slice #${slice} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})` };
   const item = parent.json.number;
@@ -520,17 +541,32 @@ async function approvedAt(gh, repo, slice, owners, approvals) {
   const who = owners.join(' or ');
   const settled = `${who}'s Decision: settled slice #${slice}`;
   const batch = approvals === undefined ? [] : await every(gh, `/repos/${repo}/issues/${approvals}/comments`, 3000, true);
-  const decisions = [
-    ...(await every(gh, `/repos/${repo}/issues/${slice}/comments`)).filter((comment) => decision(comment, false)).map((comment) => ({ at: comment.created_at, what: settled })),
+  const comments = await every(gh, `/repos/${repo}/issues/${slice}/comments`);
+  const byTime = (a, b) => (a.at < b.at ? -1 : 1);
+  const answers = [
+    ...comments.filter((comment) => decision(comment, false)).map((comment) => ({ at: comment.created_at, what: settled })),
     ...events.filter((event) => event.event === 'commented' && decision(event, true)).map((event) => ({ at: event.created_at, what: settled })),
     ...batch
       .filter((comment) => since(comment) && approvedIn(comment.body ?? '').includes(slice))
       .map((comment) => ({ at: comment.created_at, what: `${who}'s batch answer on the Approvals issue, #${approvals}, settled slice #${slice}` })),
-  ].sort((a, b) => (a.at < b.at ? -1 : 1));
-  const first = decisions[0];
+  ].sort(byTime);
+  // An owner's 👍 on an agent's proposal for the slice, after it joined and after the proposal's last edit, as the
+  // work rules read it (src/work.ts, thumbsUp). A proposal GitHub no longer has answers nothing (#515). Its reactions
+  // are read only when a 👍 on it could come before the earliest other answer, which then sets when Guards: counts.
+  const before = answers[0]?.at;
+  for (const proposal of comments.filter((comment) => sameLogin(agents, comment.user?.login) && Number(PROPOSAL.exec(comment.body ?? '')?.[1]) === slice)) {
+    const edited = proposal.updated_at > proposal.created_at ? proposal.updated_at : undefined;
+    if (before !== undefined && (edited ?? proposal.created_at) >= before) continue;
+    for (const reaction of await every(gh, `/repos/${repo}/issues/comments/${proposal.id}/reactions?content=%2B1`, 3000, true)) {
+      if (!sameLogin(owners, reaction.user?.login) || reaction.created_at <= joined || (edited && reaction.created_at <= edited)) continue;
+      answers.push({ at: reaction.created_at, what: `${who}'s 👍 on ${proposal.user.login}'s proposal settled slice #${slice}` });
+    }
+  }
+  const first = answers.sort(byTime)[0];
   if (!first) {
     const where = approvals === undefined ? '' : `, on the slice, on Work item #${item} or in a batch answer on the Approvals issue, #${approvals}`;
-    return { problem: `slice #${slice} joined Work item #${item} after its approval, and ${who} has written no unedited Decision: settling it since${where}` };
+    const thumbs = agents.length > 0 ? `, nor reacted 👍 to an agent's proposal for it` : '';
+    return { problem: `slice #${slice} joined Work item #${item} after its approval, and ${who} has written no unedited Decision: settling it since${where}${thumbs}` };
   }
   return { ...first, item };
 }
@@ -543,15 +579,17 @@ async function approvedAt(gh, repo, slice, owners, approvals) {
  * without work rules, takes each change a slice would have to name, which is
  * then no refusal: there is no Work item to name it (#485). `approvals` is
  * the Approvals issue the settings name, whose batch answers count too (#501).
+ * `agents` are the settings' agent accounts, whose proposals an owner's 👍
+ * settles (#515).
  * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} [ownPaths] @param {string} [branch]
- * @param {{ path: string, why: string }[]} [unjudged] @param {number} [approvals]
+ * @param {{ path: string, why: string }[]} [unjudged] @param {number} [approvals] @param {string[]} [agents]
  * @returns {Promise<{ file?: string, message: string }[]>}
  */
-export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, unjudged = undefined, approvals = undefined) {
+export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, unjudged = undefined, approvals = undefined, agents = []) {
   const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
   // Without work rules no slice is judged, so a draft is judged as itself: no tested pull request changes that.
   const tested = unjudged ? undefined : mergifyTests(pull, repo, pr);
-  if (!tested) return judgeAs(gh, repo, pr, pull, pull, owners, ownPaths, branch, unjudged, approvals);
+  if (!tested) return judgeAs(gh, repo, pr, pull, pull, owners, ownPaths, branch, unjudged, approvals, agents);
   // Mergify's merge-queue draft: its own diff, judged once as each pull request it tests (#507). Each REST read
   // is made once across the runs, so a stack costs a read per tested pull request and slice, not another of the diff.
   const reads = new Map();
@@ -566,7 +604,7 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, 
   const runs = [];
   for (const number of tested) {
     const as = await read(once, `/repos/${repo}/pulls/${number}`);
-    runs.push(await judgeAs(once, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals));
+    runs.push(await judgeAs(once, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals, agents));
   }
   // A refusal stands only where every tested pull request leads to one, file by file.
   const key = (refusal) => refusal.file ?? refusal.message;
@@ -599,7 +637,7 @@ export function mergifyTests(pull, repo, pr) {
  * Judges pull request `pull`'s diff as if it had `as`'s title, author and
  * body: `as` is `pull` itself, or a pull request a Mergify draft tests.
  */
-async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals) {
+async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals, agents) {
   const files = await every(gh, `/repos/${repo}/pulls/${pr}/files`, FILES_MOST);
   if (files.length !== pull.changed_files) {
     return [{ message: `GitHub listed ${files.length} of this pull request's ${pull.changed_files} changed files, so the guard cannot see every change. Split it into pull requests of fewer files.` }];
@@ -736,7 +774,7 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
   if (slice === undefined) {
     return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${how(path)}.` }))];
   }
-  const approval = await approvedAt(gh, repo, slice, owners, approvals);
+  const approval = await approvedAt(gh, repo, slice, owners, approvals, agents);
   if (approval.problem) {
     return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${how(path)}.` }))];
   }
@@ -783,7 +821,7 @@ export async function main(env = process.env, out = console, gh = undefined) {
     const settings = await textAt(github, repo, SETTINGS, encodeURIComponent(branch));
     if (settings === undefined) throw new Unread(`${branch} has no ${SETTINGS}; run niyam onboard`);
     unjudged = workRulesIn(settings) ? undefined : [];
-    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings), branch, unjudged, approvalsIn(settings));
+    refusals = await judge(github, repo, pr, ownersIn(settings), guardPathsIn(settings), branch, unjudged, approvalsIn(settings), agentsIn(settings));
   } catch (error) {
     // Anything it could not read refuses: the guard fails closed.
     out.error(`::error::Guard could not judge this pull request: ${error.message}. Run Guard again once GitHub answers.`);

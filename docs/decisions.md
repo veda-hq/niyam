@@ -2474,3 +2474,22 @@
   - `onboard` writes only forward moves, so its pull requests pass. With
     this released and onboarded, #513 drops the caller from niyam's
     CODEOWNERS.
+- **2026-11-20 — Decision: Guard takes the owner's 👍 on the agent's
+  proposal (Work item #468, slice #515).** Alok asked why he writes in some
+  places and reacts in others, then: "Yes, file it", and `Decision: #515 as
+  written`.
+  - The work rules took the 👍 from P-20 (2026-10-31). Guard (P-62) read
+    only `Decision:` comments, and P-62 gave no reason, so on #512 and #513
+    he wrote a Decision on top of his 👍.
+  - For a slice added after the approval, Guard now also counts an owner's
+    👍 on a `Proposal:` comment by an agent the settings name, whose first
+    `#N` is the slice. The 👍 must be made after the slice joined and after
+    the proposal's last edit, as `thumbsUp` in `src/work.ts` reads it. A
+    test holds `PROPOSAL` to `src/work.ts`'s.
+  - The earliest qualifying answer, a 👍 included, sets when **Guards:**
+    counts from, as for the other answers. Reactions are read only on a
+    proposal that could come before the earliest other answer.
+  - Settings with no `"agent"` count no 👍, and the refusal then offers
+    none. A malformed one fails closed, and so does an agent that is also an
+    owner, as `src/agent.ts` refuses it. So does any failed read of
+    reactions but a deleted proposal's.
