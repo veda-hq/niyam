@@ -16,6 +16,7 @@ import { CALLER_CHECK, callerAt, callerPins, callerDetail, callerUpdate, callerW
 import type { HttpResult } from './types.ts';
 import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
+import { BY_HAND_WIDTH, wrap } from './layout.ts';
 import { packageVersion } from './version.ts';
 import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
@@ -159,6 +160,14 @@ function changedNothing(sys: FakeSys): boolean {
   return writes.length === 0 && !sys.calls.some((c) => c.command === 'git' && c.args[0] === 'push') && signIns(sys) === 0 && !sys.files.has(PRE_PUSH);
 }
 
+/**
+ * The review routine step's last lines, from its link on: where the link's
+ * release breaks the line moves with the version's length (v0.7.9, v0.7.10),
+ * so they are wrapped as byHandLines wraps a step's second line on.
+ */
+const reviewTail = (v: string): string[] =>
+  wrap(`https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md; skip it if done.`, BY_HAND_WIDTH - 1 - '    2. '.length).map((line) => `│       ${line}`);
+
 describe('onboard', () => {
   it("opens the files as the agent's pull request, finds the agent can push, and proves a Verified commit", async () => {
     const sys = fresh();
@@ -223,8 +232,7 @@ describe('onboard', () => {
       "│       create a weekly routine on it, with claude.ai's GitHub connected as",
       '│       ExampleBot and the prompt below the line in',
       // GitHub lists no verdict by the agent here, so the routine may not run yet.
-      `│       https://github.com/veda-hq/niyam/blob/v${v}/routines/review.md; skip it`,
-      '│       if done.',
+      ...reviewTail(v),
       '│',
       '│    3. Once per claude.ai account: sign in at https://claude.ai/code and',
       '│       connect GitHub as ExampleBot (or change it at',
@@ -328,7 +336,7 @@ describe('onboard', () => {
     });
     const { code, out } = await run(sys);
     assert.equal(code, 0);
-    assert.ok(out.includes('│       if done.'), out.join('\n'));
+    assert.ok(reviewTail(packageVersion()).every((line) => out.includes(line)), out.join('\n'));
     const pull = sys.requests.find((r) => r.method === 'POST' && r.url.endsWith(`${REPO}/pulls`));
     const { body } = pull?.body as { body: string };
     assert.ok(body.includes('\n- The review routine: create a weekly Claude routine on example-org/example-app'), body);
