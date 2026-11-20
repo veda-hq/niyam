@@ -308,7 +308,9 @@ export function ownersIn(text) {
 /**
  * The agent accounts main's `.github/niyam.json` names, one or a list, whose
  * proposals an owner's 👍 settles (#515). None when it names no `"agent"`, so
- * no 👍 counts; anything but logins refuses.
+ * no 👍 counts; anything but logins refuses, and so does an agent that is
+ * also an owner, as the work rules refuse it (`src/agent.ts`): the owner's 👍
+ * on their own proposal would approve it.
  * @param {string} text @returns {string[]}
  */
 export function agentsIn(text) {
@@ -316,6 +318,8 @@ export function agentsIn(text) {
   if (agent === undefined) return [];
   const list = Array.isArray(agent) ? agent : [agent];
   if (list.length === 0 || !list.every((one) => typeof one === 'string' && one !== '')) throw new Error(`${SETTINGS}'s "agent" must be the agent account's login, or a list of them`);
+  const both = ownersIn(text).find((owner) => sameLogin(list, owner));
+  if (both) throw new Error(`${SETTINGS} names ${both} as both owner and agent; they must be different accounts`);
   return list;
 }
 
@@ -521,28 +525,31 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents) {
   const settled = `${who}'s Decision: settled slice #${slice}`;
   const batch = approvals === undefined ? [] : await every(gh, `/repos/${repo}/issues/${approvals}/comments`, 3000, true);
   const comments = await every(gh, `/repos/${repo}/issues/${slice}/comments`);
-  // An owner's 👍 on an agent's proposal for the slice, after it joined and after the proposal's last edit, as the
-  // work rules read it (src/work.ts, thumbsUp). A proposal GitHub no longer has answers nothing (#515).
-  const thumbs = [];
-  for (const proposal of comments.filter((comment) => sameLogin(agents, comment.user?.login) && Number(PROPOSAL.exec(comment.body ?? '')?.[1]) === slice)) {
-    const edited = proposal.updated_at > proposal.created_at ? proposal.updated_at : undefined;
-    for (const reaction of await every(gh, `/repos/${repo}/issues/comments/${proposal.id}/reactions?content=%2B1`, 3000, true)) {
-      if (!sameLogin(owners, reaction.user?.login) || reaction.created_at <= joined || (edited && reaction.created_at <= edited)) continue;
-      thumbs.push({ at: reaction.created_at, what: `${who}'s 👍 on ${proposal.user.login}'s proposal settled slice #${slice}` });
-    }
-  }
-  const decisions = [
+  const byTime = (a, b) => (a.at < b.at ? -1 : 1);
+  const answers = [
     ...comments.filter((comment) => decision(comment, false)).map((comment) => ({ at: comment.created_at, what: settled })),
-    ...thumbs,
     ...events.filter((event) => event.event === 'commented' && decision(event, true)).map((event) => ({ at: event.created_at, what: settled })),
     ...batch
       .filter((comment) => since(comment) && approvedIn(comment.body ?? '').includes(slice))
       .map((comment) => ({ at: comment.created_at, what: `${who}'s batch answer on the Approvals issue, #${approvals}, settled slice #${slice}` })),
-  ].sort((a, b) => (a.at < b.at ? -1 : 1));
-  const first = decisions[0];
+  ].sort(byTime);
+  // An owner's 👍 on an agent's proposal for the slice, after it joined and after the proposal's last edit, as the
+  // work rules read it (src/work.ts, thumbsUp). A proposal GitHub no longer has answers nothing (#515). Its reactions
+  // are read only when a 👍 on it could come before the earliest other answer, which then sets when Guards: counts.
+  const before = answers[0]?.at;
+  for (const proposal of comments.filter((comment) => sameLogin(agents, comment.user?.login) && Number(PROPOSAL.exec(comment.body ?? '')?.[1]) === slice)) {
+    const edited = proposal.updated_at > proposal.created_at ? proposal.updated_at : undefined;
+    if (before !== undefined && (edited ?? proposal.created_at) >= before) continue;
+    for (const reaction of await every(gh, `/repos/${repo}/issues/comments/${proposal.id}/reactions?content=%2B1`, 3000, true)) {
+      if (!sameLogin(owners, reaction.user?.login) || reaction.created_at <= joined || (edited && reaction.created_at <= edited)) continue;
+      answers.push({ at: reaction.created_at, what: `${who}'s 👍 on ${proposal.user.login}'s proposal settled slice #${slice}` });
+    }
+  }
+  const first = answers.sort(byTime)[0];
   if (!first) {
     const where = approvals === undefined ? '' : `, on the slice, on Work item #${item} or in a batch answer on the Approvals issue, #${approvals}`;
-    return { problem: `slice #${slice} joined Work item #${item} after its approval, and ${who} has written no unedited Decision: settling it since${where}, nor reacted 👍 to an agent's proposal for it` };
+    const thumbs = agents.length > 0 ? `, nor reacted 👍 to an agent's proposal for it` : '';
+    return { problem: `slice #${slice} joined Work item #${item} after its approval, and ${who} has written no unedited Decision: settling it since${where}${thumbs}` };
   }
   return { ...first, item };
 }

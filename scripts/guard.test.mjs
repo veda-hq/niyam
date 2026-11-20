@@ -180,10 +180,12 @@ describe('reading the slice', () => {
   });
 
   test('agentsIn reads one agent or a list, or none (#515)', () => {
-    assert.deepEqual(agentsIn('{"agent":"A"}'), ['A']);
-    assert.deepEqual(agentsIn('{"agent":["A","B"]}'), ['A', 'B']);
+    assert.deepEqual(agentsIn('{"owner":"O","agent":"A"}'), ['A']);
+    assert.deepEqual(agentsIn('{"owner":"O","agent":["A","B"]}'), ['A', 'B']);
     assert.deepEqual(agentsIn('{"owner":"O"}'), []);
-    for (const bad of ['[]', '""', '1', '[1]', 'null']) assert.throws(() => agentsIn(`{"agent":${bad}}`), /"agent" must be the agent account's login, or a list of them/, bad);
+    for (const bad of ['[]', '""', '1', '[1]', 'null']) assert.throws(() => agentsIn(`{"owner":"O","agent":${bad}}`), /"agent" must be the agent account's login, or a list of them/, bad);
+    // An agent that is also an owner, in any case, refuses: the owner's 👍 on their own proposal would approve it.
+    assert.throws(() => agentsIn('{"owner":["O","P"],"agent":["A","p"]}'), /names P as both owner and agent; they must be different accounts/);
   });
 
   test('reads a proposal with the pattern src/work.ts reads it with (#515)', () => {
@@ -456,7 +458,7 @@ describe('judging a pull request', () => {
       answer('Decision: approve #10', '2026-01-06T00:00:00Z', { user: { login: 'AthyaBot' } }),
     ]) {
       const [refusal, ...rest] = (await run(batch(comment))).refusals;
-      assert.match(refusal.message, /has written no unedited Decision: settling it since, on the slice, on Work item #9 or in a batch answer on the Approvals issue, #7, nor reacted 👍/, comment.body);
+      assert.match(refusal.message, /has written no unedited Decision: settling it since, on the slice, on Work item #9 or in a batch answer on the Approvals issue, #7\./, comment.body);
       assert.deepEqual(rest, []);
     }
 
@@ -468,14 +470,14 @@ describe('judging a pull request', () => {
     // An Approvals issue GitHub cannot find answers nothing, and the slice still passes on its own Decision.
     assert.deepEqual((await run(later)).refusals, []);
     [refusal] = (await run({})).refusals;
-    assert.match(refusal.message, /in a batch answer on the Approvals issue, #7, nor reacted 👍/);
+    assert.match(refusal.message, /in a batch answer on the Approvals issue, #7\./);
 
     // Any other failure to read it fails closed.
     await assert.rejects(run({ [`/repos/${REPO}/issues/7/comments`]: { status: 502, json: { message: 'Bad gateway' } } }), /GitHub did not answer \/repos\/o\/r\/issues\/7\/comments \(HTTP 502: Bad gateway\)/);
 
     // Settings with no Approvals issue read none, and the refusal does not name one.
     const none = await run(batch(answer('Decision: approve #10')), { at: undefined });
-    assert.match(none.refusals[0].message, /has written no unedited Decision: settling it since, nor reacted 👍/);
+    assert.match(none.refusals[0].message, /has written no unedited Decision: settling it since\./);
     assert.ok(!none.calls.some((call) => call.includes('/issues/7/')));
 
     // A slice there before the approval reads no Approvals issue either.
@@ -518,13 +520,20 @@ describe('judging a pull request', () => {
     ];
     for (const [over, agents] of refused) {
       const [refusal, ...rest] = await run(over, agents);
-      assert.match(refusal.message, /has written no unedited Decision: settling it since, nor reacted 👍 to an agent's proposal for it\./);
+      // With no agents named no 👍 can count, so the refusal does not offer one.
+      assert.match(refusal.message, agents.length > 0 ? /has written no unedited Decision: settling it since, nor reacted 👍 to an agent's proposal for it\./ : /has written no unedited Decision: settling it since\./);
       assert.deepEqual(rest, []);
     }
 
     // The earliest answer counts: a 👍 before the Guards: line, a Decision after it.
-    let [refusal] = await run({ ...onSlice(proposal({ created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' }), comment('Decision: yes', '2026-01-06T00:00:00Z', { id: 2, user: { login: 'Owner' } })), ...thumbs('2026-01-04T00:00:00Z') });
+    const early = onSlice(proposal({ created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' }), comment('Decision: yes', '2026-01-06T00:00:00Z', { id: 2, user: { login: 'Owner' } }));
+    let [refusal] = await run({ ...early, ...thumbs('2026-01-04T00:00:00Z') });
     assert.match(refusal.message, /as it stood when Owner's 👍 on athyabot's proposal settled slice #10 \(2026-01-04T00:00:00Z\)/);
+
+    // A proposal made after the earliest other answer cannot come first, so its reactions are not read: their failure
+    // refuses nothing an earlier Decision settled.
+    const decided = onSlice(comment('Decision: yes', '2026-01-05T06:00:00Z', { id: 2, user: { login: 'Owner' } }), proposal());
+    assert.deepEqual(await run({ ...decided, [`/repos/${REPO}/issues/comments/1/reactions`]: { status: 502, json: { message: 'Bad gateway' } } }), []);
 
     // Reactions GitHub will not give fail closed.
     await assert.rejects(run({ ...onSlice(proposal()), [`/repos/${REPO}/issues/comments/1/reactions`]: { status: 502, json: { message: 'Bad gateway' } } }), /GitHub did not answer \/repos\/o\/r\/issues\/comments\/1\/reactions \(HTTP 502: Bad gateway\)/);
@@ -934,7 +943,7 @@ describe('main', () => {
     assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', approvals: 7 }) }, over })), 0, JSON.stringify(out.lines));
     out = output();
     assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner' }) }, over })), 1);
-    assert.match(out.lines[0][1], /has written no unedited Decision: settling it since, nor reacted 👍/);
+    assert.match(out.lines[0][1], /has written no unedited Decision: settling it since\./);
     out = output();
     assert.equal(await main(env, out, github({ files, contents: { ...ciContents(), ...settings({ owner: 'Owner', approvals: '7' }) }, over })), 1);
     assert.match(out.lines[0][1], /^::error::Guard could not judge this pull request: \.github\/niyam\.json's "approvals" must be the number/);

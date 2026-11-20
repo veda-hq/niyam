@@ -2473,5 +2473,10 @@
     `#N` is the slice. The 👍 must be made after the slice joined and after
     the proposal's last edit, as `thumbsUp` in `src/work.ts` reads it. A
     test holds `PROPOSAL` to `src/work.ts`'s.
-  - Settings with no `"agent"` count no 👍. A malformed one fails closed.
-    So does any failed read of reactions but a deleted proposal's.
+  - The earliest qualifying answer, a 👍 included, sets when **Guards:**
+    counts from, as for the other answers. Reactions are read only on a
+    proposal that could come before the earliest other answer.
+  - Settings with no `"agent"` count no 👍, and the refusal then offers
+    none. A malformed one fails closed, and so does an agent that is also an
+    owner, as `src/agent.ts` refuses it. So does any failed read of
+    reactions but a deleted proposal's.
