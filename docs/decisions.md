@@ -2518,7 +2518,9 @@
     whose one group per pull request with `cancel-in-progress: true` left 14
     of 19 runs `cancelled`. The check is required, so Mergify dropped #3828
     ("checks interrupted").
-  - On a draft as `mergifyTests` knows it, each run now has a group of its
+  - On a draft by `mergify[bot]`, a Bot, on a `mergify/merge-queue/` branch
+    of the repository (`mergifyTests`'s checks but the title, since Mergify
+    drops any draft on a cancelled check), each run now has a group of its
     own; every other pull request keeps one group, its newer run cancelling
     the older. The draft's body is not judged, so the verdicts agree.
   - Rejected (GitHub Docs, workflow syntax, read 2026-11-20):
