@@ -1919,11 +1919,15 @@ Actions, Policies allows it for that workflow, so `onboard` names that step
 there.
 
 Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
-`@AlokBansal8` for the guard's files alone: the caller `.github/workflows/niyam-guard.yml`,
-`.github/workflows/shared-guard.yml`, `scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
+`@AlokBansal8` for the guard's files alone: `.github/workflows/shared-guard.yml`,
+`scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
 itself. With "Require review from Code Owners" on in the `main` ruleset, a
 pull request that changes one of them waits for his approval. Every other
 pull request, including one under `.github/` that Guard passed, does not.
+The caller, `.github/workflows/niyam-guard.yml`, has no owner (#513). Guard
+judges it whole: the job must be the caller as `onboard` writes it, and its
+pin only moves forward to a niyam release (#512). So niyam's own onboard
+merges on its checks.
 
 ## License
 

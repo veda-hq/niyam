@@ -2493,3 +2493,15 @@
     none. A malformed one fails closed, and so does an agent that is also an
     owner, as `src/agent.ts` refuses it. So does any failed read of
     reactions but a deleted proposal's.
+- **2026-11-20 — Decision: niyam's CODEOWNERS no longer names the Guard
+  caller (Work item #468, slice #513).** Alok: "file the slice to narrow
+  CODEOWNERS", then `Decision: #513 as written.`
+  - niyam#511 and #522, niyam's onboards at v0.7.8 and v0.7.9, waited for
+    his review only because CODEOWNERS named `niyam-guard.yml`.
+  - P-63 gives an owner only to what Guard cannot judge. Since 0.7.9 (#512),
+    in niyam's caller from #522, Guard judges the caller whole. The job must
+    be the caller as onboard writes it, and its pin moves only forward to a
+    release on niyam's `main`, whatever the slice names. Its other lines can
+    only fail closed.
+  - He still owns the Guard's own rules: `shared-guard.yml`,
+    `scripts/guard.mjs`, its tests and CODEOWNERS.

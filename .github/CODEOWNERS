@@ -2,8 +2,9 @@
 # judges every other change to niyam's checks against the slice's
 # **Guards:** section, but it cannot tell whether a change to its own rules
 # weakens them, so a pull request that changes one of these waits for Alok.
-# Nothing else gets an owner.
-/.github/workflows/niyam-guard.yml @AlokBansal8
+# Nothing else gets an owner. The caller, .github/workflows/niyam-guard.yml,
+# has none since #513: Guard judges it whole, its pin only moving forward to
+# a niyam release (#512), so niyam's own onboard merges on its checks.
 /.github/workflows/shared-guard.yml @AlokBansal8
 /scripts/guard.mjs @AlokBansal8
 /scripts/guard.test.mjs @AlokBansal8
