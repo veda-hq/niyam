@@ -38,7 +38,7 @@ jobs:
     # Its own group, not guard.yml's guard-<number>, so niyam's two Guards do not cancel each other while both run.
     # A pull request's newer run cancels its older one, except on Mergify's merge-queue draft, where each run has a
     # group of its own. The draft is known by mergifyTests's author, branch and repository checks in
-    # scripts/guard.mjs, but not its title: whatever its title, Mergify edits the draft's body many times a minute,
+    # scripts/merge-queue.mjs, but not its title: whatever its title, Mergify edits the draft's body many times a minute,
     # and a cancelled required check makes it drop the pull request it tests (CHECKS_INTERRUPTED, athya_mono
     # #3829). The draft's body is not judged, so each run reaches the same verdict, and none is skipped: a skipped
     # run would pass the check over a refusal. Waiting instead (queue: max) is no way out either: GitHub refuses it

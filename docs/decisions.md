@@ -2520,8 +2520,8 @@
     ("checks interrupted").
   - On a draft by `mergify[bot]`, a Bot, on a `mergify/merge-queue/` branch
     of the repository (`mergifyTests`'s checks but the title, since Mergify
-    drops any draft on a cancelled check), each run now has a group of its
-    own; every other pull request keeps one group, its newer run cancelling
+    drops the pull request any such draft tests on a cancelled check), each
+    run now has a group of its own; every other pull request keeps one group, its newer run cancelling
     the older. The draft's body is not judged, so the verdicts agree.
   - Rejected (GitHub Docs, workflow syntax, read 2026-11-20):
     `cancel-in-progress: false`, which still cancels the pending run; a

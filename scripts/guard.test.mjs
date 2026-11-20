@@ -686,7 +686,7 @@ describe('judging a pull request', () => {
         assert.notEqual(groupOf(draft(), 1), groupOf(draft(), 2));
       });
 
-      test('a draft of Mergify’s whose title names no pull request still never cancels: Mergify drops it all the same', () => {
+      test('a draft of Mergify’s whose title names no pull request still never cancels: Mergify drops the pull request it tests all the same', () => {
         for (const title of ['merge queue: merged #2: ✨ feat(x): y', null]) {
           assert.equal(mergifyTests(draft(title), REPO, 1), undefined, String(title));
           assert.notEqual(groupOf(draft(title), 1), groupOf(draft(title), 2), String(title));
