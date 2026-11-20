@@ -34,6 +34,8 @@ const SHARED_CHECK = 'niyam-guard / judge';
 const SHARED_WORKFLOW = `${NIYAM}/.github/workflows/shared-guard.yml@`;
 /** A ref the caller may pin: a release tag, or a full commit sha. */
 const RELEASE_REF = /^(v\d+\.\d+\.\d+|[0-9a-f]{40})$/;
+/** A niyam release tag, the only pin onboard writes for the caller (`src/guard-caller.ts`). */
+const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
 
 /** The settings file, read at the default branch's tip. */
 const SETTINGS = '.github/niyam.json';
@@ -251,6 +253,19 @@ export function jobNames(text) {
 }
 
 /**
+ * The refs workflow `text`'s jobs call the shared Guard at, the part of each
+ * `uses:` after `shared-guard.yml@`; none where it calls it nowhere or does
+ * not parse.
+ * @param {string | undefined} text @returns {string[]}
+ */
+export function pinsIn(text) {
+  return (workflowOf(text ?? '')?.jobs ?? [])
+    .map(({ job }) => (job && typeof job === 'object' ? /** @type {{ uses?: unknown }} */ (job).uses : undefined))
+    .filter((uses) => typeof uses === 'string' && uses.startsWith(SHARED_WORKFLOW))
+    .map((uses) => /** @type {string} */ (uses).slice(SHARED_WORKFLOW.length));
+}
+
+/**
  * Workflow `text`'s events and jobs: each job's check name (its `name`, else
  * its id) and the job itself. Undefined when it does not parse as a workflow.
  * @param {string} text @returns {{ events: string[], jobs: { name: string, job: unknown }[] } | undefined}
@@ -275,7 +290,9 @@ export function workflowOf(text) {
  * as onboard writes it: run by pull_request_target alone, so GitHub runs the
  * default branch's copy, and doing nothing but call shared-guard.yml at a
  * release tag or a full commit sha, never a branch. Only such a job may
- * report the shared check.
+ * report the shared check. Its shape alone: whether the pin is a release on
+ * niyam's main, no older than the default branch's, is judge's (#512), which
+ * refuses a commit sha there.
  * @param {string[]} events @param {unknown} job
  */
 export function isCaller(events, job) {
@@ -628,13 +645,19 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
   const runsOf = new Map(files.map((file) => [file, changeRuns(file.patch)]));
   const mechanical = (test) => files.every((file) => file.status === 'modified' && runsOf.get(file) && test(runsOf.get(file)));
   const onboard = ONBOARD_TITLE.exec(as.title ?? '')?.[1];
+  // Whether niyam's tag `ref` is on niyam's main, read once a run however many files name it.
+  const tags = new Map();
+  const released = (ref) => {
+    if (!tags.has(ref)) tags.set(ref, tagOnMain(gh, NIYAM, ref));
+    return tags.get(ref);
+  };
   let exempt = false;
   if (as.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = true;
   else if (onboard && mechanical((runs) => versionMoves(runs, onboard) >= 0)) {
     // The version must move somewhere, so a PR that only swaps sha256s is no onboard change.
     const moved = files.reduce((total, file) => total + versionMoves(runsOf.get(file), onboard), 0);
     // The release is niyam's, so its tag is read there, whichever repository onboarded.
-    exempt = moved > 0 && (await tagOnMain(gh, NIYAM, `v${onboard}`));
+    exempt = moved > 0 && (await released(`v${onboard}`));
   }
 
   /** Each file that needs naming, with why. */
@@ -679,7 +702,8 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
     }
     // A workflow job named after a required check.
     if (isWorkflow(file.filename) && file.status !== 'removed') {
-      const workflow = workflowOf((await textAt(gh, repo, file.filename, pull.head.sha)) ?? '');
+      const text = (await textAt(gh, repo, file.filename, pull.head.sha)) ?? '';
+      const workflow = workflowOf(text);
       const before = isWorkflow(was) && file.status !== 'added' ? jobNames((await textAt(gh, repo, was, await base())) ?? '') ?? [] : [];
       if (!workflow) {
         refusals.push({ file: file.filename, message: `${file.filename} does not parse as a workflow, so the guard cannot tell which checks its jobs report. Make it valid YAML with a jobs: map.` });
@@ -693,6 +717,29 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
           file: file.filename,
           message: `${file.filename} has the job "${name}", which could report "${SHARED_CHECK}", the shared Guard's check, but is not its caller as niyam onboard writes it (run by pull_request_target alone, calling ${SHARED_WORKFLOW}<release> and nothing else). Rename the job, or run niyam onboard to write the caller.`,
         });
+      }
+      // The caller's pin picks which Guard runs, so it names a niyam release on niyam's main, never one older than the
+      // default branch's copy of the file holds (#512). No slice passes another: an older Guard would judge by older rules.
+      const pins = pinsIn(text);
+      if (pins.length > 0) {
+        const held = pinsIn(await textAt(gh, repo, was, encodeURIComponent(branch)))
+          .filter((ref) => RELEASE_TAG.test(ref))
+          .map((ref) => ref.slice(1))
+          .reduce((most, version) => (most === undefined || newer(version, most) ? version : most), undefined);
+        for (const ref of new Set(pins)) {
+          const why = !RELEASE_TAG.test(ref)
+            ? 'which is not a niyam release tag (vX.Y.Z)'
+            : held !== undefined && newer(held, ref.slice(1))
+              ? `older than v${held}, which ${branch}'s copy pins`
+              : (await released(ref))
+                ? undefined
+                : `a tag that is not on ${NIYAM}'s ${MAIN}`;
+          if (why === undefined) continue;
+          refusals.push({
+            file: file.filename,
+            message: `${file.filename} calls the shared Guard at ${ref}, ${why}. The caller's pin picks which Guard judges every pull request, so it only moves forward to a niyam release, as niyam onboard writes it. Run niyam onboard to write the caller.`,
+          });
+        }
       }
       const now = workflow.jobs.map((job) => job.name);
       const checks = (await requiredChecks()).filter((check) => check !== SHARED_CHECK);
