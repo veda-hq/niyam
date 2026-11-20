@@ -13,13 +13,18 @@
 //
 // Self-contained on purpose: it imports nothing from src/, which is no guard
 // file, so a pull request cannot change what the guard does without naming a
-// guard file. The owner, and the repository's own guard paths, come from the
-// default branch's .github/niyam.json, read through the API. Exit 0: it
-// passes; 1: refused, each refusal naming the file and how to pass; 2: a
-// usage error.
+// guard file. Its one import of its own, merge-queue.mjs, is a guard file
+// beside it, which PR identity shares (#524). The owner, and the
+// repository's own guard paths, come from the default branch's
+// .github/niyam.json, read through the API. Exit 0: it passes; 1: refused,
+// each refusal naming the file and how to pass; 2: a usage error.
 import { pathToFileURL } from 'node:url';
 
 import { parse as parseYaml } from 'yaml';
+
+import { mergifyTests } from './merge-queue.mjs';
+
+export { mergifyTests };
 
 /** The branch whose copy runs the guard and whose ruleset names the required checks. */
 const MAIN = 'main';
@@ -76,12 +81,6 @@ const SHA256 = /\b[0-9a-f]{64}\b/g;
 const USES = /^(\s*(?:-\s*)?uses:\s*)([^@\s]+)@([0-9a-f]{40})(?:(\s+#\s*)(\S.*))?$/;
 
 const DEPENDABOT = 'dependabot[bot]';
-
-/** The account Mergify's merge queue opens its drafts as, and the branches it opens them on (`queue_branch_prefix`'s default), as src/identity.ts reads them. */
-const MERGE_QUEUE_BOT = 'mergify[bot]';
-const MERGE_QUEUE_BRANCH = 'mergify/merge-queue/';
-/** A merge-queue draft's title, `merge queue: checking #A on main (sha)` and `, stacked on #B`: the part naming what it tests. */
-const MERGE_QUEUE_TITLE = /^merge queue: checking (#\d+ on \S+ \([0-9a-f]+\)(?:, stacked on #\d+(?:(?:,\s*|\s+and\s+)#\d+)*)?)$/;
 
 /**
  * Whether `path` is a guard file: in the floor, or named by the repository's
@@ -613,24 +612,6 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, 
   return runs[0]
     .filter((refusal) => refused.every((set) => set.has(key(refusal))))
     .map((refusal) => ({ ...refusal, message: `This is Mergify's merge-queue draft testing ${names}, and none of them passes this. As #${tested[0]}: ${refusal.message}` }));
-}
-
-/**
- * The pull requests Mergify's merge-queue draft `pull` tests, from its
- * title, or undefined when it is no such draft. A draft is Mergify's when
- * GitHub names its author mergify[bot], a Bot, its head branch is on
- * Mergify's queue prefix and its head is the repository itself, as PR
- * identity reads it (src/identity.ts). A title that names none leaves it
- * judged as itself.
- * @param {any} pull @param {string} repo @param {number} pr @returns {number[] | undefined}
- */
-export function mergifyTests(pull, repo, pr) {
-  if (pull.user?.login !== MERGE_QUEUE_BOT || pull.user?.type !== 'Bot') return undefined;
-  if (!pull.head?.ref?.startsWith(MERGE_QUEUE_BRANCH) || pull.head?.repo?.full_name !== repo) return undefined;
-  const title = MERGE_QUEUE_TITLE.exec(pull.title ?? '')?.[1];
-  if (title === undefined) return undefined;
-  const tested = [...new Set([...title.matchAll(/#(\d+)\b/g)].map((match) => Number(match[1])))].filter((number) => number !== pr);
-  return tested.length > 0 ? tested : undefined;
 }
 
 /**

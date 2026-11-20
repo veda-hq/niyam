@@ -10,4 +10,7 @@
 /.github/workflows/shared-guard.yml @AlokBansal8
 /scripts/guard.mjs @AlokBansal8
 /scripts/guard.test.mjs @AlokBansal8
+# What Guard and PR identity both read of Mergify's merge-queue draft (#524).
+/scripts/merge-queue.mjs @AlokBansal8
+/scripts/merge-queue.test.mjs @AlokBansal8
 /.github/CODEOWNERS @AlokBansal8

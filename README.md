@@ -611,11 +611,21 @@ work pushed with the owner's login fails. Who pushed comes only from GitHub's
 record of the pushes to the pull request's branch (the fork's, for a fork),
 never from whoever started the run, so an edit, a reopen or a re-run by anyone
 gives the result the push gave. A push GitHub has not recorded yet is waited
-for about a minute, then fails until a re-run finds it. A merge queue's test runs
-pass with nothing to check, since each queued pull request was checked on its own:
-a `merge_group` run, and a pull request `mergify[bot]` opened from a
-`mergify/merge-queue/` branch of the repository itself (anyone else's pull request
-on such a branch is checked). **Work rules** runs on the agent's
+for about a minute, then fails until a re-run finds it. A `merge_group` run
+passes with nothing to check, since each queued pull request was checked on its
+own. So does Mergify's merge-queue draft, but only when it carries nothing else
+(#524). That draft is a pull request `mergify[bot]`, a Bot, opened from a
+`mergify/merge-queue/` branch of the repository itself, whose title names the
+pull requests it tests, as Guard reads it (see Guard). Every commit on it must be
+one of two kinds:
+- one GitHub lists for a pull request it tests;
+- Mergify's own merge of one: two parents, `Merge of PR N`, by `mergify[bot]`
+  and Verified as committed by `mergify-commit-signer`, which only Mergify can
+  sign as.
+
+Anything else, including a draft a tested pull request's 250-commit limit hides
+commits from, is checked as any pull request, saying why. So is anyone else's
+pull request on such a branch. **Work rules** runs on the agent's
 pull requests: each names exactly one slice, as a line `Slice: #N`, and that
 slice may be built:
 
@@ -1850,7 +1860,11 @@ goes on. Any other failure to read it fails closed.
 
 **Mergify's merge queue (#507).** Mergify tests a queued pull request in a draft of its own:
 - opened as `mergify[bot]` on a `mergify/merge-queue/` branch of the repository;
-- titled `merge queue: checking #A on main (sha)`, with `, stacked on #B` when it tests several.
+- titled `merge queue: checking #A on main (sha)`, or `#A + #B together` for a batch (#524);
+- with `, stacked on #B` when it tests several;
+- or, from four ahead, `, stacked on N pull requests ahead`, whose numbers come from the body's `### Queued ahead of this batch` list, only when it names exactly N.
+
+`scripts/merge-queue.mjs`, a guard file that imports nothing, reads this for Guard and for PR identity alike.
 
 Guard judges that draft's own diff once with each tested pull request's title, author and body. It refuses a file only when every tested pull request leads to that refusal. So a guard file passes when one tested pull request's approved slice names it, or when its onboard or Dependabot exemption holds for the draft's diff. Guard never passes a draft solely because it is Mergify's: a file still needs a tested pull request's owner-approved slice, unless an existing onboard or Dependabot exemption applies.
 
@@ -1920,8 +1934,9 @@ there.
 
 Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
 `@AlokBansal8` for the guard's files alone: `.github/workflows/shared-guard.yml`,
-`scripts/guard.mjs`, `scripts/guard.test.mjs` and `.github/CODEOWNERS`
-itself. With "Require review from Code Owners" on in the `main` ruleset, a
+`scripts/guard.mjs`, `scripts/guard.test.mjs`, the Mergify module it imports,
+`scripts/merge-queue.mjs` with its `scripts/merge-queue.test.mjs` (#524), and
+`.github/CODEOWNERS` itself. With "Require review from Code Owners" on in the `main` ruleset, a
 pull request that changes one of them waits for his approval. Every other
 pull request, including one under `.github/` that Guard passed, does not.
 The caller, `.github/workflows/niyam-guard.yml`, has no owner (#513), like
