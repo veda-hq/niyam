@@ -1924,10 +1924,12 @@ Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
 itself. With "Require review from Code Owners" on in the `main` ruleset, a
 pull request that changes one of them waits for his approval. Every other
 pull request, including one under `.github/` that Guard passed, does not.
-The caller, `.github/workflows/niyam-guard.yml`, has no owner (#513). Guard
-judges it whole: the job must be the caller as `onboard` writes it, and its
-pin only moves forward to a niyam release (#512). So niyam's own onboard
-merges on its checks.
+The caller, `.github/workflows/niyam-guard.yml`, has no owner (#513), like
+every other workflow. Whatever the slice names, Guard holds the job that can
+report `niyam-guard / judge` to the caller's shape as `onboard` writes it, and
+its pin to forward moves to a niyam release (#512). Any other change to the
+file, another job included, passes only when an approved slice names it, as
+for any workflow. So niyam's own onboard merges on its checks.
 
 ## License
 
