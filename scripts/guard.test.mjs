@@ -648,10 +648,19 @@ describe('judging a pull request', () => {
       await assert.rejects(judge(github({ files: [modified('.githooks/pre-push')], pull: draft() }), REPO, 1, OWNERS), /GitHub did not answer \/repos\/o\/r\/pulls\/2 \(HTTP 404: Not Found\)/);
     });
 
-    test('knows Mergify as PR identity does (src/identity.ts)', () => {
-      const source = readFileSync(new URL('../src/identity.ts', import.meta.url), 'utf8');
-      assert.ok(source.includes("const MERGE_QUEUE_BRANCH = 'mergify/merge-queue/';"));
-      assert.ok(source.includes("const MERGE_QUEUE_BOT = 'mergify[bot]';"));
+    test('a batch draft passes a file as any pull request it tests (#524)', async () => {
+      const files = [modified('.githooks/pre-push')];
+      const pull = draft('merge queue: checking #2 + #3 together on main (7514101)');
+      const over = { ...tested(2, 'no slice'), ...tested(3, 'Slice: #10') };
+      assert.deepEqual(await judge(github({ files, body: githooks, pull, over }), REPO, 1, OWNERS), []);
+    });
+
+    test('knows Mergify as PR identity does: both import scripts/merge-queue.mjs (#524)', () => {
+      const identity = readFileSync(new URL('../src/identity.ts', import.meta.url), 'utf8');
+      const guard = readFileSync(new URL('./guard.mjs', import.meta.url), 'utf8');
+      assert.match(identity, /^import \{[^}]*\bmergifyTests\b[^}]*\} from '\.\.\/scripts\/merge-queue\.mjs';$/m);
+      assert.match(guard, /^import \{ mergifyTests \} from '\.\/merge-queue\.mjs';$/m);
+      assert.ok(!/MERGE_QUEUE_(BOT|BRANCH|TITLE) =/.test(identity + guard));
     });
   });
 

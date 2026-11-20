@@ -1,20 +1,46 @@
+import { MERGE_QUEUE_BOT, mergifyTests, strayCommits } from '../scripts/merge-queue.mjs';
 import { API, account, anyLogin, either, loadSettings, noreplyEmail, sameLogin } from './agent.ts';
 import { isOn, notAdoptedLine, offLine } from './features.ts';
 import type { Output, Sys } from './types.ts';
 
 interface Commit {
   sha: string;
+  parents?: { sha: string }[];
   author?: { login?: string } | null;
   committer?: { login?: string } | null;
-  commit?: { author?: { email?: string }; verification?: { verified?: boolean; reason?: string } };
+  commit?: { message?: string; author?: { email?: string }; verification?: { verified?: boolean; reason?: string } };
 }
 
 /** GitHub lists at most 250 commits for a pull request. */
 const MOST_COMMITS = 250;
 
-/** The branches Mergify's merge queue tests on, and the account that opens and pushes them. */
-const MERGE_QUEUE_BRANCH = 'mergify/merge-queue/';
-const MERGE_QUEUE_BOT = 'mergify[bot]';
+/** Pull request `number`'s commits, as many as GitHub lists: MOST_COMMITS or more means some went unseen. */
+async function commitsOf(sys: Sys, token: string, slug: string, number: number): Promise<Commit[]> {
+  const commits: Commit[] = [];
+  for (let page = 1; ; page++) {
+    const { status, json } = await sys.http(`${API}/repos/${slug}/pulls/${number}/commits?per_page=100&page=${page}`, { token });
+    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot list the commits of #${number} (HTTP ${status})`);
+    commits.push(...(json as Commit[]));
+    if (json.length < 100 || commits.length >= MOST_COMMITS) return commits;
+  }
+}
+
+/**
+ * Why Mergify's draft, testing `tested`, does not carry only what they do, or
+ * undefined when every commit is a tested pull request's own or Mergify's
+ * signed merge of one (#524).
+ */
+async function strayFrom(sys: Sys, token: string, slug: string, commits: Commit[], tested: number[]): Promise<string | undefined> {
+  const theirs = new Map<number, string[]>();
+  for (const number of tested) {
+    const list = await commitsOf(sys, token, slug, number);
+    if (list.length >= MOST_COMMITS) return `#${number} has ${MOST_COMMITS} or more commits, more than GitHub lists`;
+    theirs.set(number, list.map((commit) => commit.sha));
+  }
+  const stray = strayCommits(commits, theirs);
+  if (stray.length === 0) return undefined;
+  return `${stray.map((sha) => sha.slice(0, 7)).join(', ')} ${stray.length === 1 ? 'is' : 'are'} in no pull request it tests and not ${MERGE_QUEUE_BOT}'s signed merge`;
+}
 
 /** GitHub may record a push a moment after the run starts: the record is read this many times, this far apart. */
 const RECORD_READS = 6;
@@ -41,7 +67,9 @@ export async function prIdentity(sys: Sys, io: Output): Promise<number> {
   const event = JSON.parse(sys.read(eventPath)) as {
     pull_request?: {
       number?: number;
-      user?: { login?: string } | null;
+      title?: string | null;
+      body?: string | null;
+      user?: { login?: string; type?: string } | null;
       base?: { sha: string };
       head?: { ref: string; repo: { full_name: string } | null };
     };
@@ -50,12 +78,6 @@ export async function prIdentity(sys: Sys, io: Output): Promise<number> {
   const number = pull?.number;
   if (typeof number !== 'number' || !pull?.base || !pull.head) {
     io.out('pr-identity: not a pull request; nothing to check');
-    return 0;
-  }
-  // Mergify's merge queue tests queued pull requests together on a branch of its own, which it opens and pushes.
-  // Each queued pull request passed this check on its own; anyone else's pull request on such a branch is checked.
-  if (pull.head.ref.startsWith(MERGE_QUEUE_BRANCH) && pull.user?.login === MERGE_QUEUE_BOT && pull.head.repo?.full_name === slug) {
-    io.out(`pr-identity: #${number} is ${MERGE_QUEUE_BOT}'s merge queue test of pull requests each checked on its own; nothing to check`);
     return 0;
   }
   const notAdopted = notAdoptedLine(sys, sys.cwd, 'pr-identity');
@@ -77,18 +99,27 @@ export async function prIdentity(sys: Sys, io: Output): Promise<number> {
   const logins = accounts.map((one) => one.login);
   const login = either(logins);
 
-  const commits: Commit[] = [];
-  for (let page = 1; ; page++) {
-    const { status, json } = await sys.http(`${API}/repos/${slug}/pulls/${number}/commits?per_page=100&page=${page}`, { token });
-    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot list the commits of #${number} (HTTP ${status})`);
-    commits.push(...(json as Commit[]));
-    if (json.length < 100 || commits.length >= MOST_COMMITS) break;
-  }
+  const commits = await commitsOf(sys, token, slug, number);
   if (commits.length >= MOST_COMMITS) {
     // Commits past GitHub's limit cannot be seen, so they cannot pass.
     io.err(`✗ #${number} has ${MOST_COMMITS} or more commits, more than GitHub lists; split it so every commit can be checked`);
     io.err(`pr-identity: #${number} fails the identity check`);
     return 1;
+  }
+
+  // Mergify's merge queue tests queued pull requests together in a draft of its own, which it opens and pushes,
+  // so their agent commits read as pushed by mergify[bot]. Each passed this check on its own, so the draft
+  // passes when it carries only their commits and Mergify's signed merges of them (#524). Any other draft,
+  // and a draft shaped as Mergify's that carries anything else, is checked as any pull request.
+  const tested = mergifyTests(pull, slug, number);
+  if (tested) {
+    const names = tested.map((one) => `#${one}`).join(', ');
+    const stray = await strayFrom(sys, token, slug, commits, tested);
+    if (stray === undefined) {
+      io.out(`pr-identity: #${number} is ${MERGE_QUEUE_BOT}'s merge queue draft testing ${names}, each checked on its own, and carries only their commits and ${MERGE_QUEUE_BOT}'s signed merges; nothing to check`);
+      return 0;
+    }
+    io.out(`pr-identity: #${number} is shaped as ${MERGE_QUEUE_BOT}'s merge queue draft testing ${names}, but ${stray}; checked as any pull request`);
   }
 
   /** The agent a commit claims, by its author's login or its no-reply address, or undefined. */

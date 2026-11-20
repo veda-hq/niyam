@@ -56,11 +56,12 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
-          # The script and what installs its one package. lint/package.json is
-          # a workspace project the frozen lockfile names.
+          # The script, the Mergify module it imports, and what installs its one
+          # package. lint/package.json is a workspace project the frozen lockfile names.
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /scripts/guard.mjs
+            /scripts/merge-queue.mjs
             /package.json
             /pnpm-lock.yaml
             /pnpm-workspace.yaml

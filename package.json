@@ -16,7 +16,8 @@
     "niyam": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts/merge-queue.mjs"
   ],
   "publishConfig": {
     "access": "public",

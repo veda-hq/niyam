@@ -296,42 +296,122 @@ describe('prIdentity', () => {
     assert.equal(sys.requests.length, 0);
   });
 
-  describe("Mergify's merge queue", () => {
-    /** A pull request opened by `author` from `ref`, with an agent commit mergify[bot] pushed. */
-    const queued = (author: string, ref: string, head = 'example-org/example-app'): FakeSys => {
+  describe("Mergify's merge queue (#524)", () => {
+    const QUEUE = 'mergify/merge-queue/0123456789';
+    const TITLE = 'merge queue: checking #2 on main (634865a)';
+    /** Mergify's merge of #`pr` into its draft, as on athya_mono#3822 (302cc9d), with `change` applied. */
+    const merge = (sha: string, pr: number, change: Record<string, unknown> = {}): Record<string, unknown> => ({
+      sha,
+      parents: [{ sha: 'p1' }, { sha: 'p2' }],
+      author: { login: 'mergify[bot]' },
+      committer: { login: 'mergify-commit-signer' },
+      commit: {
+        message: `Merge of PR ${pr}`,
+        author: { email: '37929162+mergify[bot]@users.noreply.github.com' },
+        verification: { verified: true, reason: 'valid' },
+      },
+      ...change,
+    });
+    interface Draft {
+      author?: string;
+      type?: string;
+      ref?: string;
+      head?: string;
+      title?: string | null;
+      body?: string;
+      /** Each tested pull request's own commits, by number. */
+      theirs?: Record<number, Record<string, unknown>[]>;
+    }
+    /** A draft whose agent commits mergify[bot] pushed, as Mergify opens one for #2 (athya_mono#3822's shape). */
+    const queued = (commits: Record<string, unknown>[], draft: Draft = {}): FakeSys => {
+      const { author = 'mergify[bot]', type = 'Bot', ref = QUEUE, head = 'example-org/example-app', title = TITLE, body = '', theirs = { 2: [commit('a1', 'agent')] } } = draft;
       const repo = `/repos/${head}`;
-      const sys = actions('opened', 'mergify[bot]', [commit('a1', 'agent', false)], [created('mergify[bot]', ['a1'])]);
-      sys.files.set(EVENT, JSON.stringify({ action: 'opened', pull_request: { number: 7, user: { login: author }, base: { sha: BASE }, head: { ref, repo: { full_name: head } } } }));
+      const shas = commits.map((one) => one.sha as string);
+      const sys = actions('opened', 'mergify[bot]', commits);
+      const pull = { number: 7, title, body, user: { login: author, type }, base: { sha: BASE }, head: { ref, repo: { full_name: head } } };
+      sys.files.set(EVENT, JSON.stringify({ action: 'opened', pull_request: pull }));
+      for (const [number, list] of Object.entries(theirs)) sys.route('GET', `${REPO}/pulls/${number}/commits?per_page=100&page=1`, { status: 200, json: list });
       sys.route('GET', `${repo}/activity?ref=${encodeURIComponent(`refs/heads/${ref}`)}&per_page=100`, {
         status: 200,
         json: [{ activity_type: 'branch_creation', actor: { login: 'mergify[bot]' }, before: ZERO, after: 'h1' }],
       });
-      sys.route('GET', `${repo}/compare/${BASE}...h1?per_page=100&page=1`, { status: 200, json: { commits: [{ sha: 'a1' }] } });
+      sys.route('GET', `${repo}/compare/${BASE}...h1?per_page=100&page=1`, { status: 200, json: { commits: shas.map((sha) => ({ sha })) } });
       return sys;
     };
-    const QUEUE = 'mergify/merge-queue/0123456789';
+    const SKIP = "pr-identity: #7 is mergify[bot]'s merge queue draft testing #2, each checked on its own, and carries only their commits and mergify[bot]'s signed merges; nothing to check";
 
-    it("skips mergify[bot]'s test pull request on a merge queue branch", async () => {
-      const sys = queued('mergify[bot]', QUEUE);
-      assert.deepEqual(await check(sys), {
-        code: 0,
-        out: ["pr-identity: #7 is mergify[bot]'s merge queue test of pull requests each checked on its own; nothing to check"],
-        err: [],
-      });
-      assert.equal(sys.requests.length, 0);
+    it("skips a genuine draft: the tested pull request's commit and Mergify's signed merge", async () => {
+      assert.deepEqual(await check(queued([commit('a1', 'agent'), merge('m1', 2)])), { code: 0, out: [SKIP], err: [] });
     });
 
-    it('checks anyone else on a merge queue branch', async () => {
-      for (const author of ['example-owner', AGENT, 'other[bot]']) {
-        assert.equal((await check(queued(author, QUEUE))).code, 1, author);
+    it('skips a stacked draft whose pull requests have several commits each', async () => {
+      const commits = [commit('a1', 'agent'), commit('a2', 'agent'), commit('b1', 'agent'), commit('b2', 'owner'), merge('m3', 3), merge('m2', 2)];
+      const sys = queued(commits, { title: 'merge queue: checking #2 on main (a50001d), stacked on #3', theirs: { 2: [commit('a1', 'agent'), commit('a2', 'agent')], 3: [commit('b1', 'agent'), commit('b2', 'owner')] } });
+      assert.match((await check(sys)).out[0] ?? '', /^pr-identity: #7 is mergify\[bot\]'s merge queue draft testing #2, #3, each checked on its own/);
+    });
+
+    it("skips a batch, and a deep stack whose body lists those ahead", async () => {
+      const theirs = { 2: [commit('a1', 'agent')], 3: [commit('b1', 'agent')], 4: [], 5: [], 6: [], 8: [] };
+      const commits = [commit('a1', 'agent'), commit('b1', 'agent'), merge('m2', 2), merge('m3', 3)];
+      const batch = await check(queued(commits, { title: 'merge queue: checking #2 + #3 together on main (7514101)', theirs }));
+      assert.equal(batch.code, 0);
+      const body = '### Queued ahead of this batch\n\n- [#4](/o/r/pull/4) + [#5](/o/r/pull/5)\n- [#6](/o/r/pull/6)\n- [#8](/o/r/pull/8)\n\n<details>\n#9\n</details>';
+      const deep = await check(queued(commits, { title: 'merge queue: checking #2 + #3 together on main (7514101), stacked on 4 pull requests ahead', body, theirs }));
+      assert.match(deep.out[0] ?? '', /testing #2, #3, #4, #5, #6, #8, each checked on its own/);
+    });
+
+    it('checks a forged draft: an agent commit no tested pull request has, pushed by mergify[bot]', async () => {
+      const { code, out, err } = await check(queued([commit('a1', 'agent'), commit('f1', 'agent'), merge('m1', 2)]));
+      assert.equal(code, 1);
+      assert.deepEqual(out, ["pr-identity: #7 is shaped as mergify[bot]'s merge queue draft testing #2, but f1 is in no pull request it tests and not mergify[bot]'s signed merge; checked as any pull request"]);
+      assert.deepEqual(err, ['✗ mergify[bot] pushed a1, f1, which claim ExampleBot; agent work must be pushed by ExampleBot', 'pr-identity: #7 fails the identity check']);
+    });
+
+    it("checks a merge commit that only looks like Mergify's", async () => {
+      for (const [why, forged] of [
+        ['not Verified', merge('m1', 2, { commit: { message: 'Merge of PR 2', verification: { verified: false, reason: 'unsigned' } } })],
+        ['another committer', merge('m1', 2, { committer: { login: 'example-owner' } })],
+        ['another author', merge('m1', 2, { author: { login: AGENT } })],
+        ['one parent', merge('m1', 2, { parents: [{ sha: 'p1' }] })],
+        ['a pull request it does not test', merge('m1', 9)],
+        ['another message', merge('m1', 2, { commit: { message: 'Merge branch work', verification: { verified: true } } })],
+      ] as const) {
+        const { out } = await check(queued([commit('a1', 'agent'), forged]));
+        assert.match(out[0] ?? '', /^pr-identity: #7 is shaped as mergify\[bot\]'s merge queue draft testing #2, but m1 is in no pull request/, why);
       }
     });
 
-    it('checks mergify[bot] on any other branch, or from a fork', async () => {
-      for (const sys of [queued('mergify[bot]', 'work'), queued('mergify[bot]', 'mergify/bp/main/pr-7'), queued('mergify[bot]', QUEUE, 'someone/example-app')]) {
-        const { code, err } = await check(sys);
-        assert.equal(code, 1);
-        assert.equal(err.at(-1), 'pr-identity: #7 fails the identity check');
+    it('checks a draft when a tested pull request has more commits than GitHub lists', async () => {
+      const many = Array.from({ length: 100 }, (_, index) => ({ sha: `t${index}` }));
+      const sys = queued([commit('a1', 'agent'), merge('m1', 2)], { theirs: {} });
+      for (const page of [1, 2, 3]) sys.route('GET', `${REPO}/pulls/2/commits?per_page=100&page=${page}`, { status: 200, json: many });
+      const { code, out } = await check(sys);
+      assert.equal(code, 1);
+      assert.match(out[0] ?? '', /but #2 has 250 or more commits, more than GitHub lists; checked as any pull request$/);
+    });
+
+    it('throws when GitHub will not list a tested pull request’s commits', async () => {
+      await assert.rejects(check(queued([commit('a1', 'agent')], { theirs: {} })), /cannot list the commits of #2/);
+    });
+
+    it('checks as any pull request anything not shaped as a draft Mergify tests something in', async () => {
+      const genuine = [commit('a1', 'agent'), merge('m1', 2)];
+      for (const [why, draft] of [
+        ['the owner', { author: 'example-owner', type: 'User' }],
+        ['the agent', { author: AGENT, type: 'User' }],
+        ['another bot', { author: 'other[bot]' }],
+        ['a user named like the bot', { type: 'User' }],
+        ['another branch', { ref: 'work' }],
+        ['a backport branch', { ref: 'mergify/bp/main/pr-7' }],
+        ['a fork', { head: 'someone/example-app' }],
+        ['a title naming nothing', { title: 'merge queue: checking it' }],
+        ['no title', { title: null }],
+        ['a deep stack whose body lists fewer', { title: `${TITLE}, stacked on 4 pull requests ahead`, body: '### Queued ahead of this batch\n- [#4](/o/r/pull/4)' }],
+      ] as const) {
+        const { code, out, err } = await check(queued(genuine, draft));
+        assert.equal(code, 1, why);
+        assert.ok(!out.some((line) => line.includes('merge queue')), why);
+        assert.equal(err.at(-1), 'pr-identity: #7 fails the identity check', why);
       }
     });
   });
