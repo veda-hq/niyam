@@ -2,6 +2,8 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import { parse as parseYaml } from 'yaml';
+
 import {
   BATCH,
   FEATURES,
@@ -42,6 +44,68 @@ const OWNERS = ['Owner'];
 const APPROVED = '2026-01-02T00:00:00Z';
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
+
+/**
+ * Evaluates `expression` in `context` as GitHub Actions does, for the part of
+ * its expression language shared-guard.yml's concurrency group uses: context
+ * paths, 'strings', ==, && and || (each giving an operand, as GitHub's do),
+ * parentheses and startsWith(). GitHub compares strings ignoring case.
+ * https://docs.github.com/en/actions/reference/workflows-and-actions/expressions, read 2026-11-20.
+ */
+function evaluate(expression, context) {
+  const tokens = expression.match(/'(?:[^']|'')*'|&&|\|\||==|[(),]|[\w.[\]-]+/g) ?? [];
+  let at = 0;
+  const truthy = (value) => value !== null && value !== undefined && value !== false && value !== '' && value !== 0;
+  const same = (a, b) => (typeof a === 'string' && typeof b === 'string' ? a.toLowerCase() === b.toLowerCase() : a === b);
+  const primary = () => {
+    const token = tokens[at++];
+    if (token === '(') {
+      const value = or();
+      assert.equal(tokens[at++], ')');
+      return value;
+    }
+    if (token.startsWith("'")) return token.slice(1, -1).replaceAll("''", "'");
+    if (tokens[at] === '(') {
+      assert.equal(token, 'startsWith', `${token}() is not in this evaluator`);
+      at++;
+      const subject = or();
+      assert.equal(tokens[at++], ',');
+      const prefix = or();
+      assert.equal(tokens[at++], ')');
+      return String(subject ?? '').toLowerCase().startsWith(String(prefix).toLowerCase());
+    }
+    return token.split('.').reduce((value, key) => (value === null || value === undefined ? undefined : value[key]), context);
+  };
+  const equals = () => {
+    let value = primary();
+    while (tokens[at] === '==') {
+      at++;
+      value = same(value, primary());
+    }
+    return value;
+  };
+  const and = () => {
+    let value = equals();
+    while (tokens[at] === '&&') {
+      at++;
+      const right = equals();
+      value = truthy(value) ? right : value;
+    }
+    return value;
+  };
+  const or = () => {
+    let value = and();
+    while (tokens[at] === '||') {
+      at++;
+      const right = and();
+      value = truthy(value) ? value : right;
+    }
+    return value;
+  };
+  const value = or();
+  assert.equal(at, tokens.length, `${expression} is not wholly read`);
+  return value;
+}
 
 const WORKFLOW = (jobs) => `name: x\non: push\njobs:\n${jobs.map(([id, name]) => `  ${id}:\n${name ? `    name: ${name}\n` : ''}    runs-on: ubuntu-latest\n    steps: [{ run: 'true' }]\n`).join('')}`;
 
@@ -583,6 +647,51 @@ describe('judging a pull request', () => {
       ]) {
         assert.equal(mergifyTests(pull, REPO, 1), undefined, why);
       }
+    });
+
+    describe("shared-guard.yml's concurrency group (CHECKS_INTERRUPTED, athya_mono #3829)", () => {
+      const judgeJob = parseYaml(readFileSync(new URL('../.github/workflows/shared-guard.yml', import.meta.url), 'utf8')).jobs.judge;
+      /** The group run `runId` of a pull_request_target event for `pull` in REPO joins, as GitHub evaluates it. */
+      const groupOf = (pull, runId) =>
+        judgeJob.concurrency.group.replace(/\$\{\{(.*?)\}\}/g, (_, expression) =>
+          String(evaluate(expression, { github: { repository: REPO, run_id: String(runId), event: { pull_request: { number: 1, ...pull } } } })),
+        );
+
+      test('no run on a draft of Mergify’s cancels or replaces another, so the draft keeps every verdict', () => {
+        assert.equal(judgeJob.concurrency['cancel-in-progress'], true);
+        // #3829: Mergify and blacksmith-sh edited the draft's body 19 times in five minutes, each edit a run.
+        const groups = new Set(Array.from({ length: 19 }, (_, run) => groupOf(draft(), 1000 + run)));
+        assert.equal(groups.size, 19);
+        assert.ok([...groups].every((group) => group.startsWith('niyam-guard-1-')));
+      });
+
+      test('an ordinary pull request keeps one group, its newer run cancelling the older', () => {
+        const human = { title: '✨ feat(x): y', user: { login: 'AthyaBot', type: 'User' }, head: { sha: 'h', ref: 'claude/x', repo: { full_name: REPO } } };
+        assert.equal(groupOf(human, 1), 'niyam-guard-1-pull');
+        assert.equal(groupOf(human, 2), 'niyam-guard-1-pull');
+      });
+
+      test('it knows a draft as mergifyTests does: each condition failing alone keeps the one group', () => {
+        for (const [why, pull] of [
+          ['another login', draft(undefined, { user: { login: 'AthyaBot', type: 'User' } })],
+          ['a user named like the bot', draft(undefined, { user: { login: 'mergify[bot]', type: 'User' } })],
+          ['another branch', draft(undefined, { head: { sha: 'h', ref: 'mergify/bp/main/pr-2', repo: { full_name: REPO } } })],
+          ['a fork', draft(undefined, { head: { sha: 'h', ref: 'mergify/merge-queue/x', repo: { full_name: 'someone/r' } } })],
+          ['a deleted head repository', draft(undefined, { head: { sha: 'h', ref: 'mergify/merge-queue/x', repo: null } })],
+        ]) {
+          assert.equal(mergifyTests(pull, REPO, 1), undefined, why);
+          assert.equal(groupOf(pull, 1), groupOf(pull, 2), why);
+        }
+        assert.deepEqual(mergifyTests(draft(), REPO, 1), [2]);
+        assert.notEqual(groupOf(draft(), 1), groupOf(draft(), 2));
+      });
+
+      test('a draft of Mergify’s whose title names no pull request still never cancels: Mergify drops the pull request it tests all the same', () => {
+        for (const title of ['merge queue: merged #2: ✨ feat(x): y', null]) {
+          assert.equal(mergifyTests(draft(title), REPO, 1), undefined, String(title));
+          assert.notEqual(groupOf(draft(title), 1), groupOf(draft(title), 2), String(title));
+        }
+      });
     });
 
     test('a guard file the tested pull request’s approved slice names passes', async () => {

@@ -1871,6 +1871,8 @@ Guard judges that draft's own diff once with each tested pull request's title, a
 
 Any other draft, or one whose title names no pull request, is judged as itself, and so is any draft where work rules are off. A tested pull request GitHub cannot give fails closed.
 
+On a pull request, Guard's newer run cancels its older one. On Mergify's draft it does not: each run there has a concurrency group of its own, and every run reaches a verdict. This holds for any draft by `mergify[bot]` on a `mergify/merge-queue/` branch of the repository, whatever its title. Mergify edits the draft's body many times a minute. A cancelled required check makes it drop the pull request it tests ("checks interrupted"). Guard does not judge the draft's body, so the verdicts agree.
+
 A name is a path, a folder ending in `/`, or a pattern where `*` matches
 within one folder and `**` across them. The guard files are a floor every
 repository has, everything under `.github/`, `.githooks/` and `.husky/`,
