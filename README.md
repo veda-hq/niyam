@@ -1841,6 +1841,14 @@ slice joined counts, wherever it is:
 If GitHub cannot find the Approvals issue, Guard counts nothing from it and
 goes on. Any other failure to read it fails closed.
 
+**Mergify's merge queue (#507).** Mergify tests a queued pull request in a draft of its own:
+- opened as `mergify[bot]` on a `mergify/merge-queue/` branch of the repository;
+- titled `merge queue: checking #A on main (sha)`, with `, stacked on #B` when it tests several.
+
+Guard judges that draft's own diff once with each tested pull request's title, author and body. It refuses a file only when every tested pull request leads to that refusal. So a guard file passes when one tested pull request's approved slice names it, or when its onboard or Dependabot exemption holds for the draft's diff. Guard never passes a draft solely because it is Mergify's: a file still needs a tested pull request's owner-approved slice, unless an existing onboard or Dependabot exemption applies.
+
+Any other draft, or one whose title names no pull request, is judged as itself, and so is any draft where work rules are off. A tested pull request GitHub cannot give fails closed.
+
 A name is a path, a folder ending in `/`, or a pattern where `*` matches
 within one folder and `**` across them. The guard files are a floor every
 repository has, everything under `.github/`, `.githooks/` and `.husky/`,

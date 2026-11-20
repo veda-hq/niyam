@@ -14,6 +14,7 @@ import {
   client,
   guardPathsIn,
   guardsNamed,
+  mergifyTests,
   isCaller,
   isGuardFile,
   isTestFile,
@@ -467,6 +468,109 @@ describe('judging a pull request', () => {
     const gh = github({ files, over: batch(answer('Decision: approve #10')) });
     await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 7);
     assert.ok(!gh.calls.some((call) => call.includes('/issues/7/')));
+  });
+
+  describe("Mergify's merge-queue draft (#507)", () => {
+    /** Draft 1, as Mergify opened #3822 to test #3821, here testing `title`'s pull requests. */
+    const draft = (title = 'merge queue: checking #2 on main (634865a)', extra = {}) => ({
+      title,
+      body: '> [!NOTE]\n> **This is a merge queue draft opened by Mergify.**',
+      user: { login: 'mergify[bot]', type: 'Bot' },
+      head: { sha: 'h', ref: 'mergify/merge-queue/1ad5372850', repo: { full_name: REPO } },
+      draft: true,
+      ...extra,
+    });
+    const tested = (number, body, title = '✨ feat(x): y') => ({ [`/repos/${REPO}/pulls/${number}`]: { title, body, user: { login: 'AthyaBot', type: 'User' } } });
+    const githooks = '**Guards:** `.githooks/`';
+
+    test('mergifyTests reads the pull requests a draft of Mergify’s tests, and nothing else', () => {
+      assert.deepEqual(mergifyTests(draft(), REPO, 1), [2]);
+      assert.deepEqual(mergifyTests(draft('merge queue: checking #3751 on main (0aa2f20), stacked on #3754'), REPO, 1), [3751, 3754]);
+      assert.deepEqual(mergifyTests(draft('merge queue: checking #2 on main (0aa2f20), stacked on #3, #4 and #2'), REPO, 1), [2, 3, 4]);
+      // Its own number is not a pull request it tests.
+      assert.equal(mergifyTests(draft('merge queue: checking #1 on main (0aa2f20)'), REPO, 1), undefined);
+      for (const [why, pull] of [
+        ['another login', draft(undefined, { user: { login: 'AthyaBot', type: 'User' } })],
+        ['a user named like the bot', draft(undefined, { user: { login: 'mergify[bot]', type: 'User' } })],
+        ['another branch', draft(undefined, { head: { sha: 'h', ref: 'mergify/bp/main/pr-2', repo: { full_name: REPO } } })],
+        ['a fork', draft(undefined, { head: { sha: 'h', ref: 'mergify/merge-queue/x', repo: { full_name: 'someone/r' } } })],
+        ['a deleted head repository', draft(undefined, { head: { sha: 'h', ref: 'mergify/merge-queue/x', repo: null } })],
+        ['an older title', draft('merge queue: merged #2: ✨ feat(x): y')],
+        ['a title naming more after it', draft('merge queue: checking #2 on main (634865a) and #9')],
+        ['no title', draft(null)],
+      ]) {
+        assert.equal(mergifyTests(pull, REPO, 1), undefined, why);
+      }
+    });
+
+    test('a guard file the tested pull request’s approved slice names passes', async () => {
+      const files = [modified('.githooks/pre-push')];
+      const gh = github({ files, body: githooks, pull: draft(), over: tested(2, 'Slice: #10') });
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+      assert.ok(gh.calls.includes(`/repos/${REPO}/pulls/2`));
+    });
+
+    test('one no tested pull request passes is refused, saying so', async () => {
+      const files = [modified('.githooks/pre-push')];
+      const [refusal, ...rest] = await judge(github({ files, body: githooks, pull: draft(), over: tested(2, 'no slice') }), REPO, 1, OWNERS);
+      assert.equal(refusal.file, '.githooks/pre-push');
+      assert.match(refusal.message, /^This is Mergify's merge-queue draft testing #2, and none of them passes this\. As #2: This pull request changes a guard file, \.githooks\/pre-push, and names no slice\./);
+      assert.deepEqual(rest, []);
+      // A file the slice does not name is refused, even one only the draft changes.
+      const more = [modified('.githooks/pre-push'), modified('.husky/pre-commit')];
+      const refusals = await judge(github({ files: more, body: githooks, pull: draft(), over: tested(2, 'Slice: #10') }), REPO, 1, OWNERS);
+      assert.deepEqual(refusals.map((one) => one.file), ['.husky/pre-commit']);
+    });
+
+    test('a stacked draft passes a file when any pull request it tests passes it', async () => {
+      const files = [modified('.githooks/pre-push'), modified('.husky/pre-commit')];
+      const pull = draft('merge queue: checking #2 on main (0aa2f20), stacked on #3');
+      const over = { ...tested(2, 'Slice: #10'), ...tested(3, 'no slice') };
+      const gh = github({ files, body: githooks, pull, over });
+      const refusals = await judge(gh, REPO, 1, OWNERS);
+      // .githooks/ passes as #2, though #3 names no slice; .husky/ passes as neither.
+      assert.deepEqual(refusals.map((one) => one.file), ['.husky/pre-commit']);
+      // The draft's diff is read once, however many pull requests it tests.
+      assert.equal(gh.calls.filter((call) => call.startsWith(`/repos/${REPO}/pulls/1/files`)).length, 1);
+      assert.match(refusals[0].message, /^This is Mergify's merge-queue draft testing #2, #3, and none of them passes this\. As #2: /);
+    });
+
+    test('an onboard draft passes as the onboard it tests', async () => {
+      const patch = '@@ -1 +1 @@\n-    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.16\n+    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.17';
+      const files = [modified('.github/workflows/niyam.yml', patch)];
+      const contents = { '.github/workflows/niyam.yml@h': WORKFLOW([['niyam']]), '.github/workflows/niyam.yml@m': WORKFLOW([['niyam']]) };
+      const tag = {
+        [`/repos/${NIYAM}/git/ref/tags/v0.6.17`]: { object: { type: 'commit', sha: 'd'.repeat(40) } },
+        [`/repos/${NIYAM}/compare/main...${'d'.repeat(40)}`]: { status: 'behind' },
+      };
+      const onboard = tested(2, 'no slice', '🔧 chore(niyam): onboard at v0.6.17');
+      assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: draft(), over: { ...tag, ...onboard } }), REPO, 1, OWNERS), []);
+      // The draft's own title is no onboard's, so as itself it is refused, as #3822 was.
+      assert.equal((await judge(github({ files, contents, body: 'none', pull: draft('merge queue: checking it'), over: { ...tag, ...onboard } }), REPO, 1, OWNERS)).length, 1);
+    });
+
+    test('a draft not of Mergify’s, or with work rules off, is judged as itself', async () => {
+      const files = [modified('.githooks/pre-push')];
+      const over = tested(2, 'Slice: #10');
+      // As itself it names slice #10 nowhere, so the approved slice does not count.
+      const [refusal] = await judge(github({ files, body: githooks, pull: draft(undefined, { user: { login: 'AthyaBot', type: 'User' } }), over }), REPO, 1, OWNERS);
+      assert.match(refusal.message, /^This pull request changes a guard file, \.githooks\/pre-push, and names no slice\./);
+      const gh = github({ files, body: githooks, pull: draft(), over });
+      const unjudged = [];
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS, [], 'main', unjudged), []);
+      assert.deepEqual(unjudged, [{ path: '.githooks/pre-push', why: 'changes a guard file' }]);
+      assert.ok(!gh.calls.includes(`/repos/${REPO}/pulls/2`));
+    });
+
+    test('a tested pull request GitHub cannot give fails closed', async () => {
+      await assert.rejects(judge(github({ files: [modified('.githooks/pre-push')], pull: draft() }), REPO, 1, OWNERS), /GitHub did not answer \/repos\/o\/r\/pulls\/2 \(HTTP 404: Not Found\)/);
+    });
+
+    test('knows Mergify as PR identity does (src/identity.ts)', () => {
+      const source = readFileSync(new URL('../src/identity.ts', import.meta.url), 'utf8');
+      assert.ok(source.includes("const MERGE_QUEUE_BRANCH = 'mergify/merge-queue/';"));
+      assert.ok(source.includes("const MERGE_QUEUE_BOT = 'mergify[bot]';"));
+    });
   });
 
   test('package.json counts for its scripts alone', async () => {

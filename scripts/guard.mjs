@@ -75,6 +75,12 @@ const USES = /^(\s*(?:-\s*)?uses:\s*)([^@\s]+)@([0-9a-f]{40})(?:(\s+#\s*)(\S.*))
 
 const DEPENDABOT = 'dependabot[bot]';
 
+/** The account Mergify's merge queue opens its drafts as, and the branches it opens them on (`queue_branch_prefix`'s default), as src/identity.ts reads them. */
+const MERGE_QUEUE_BOT = 'mergify[bot]';
+const MERGE_QUEUE_BRANCH = 'mergify/merge-queue/';
+/** A merge-queue draft's title, `merge queue: checking #A on main (sha)` and `, stacked on #B`: the part naming what it tests. */
+const MERGE_QUEUE_TITLE = /^merge queue: checking (#\d+ on \S+ \([0-9a-f]+\)(?:, stacked on #\d+(?:(?:,\s*|\s+and\s+)#\d+)*)?)$/;
+
 /**
  * Whether `path` is a guard file: in the floor, or named by the repository's
  * own `paths`, in the **Guards:** syntax. package.json counts only for its
@@ -526,15 +532,66 @@ async function approvedAt(gh, repo, slice, owners, approvals) {
  */
 export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, unjudged = undefined, approvals = undefined) {
   const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
+  // Without work rules no slice is judged, so a draft is judged as itself: no tested pull request changes that.
+  const tested = unjudged ? undefined : mergifyTests(pull, repo, pr);
+  if (!tested) return judgeAs(gh, repo, pr, pull, pull, owners, ownPaths, branch, unjudged, approvals);
+  // Mergify's merge-queue draft: its own diff, judged once as each pull request it tests (#507). Each REST read
+  // is made once across the runs, so a stack costs a read per tested pull request and slice, not another of the diff.
+  const reads = new Map();
+  const once = {
+    get: (path, options) => {
+      const key = `${options?.raw ? 'raw' : 'json'} ${path}`;
+      if (!reads.has(key)) reads.set(key, gh.get(path, options));
+      return reads.get(key);
+    },
+    post: (path, body) => gh.post(path, body),
+  };
+  const runs = [];
+  for (const number of tested) {
+    const as = await read(once, `/repos/${repo}/pulls/${number}`);
+    runs.push(await judgeAs(once, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals));
+  }
+  // A refusal stands only where every tested pull request leads to one, file by file.
+  const key = (refusal) => refusal.file ?? refusal.message;
+  const refused = runs.map((run) => new Set(run.map(key)));
+  const names = tested.map((number) => `#${number}`).join(', ');
+  return runs[0]
+    .filter((refusal) => refused.every((set) => set.has(key(refusal))))
+    .map((refusal) => ({ ...refusal, message: `This is Mergify's merge-queue draft testing ${names}, and none of them passes this. As #${tested[0]}: ${refusal.message}` }));
+}
+
+/**
+ * The pull requests Mergify's merge-queue draft `pull` tests, from its
+ * title, or undefined when it is no such draft. A draft is Mergify's when
+ * GitHub names its author mergify[bot], a Bot, its head branch is on
+ * Mergify's queue prefix and its head is the repository itself, as PR
+ * identity reads it (src/identity.ts). A title that names none leaves it
+ * judged as itself.
+ * @param {any} pull @param {string} repo @param {number} pr @returns {number[] | undefined}
+ */
+export function mergifyTests(pull, repo, pr) {
+  if (pull.user?.login !== MERGE_QUEUE_BOT || pull.user?.type !== 'Bot') return undefined;
+  if (!pull.head?.ref?.startsWith(MERGE_QUEUE_BRANCH) || pull.head?.repo?.full_name !== repo) return undefined;
+  const title = MERGE_QUEUE_TITLE.exec(pull.title ?? '')?.[1];
+  if (title === undefined) return undefined;
+  const tested = [...new Set([...title.matchAll(/#(\d+)\b/g)].map((match) => Number(match[1])))].filter((number) => number !== pr);
+  return tested.length > 0 ? tested : undefined;
+}
+
+/**
+ * Judges pull request `pull`'s diff as if it had `as`'s title, author and
+ * body: `as` is `pull` itself, or a pull request a Mergify draft tests.
+ */
+async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudged, approvals) {
   const files = await every(gh, `/repos/${repo}/pulls/${pr}/files`, FILES_MOST);
   if (files.length !== pull.changed_files) {
     return [{ message: `GitHub listed ${files.length} of this pull request's ${pull.changed_files} changed files, so the guard cannot see every change. Split it into pull requests of fewer files.` }];
   }
   const runsOf = new Map(files.map((file) => [file, changeRuns(file.patch)]));
   const mechanical = (test) => files.every((file) => file.status === 'modified' && runsOf.get(file) && test(runsOf.get(file)));
-  const onboard = ONBOARD_TITLE.exec(pull.title ?? '')?.[1];
+  const onboard = ONBOARD_TITLE.exec(as.title ?? '')?.[1];
   let exempt = false;
-  if (pull.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = true;
+  if (as.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = true;
   else if (onboard && mechanical((runs) => versionMoves(runs, onboard) >= 0)) {
     // The version must move somewhere, so a PR that only swaps sha256s is no onboard change.
     const moved = files.reduce((total, file) => total + versionMoves(runsOf.get(file), onboard), 0);
@@ -627,7 +684,7 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, 
     return refusals;
   }
 
-  const slice = sliceOf(pull.body ?? '');
+  const slice = sliceOf(as.body ?? '');
   const how = (path) => `name \`${path}\` in the slice's **Guards:** section, and have ${owners.join(' or ')} approve the slice again; then edit or push this pull request so Guard runs again`;
   if (slice === undefined) {
     return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${how(path)}.` }))];
