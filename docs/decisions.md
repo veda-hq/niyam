@@ -2540,6 +2540,9 @@
     on every merged draft changing a guard file since 0.7.8 (#3800, #3812,
     #3831, #3839, #3841), PR identity on both merged since 0.7.10. Nothing
     gated on it: the draft is closed unmerged and its head reaches no branch.
+  - With work rules off (`.github/niyam.json`), Guard still judges such a
+    draft as itself, as it judges every draft there; PR identity reads it as
+    the pull request it merged.
   - `MERGED_TITLE` reads the number after `merged #` alone; the rest is #A's
     author's own title. Only the single form is read: 116 of athya_mono's 200
     latest closed drafts are `merged #N: …`, the rest `checking #N`, none a
