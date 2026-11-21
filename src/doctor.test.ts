@@ -125,7 +125,7 @@ describe('doctor', () => {
     ]);
   });
 
-  it('warns of no hook that sets its gh to as-agent and runs "$@", and still of a plain gh beside it', async () => {
+  it('does not warn of a hook that sets its gh to as-agent and runs "$@", but still warns of a plain gh beside it', async () => {
     const routed = healthy();
     setGhHook(routed);
     const { code, out } = await check(routed);
@@ -987,7 +987,7 @@ describe('doctor in a Claude cloud session', () => {
     ]);
   });
 
-  it('warns of no hook that sets its gh to as-agent and runs "$@", and still of a plain gh beside it, as on a Mac', async () => {
+  it('does not warn of a hook that sets its gh to as-agent and runs "$@", but still warns of a plain gh beside it, as on a Mac', async () => {
     const routed = cloud();
     setGhHook(routed);
     assert.deepEqual(marked((await check(routed)).out, '▲'), []);

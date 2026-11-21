@@ -329,8 +329,8 @@ function routedByHelper(sys: Sys, root: string, script: string): boolean {
     });
 }
 
-/** A command that only puts gh in the positional parameters, for `"$@"` to run: `set -- gh …`. */
-const SET_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+gh(?:\s|$)/;
+/** A command that only puts gh in the positional parameters, for `"$@"` to run: `set -- gh …`, with no command substitution in it. */
+const SET_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+gh(?:\s(?:(?!\$\(|`).)*)?$/;
 /** One that puts `as-agent` running gh there instead: `set -- "$cli" as-agent --session "$sid" -- gh …`. */
 const SET_AS_AGENT_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+.*\bas-agent\s.*\s--\s+gh(?:\s|$)/;
 
@@ -339,9 +339,11 @@ const SET_AS_AGENT_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+.*\bas-agent\s.*
  * `set -- … as-agent … -- gh`: a script that builds its gh in the
  * positional parameters and runs it as `"$@"` has gh plain only where it
  * finds no niyam to run `as-agent` with, which is the cloud, whose proxy
- * authenticates it. Each other command is kept, so a plain `gh` call in the
- * same script is still judged. Without the `as-agent` form, `set -- gh` is
- * kept: its `"$@"` runs gh plain.
+ * authenticates it; a Mac with no launcher is `doctor`'s own ✗ already
+ * (`launcherFinding`). Each other command is kept, so a plain `gh` call in
+ * the same script is still judged, and so is a `set -- gh` that runs a
+ * command substitution. Without the `as-agent` form, `set -- gh` is kept:
+ * its `"$@"` runs gh plain.
  */
 function withoutRoutedSetGh(text: string): string {
   const commands = text.split(/[;&|\n]+/);

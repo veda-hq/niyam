@@ -312,7 +312,8 @@ describe('hooksHittingLock', () => {
     ].join('\n');
 
   it('takes a script that sets its gh to as-agent in the positional parameters and runs "$@" as routed, its plain set -- gh being the cloud\'s', () => {
-    const hooks = ['.claude/hooks/routed.sh', '.claude/hooks/plain.sh', '.claude/hooks/unrouted.sh', '.claude/hooks/same-line.sh', '.claude/hooks/late.sh', '.claude/hooks/then.sh'];
+    // then.sh's `else set -- gh` runs plain gh only where there is no launcher: the cloud, or a Mac doctor already marks ✗ for it (launcherFinding).
+    const hooks = ['.claude/hooks/routed.sh', '.claude/hooks/plain.sh', '.claude/hooks/unrouted.sh', '.claude/hooks/same-line.sh', '.claude/hooks/nested.sh', '.claude/hooks/late.sh', '.claude/hooks/then.sh'];
     const files = {
       '.claude/hooks/routed.sh': setGhHook(),
       '.claude/hooks/plain.sh': setGhHook('\n  gh api repos/o/r/releases'),
@@ -320,11 +321,13 @@ describe('hooksHittingLock', () => {
       '.claude/hooks/same-line.sh': '#!/bin/bash\nset -- gh; gh api x\n[ -x "$cli" ] && set -- "$cli" as-agent --session "$sid" -- gh\n"$@" api y\n',
       '.claude/hooks/late.sh': '#!/bin/bash\nset -- gh\n[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0\nset -- "$cli" as-agent --session "$sid" -- gh\n"$@" api y\n',
       '.claude/hooks/then.sh': '#!/bin/bash\nif [ -x "$cli" ]; then set -- "$cli" as-agent --session "$sid" -- gh; else set -- gh; fi\n"$@" api y\n',
+      '.claude/hooks/nested.sh': '#!/bin/bash\nset -- gh "$(gh api x)"\n[ -x "$cli" ] && set -- "$cli" as-agent --session "$sid" -- gh\n"$@" api y\n',
     };
     const named = [
       '.claude/settings.json PreToolUse hook .claude/hooks/plain.sh',
       '.claude/settings.json PreToolUse hook .claude/hooks/unrouted.sh',
       '.claude/settings.json PreToolUse hook .claude/hooks/same-line.sh',
+      '.claude/settings.json PreToolUse hook .claude/hooks/nested.sh',
     ];
     assert.deepEqual(hooksHittingLock(withHooks({ PreToolUse: hooks }, files)), [...named, '.claude/settings.json PreToolUse hook .claude/hooks/late.sh'], 'on a Mac, an as-agent form past a cloud-only exit excuses nothing');
     const cloud = withHooks({ PreToolUse: hooks }, files);
