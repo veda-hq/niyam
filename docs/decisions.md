@@ -2564,3 +2564,21 @@
   alone. Read as text, so which `"$@"` runs which is not followed, the same
   limit as #211's helper rule. Rejected: taking the whole script as routed,
   as `routedByHelper` does, which would pass a plain `gh` beside it.
+- **2026-11-21 — Decision: onboard follows a pre-push hook's one `dvara run`
+  hand-off to a body that runs niyam (Work item #430, slice #540).** Alok
+  approved #540 with a 👍 on its proposal (18:12:41Z).
+  - athya_mono's W-61 (athya-hq/athya_mono#3814) moved its pre-push body to
+    athya-rules, run by `exec node_modules/.bin/dvara run "$B" "$@"`. The
+    body runs `"$cli" pre-push`, but `prePushHook` read only the hook, so
+    onboard 0.7.12 (athya-hq/athya_mono#3852) listed a By hand step already
+    done. Before W-61 the same line sat in the hook and read as `ours`.
+  - dvara 0.6.18's `run` spawns `bash <file> <args…>` with stdin inherited
+    and skips nothing, so the body is what the push runs. The follow is as
+    strong as today's `ours`: the same line test, on the file git reaches.
+  - One hop, one hand-off, a literal or one variable assigned once, inside
+    the repository and present; any miss stays `own`. A false "already
+    wired" leaves an agent's push unchecked, worse than a needless step.
+  - A cloud session reads `body` as unchecked: athya-rules' body skips niyam
+    when `CLAUDE_CODE_REMOTE=true`.
+  - Rejected: a marker comment (asserts, never verifies); following every
+    `exec`, `.` or `source`, or more hops (no client needs them).

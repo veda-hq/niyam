@@ -168,13 +168,79 @@ export const OLDER_PRE_PUSH_HOOKS = [
   ].join('\n'),
 ];
 
+/** A line that runs the CLI's pre-push, in a hook or the body it hands off to. */
+const RUNS_PRE_PUSH = /^\s*(?:exec\s+)?(?:"\$cli"|niyam)\s+pre-push\b/m;
+
+/** A hook's hand-off to a body under dvara (`exec node_modules/.bin/dvara run "$B" "$@"`), the body as written. */
+const DVARA_HANDOFF = /^\s*(?:exec\s+)?(?:\S*\/)?dvara\s+run\s+(\S+)\s+"\$@"\s*$/;
+
+/** A plain assignment of a literal, `B=path` or `B="path"`. */
+const ASSIGNMENT = /^\s*([A-Za-z_]\w*)=(\S+)\s*$/;
+
+/** A word with its one pair of surrounding quotes taken off. */
+function unquoted(word: string): string {
+  const match = /^(["'])(.*)\1$/.exec(word);
+  return match ? (match[2] as string) : word;
+}
+
+/** A path inside `root` with its `.` and `..` read, lexically (pnpm's links stay as written), or undefined when it leaves `root`. */
+function insideRoot(root: string, path: string): string | undefined {
+  const parts: string[] = [];
+  for (const part of (path.startsWith('/') ? path : `${root}/${path}`).split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  const full = `/${parts.join('/')}`;
+  return full.startsWith(`${root}/`) ? full : undefined;
+}
+
+/**
+ * The body a hook hands its push to through `dvara run <file> "$@"`, when
+ * that body runs the CLI's pre-push (#540): one uncommented hand-off, its
+ * file a literal or one plain variable assigned once in the hook, inside the
+ * repository and there. dvara runs the file under bash with git's arguments
+ * and stdin, and skips nothing. Anything else is undefined, so the hook stays
+ * the client's own: a false "already wired" would leave an agent's push
+ * unchecked.
+ */
+function handedOffBody(sys: Sys, root: string, text: string): string | undefined {
+  const lines = text.split('\n').filter((line) => !/^\s*#/.test(line));
+  const handoffs = lines.flatMap((line, at) => {
+    const word = DVARA_HANDOFF.exec(line)?.[1];
+    return word === undefined ? [] : [{ word, at }];
+  });
+  const handoff = handoffs.length === 1 ? handoffs[0] : undefined;
+  if (handoff === undefined) return undefined;
+  let target = unquoted(handoff.word);
+  const variable = /^\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})$/.exec(target);
+  if (variable) {
+    // Every line that sets the variable, in any form (`export B=`, `B+=`, `x && B=`), counts: one alone, plain, before the hand-off.
+    const name = variable[1] ?? variable[2];
+    const sets = new RegExp(`(?:^|[^\\w$])${name}\\+?=`);
+    const setting = lines.flatMap((line, at) => (sets.test(line) ? [{ line, at }] : []));
+    const only = setting.length === 1 ? setting[0] : undefined;
+    const match = only && only.at < handoff.at ? ASSIGNMENT.exec(only.line) : null;
+    if (!match || match[1] !== name) return undefined;
+    target = unquoted(match[2] as string);
+  }
+  if (/[$`*?\\]/.test(target)) return undefined;
+  const body = insideRoot(root, target);
+  if (body === undefined || !sys.exists(body) || !RUNS_PRE_PUSH.test(sys.read(body))) return undefined;
+  return body.slice(root.length + 1);
+}
+
 /**
  * The pre-push git hook git runs in the repository at `root`, and how it
  * stands: outside the repository (a shared hooks folder, the owner's to
  * change), missing, one an older release wrote, this release's or one that
- * runs the CLI, or the client's own.
+ * runs the CLI, one that hands off to a body that runs it (`body`, #540), or
+ * the client's own.
  */
-export function prePushHook(sys: Sys, root: string): { path: string; file: string; state: 'outside' | 'missing' | 'older' | 'ours' | 'own' } {
+export function prePushHook(
+  sys: Sys,
+  root: string,
+): { path: string; file: string; state: 'outside' | 'missing' | 'older' | 'ours' | 'own' } | { path: string; file: string; state: 'body'; body: string } {
   const path = sys.exec('git', ['rev-parse', '--git-path', 'hooks/pre-push'], { cwd: root }).stdout.trim();
   const file = path.startsWith('/') ? path : `${root}/${path}`;
   const gitDir = sys.exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root }).stdout.trim();
@@ -182,7 +248,9 @@ export function prePushHook(sys: Sys, root: string): { path: string; file: strin
   if (!sys.exists(file)) return { path, file, state: 'missing' };
   const text = sys.read(file);
   if (OLDER_PRE_PUSH_HOOKS.includes(text)) return { path, file, state: 'older' };
-  return { path, file, state: /^\s*(?:exec\s+)?(?:"\$cli"|niyam)\s+pre-push\b/m.test(text) ? 'ours' : 'own' };
+  if (RUNS_PRE_PUSH.test(text)) return { path, file, state: 'ours' };
+  const body = handedOffBody(sys, root, text);
+  return body === undefined ? { path, file, state: 'own' } : { path, file, state: 'body', body };
 }
 
 /** How a hook finds the CLI: the launcher `machine` writes, else niyam on PATH. */
@@ -1748,7 +1816,8 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     });
   }
 
-  // Every adopter: the identity guard holds where the Claude Code hooks did not run.
+  // Every adopter: the identity guard holds where the Claude Code hooks did not run. A hook that runs the CLI, or hands
+  // off to a body that does (`body`, #540), needs nothing.
   const hook = prePushHook(sys, root);
   const hookLine = `${CLI} pre-push "$@"`;
   if (hook.state === 'missing' || hook.state === 'older') {

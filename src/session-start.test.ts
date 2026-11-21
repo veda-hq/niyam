@@ -360,6 +360,18 @@ describe('sessionStart', () => {
       }
     });
 
+    it('does not count a hand-off to a body that runs niyam as checked, since a body may skip it in a cloud session (#540)', async () => {
+      const hook = `${ROOT}/.git/hooks/pre-push`;
+      const text = '#!/bin/sh\nB=hooks/body\nexec node_modules/.bin/dvara run "$B" "$@"\n';
+      const sys = cloud(AGENT);
+      sys.files.set(hook, text);
+      sys.files.set(`${ROOT}/hooks/body`, '#!/bin/sh\n[ "${CLAUDE_CODE_REMOTE:-}" != true ] && "$cli" pre-push "$@"\n  "$cli" pre-push "$@"\n');
+      assert.deepEqual((await start(sys)).out, [
+        `niyam: this cloud session works as ExampleBot on GitHub. Its pre-push hook .git/hooks/pre-push hands off to hooks/body, which was not checked for a cloud session, so only the pull request's checks may hold the work rules.${NO_KEY}`,
+      ]);
+      assert.equal(sys.files.get(hook), text, 'left as it is');
+    });
+
     it('leaves a pre-push hook outside the repository unchecked, and says so', async () => {
       const sys = cloud(AGENT);
       sys.execOverride = (call) => (call.args[1] === '--git-path' ? { code: 0, stdout: '/shared/hooks/pre-push\n', stderr: '' } : undefined);
