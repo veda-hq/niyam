@@ -1323,6 +1323,10 @@ describe('onboard', () => {
         ['the variable is added to', HANDOFF.replace('[ -x', 'B+=/x\n[ -x')],
         ['the variable is set after the hand-off', HANDOFF.replace('B=node_modules/@athya-hq/rules/dvara/hooks/pre-push\n', '').replace('"$B" "$@"\n', '"$B" "$@"\nB=node_modules/@athya-hq/rules/dvara/hooks/pre-push\n')],
         ['the variable is only set with a comment', HANDOFF.replace('B=node_modules/@athya-hq/rules/dvara/hooks/pre-push', 'B=node_modules/@athya-hq/rules/dvara/hooks/pre-push # body')],
+        ['the hand-off is inside an if block', HANDOFF.replace('exec node_modules', 'if [ -n "$X" ]; then\n  exec node_modules').replace('"$B" "$@"\n', '"$B" "$@"\nfi\n')],
+        ['the hand-off is inside a function', HANDOFF.replace('exec node_modules', 'push() {\n  exec node_modules').replace('"$B" "$@"\n', '"$B" "$@"\n}\n')],
+        ['the hand-off is inside a loop', HANDOFF.replace('exec node_modules', 'while false; do\nexec node_modules').replace('"$B" "$@"\n', '"$B" "$@"\ndone\n')],
+        ['the variable is set inside an if block', HANDOFF.replace('B=node_modules/@athya-hq/rules/dvara/hooks/pre-push', 'if [ -n "$X" ]; then\nB=node_modules/@athya-hq/rules/dvara/hooks/pre-push\nfi')],
         ['the path leaves the repository', '#!/bin/sh\nexec dvara run ../elsewhere/pre-push "$@"\n'],
         ['git\'s arguments are not passed', HANDOFF.replace('"$B" "$@"', '"$B"')],
         ['two hand-offs', `${HANDOFF}exec dvara run other "$@"\n`],
@@ -1333,6 +1337,15 @@ describe('onboard', () => {
         sys.files.set(join(ROOT, '../elsewhere/pre-push'), BODY_TEXT);
         assert.equal(prePushHook(sys, ROOT).state, 'own', why);
       }
+      const unreadable = handingOff(HANDOFF);
+      const read = unreadable.read.bind(unreadable);
+      unreadable.read = (path: string) => {
+        if (path === BODY) throw new Error('EISDIR: illegal operation on a directory');
+        return read(path);
+      };
+      assert.equal(prePushHook(unreadable, ROOT).state, 'own', 'a body it cannot read');
+      const closed = 'if [ -n "$X" ]; then echo x; fi\n[ -x d ] || { echo "${B} missing"; exit 1; }\n';
+      assert.equal(prePushHook(handingOff(HANDOFF.replace('exec node_modules', `${closed}exec node_modules`)), ROOT).state, 'body', 'blocks closed before the hand-off');
       const { out } = await run(handingOff(HANDOFF, null));
       assert.ok(byHand(out).includes(ADD), out.join('\n'));
     });

@@ -1209,8 +1209,10 @@ pre-push hook, or git runs hooks from a folder outside the repository (a
 global `core.hooksPath`), `onboard` leaves it alone and lists the line to add
 under "By hand:": `niyam pre-push "$@"`. A hook that has the line, or one that
 hands its push to a body file through one `dvara run <file> "$@"` line whose
-body has it (#540), needs nothing. The file is a literal path or one plain
-variable assigned once in the hook, inside the repository and there; any
+body has it (#540), needs nothing. The line, and the variable's assignment
+if it names one, sit outside any `if`, `case`, loop or `{ }` block. The file
+is a literal path or one plain variable assigned once in the hook, inside
+the repository and readable; any
 other hand-off still gets the By hand step, and a comment saying the line is
 elsewhere counts for nothing. A cloud session does not count such a body as
 checked, since a body may skip niyam there (athya-rules' does), and says only

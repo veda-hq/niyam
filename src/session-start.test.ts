@@ -365,7 +365,7 @@ describe('sessionStart', () => {
       const text = '#!/bin/sh\nB=hooks/body\nexec node_modules/.bin/dvara run "$B" "$@"\n';
       const sys = cloud(AGENT);
       sys.files.set(hook, text);
-      sys.files.set(`${ROOT}/hooks/body`, '#!/bin/sh\n[ "${CLAUDE_CODE_REMOTE:-}" != true ] && "$cli" pre-push "$@"\n  "$cli" pre-push "$@"\n');
+      sys.files.set(`${ROOT}/hooks/body`, '#!/bin/sh\ncli=niyam\nif [ "${CLAUDE_CODE_REMOTE:-}" != true ]; then\n  "$cli" pre-push "$@"\nfi\n');
       assert.deepEqual((await start(sys)).out, [
         `niyam: this cloud session works as ExampleBot on GitHub. Its pre-push hook .git/hooks/pre-push hands off to hooks/body, which was not checked for a cloud session, so only the pull request's checks may hold the work rules.${NO_KEY}`,
       ]);

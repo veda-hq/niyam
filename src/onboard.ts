@@ -204,14 +204,35 @@ function insideRoot(root: string, path: string): string | undefined {
  * the client's own: a false "already wired" would leave an agent's push
  * unchecked.
  */
+/**
+ * How deep in the shell's blocks each line starts: `if`/`fi`, `case`/`esac`,
+ * `for`, `while` and `until` to `done`, and `{` to `}` (not `${`), counted as
+ * text. A line inside one may not run, so only depth 0 is taken as run.
+ */
+function blockDepths(lines: readonly string[]): number[] {
+  let depth = 0;
+  return lines.map((line) => {
+    const at = depth;
+    const count = (pattern: RegExp, text: string) => text.match(pattern)?.length ?? 0;
+    const braces = line.replace(/\$\{[^}]*\}/g, '');
+    depth +=
+      count(/(?:^|[;&|(]\s*)(?:if|case|for|while|until)\b/g, line) -
+      count(/(?:^|[;&|]\s*)(?:fi|esac|done)\b/g, line) +
+      count(/\{/g, braces) -
+      count(/\}/g, braces);
+    return at;
+  });
+}
+
 function handedOffBody(sys: Sys, root: string, text: string): string | undefined {
   const lines = text.split('\n').filter((line) => !/^\s*#/.test(line));
+  const depths = blockDepths(lines);
   const handoffs = lines.flatMap((line, at) => {
     const word = DVARA_HANDOFF.exec(line)?.[1];
     return word === undefined ? [] : [{ word, at }];
   });
   const handoff = handoffs.length === 1 ? handoffs[0] : undefined;
-  if (handoff === undefined) return undefined;
+  if (handoff === undefined || depths[handoff.at] !== 0) return undefined;
   let target = unquoted(handoff.word);
   const variable = /^\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})$/.exec(target);
   if (variable) {
@@ -220,14 +241,21 @@ function handedOffBody(sys: Sys, root: string, text: string): string | undefined
     const sets = new RegExp(`(?:^|[^\\w$])${name}\\+?=`);
     const setting = lines.flatMap((line, at) => (sets.test(line) ? [{ line, at }] : []));
     const only = setting.length === 1 ? setting[0] : undefined;
-    const match = only && only.at < handoff.at ? ASSIGNMENT.exec(only.line) : null;
+    const match = only && only.at < handoff.at && depths[only.at] === 0 ? ASSIGNMENT.exec(only.line) : null;
     if (!match || match[1] !== name) return undefined;
     target = unquoted(match[2] as string);
   }
   if (/[$`*?\\]/.test(target)) return undefined;
   const body = insideRoot(root, target);
-  if (body === undefined || !sys.exists(body) || !RUNS_PRE_PUSH.test(sys.read(body))) return undefined;
-  return body.slice(root.length + 1);
+  if (body === undefined || !sys.exists(body)) return undefined;
+  let bodyText: string;
+  try {
+    bodyText = sys.read(body);
+  } catch {
+    // fail-open: a folder or a file it cannot read is a hand-off it cannot check, so the hook stays the client's own.
+    return undefined;
+  }
+  return RUNS_PRE_PUSH.test(bodyText) ? body.slice(root.length + 1) : undefined;
 }
 
 /**
