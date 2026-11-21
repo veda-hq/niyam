@@ -1207,7 +1207,16 @@ merges did not bring, as before. In an agent session, a push is refused when the
 missing, or, with `work-rules` on, the session has no token. When the repository already has its own
 pre-push hook, or git runs hooks from a folder outside the repository (a
 global `core.hooksPath`), `onboard` leaves it alone and lists the line to add
-under "By hand:": `niyam pre-push "$@"`. The client workflow re-runs the checks when a
+under "By hand:": `niyam pre-push "$@"`. A hook that has the line, or one that
+hands its push to a body file through one `dvara run <file> "$@"` line whose
+body has it (#540), needs nothing. The line, and the variable's assignment
+if it names one, sit outside any `if`, `case`, loop or `{ }` block. The file
+is a literal path or one plain variable assigned once in the hook, before
+the hand-off, inside the repository and readable; any
+other hand-off still gets the By hand step, and a comment saying the line is
+elsewhere counts for nothing. A cloud session does not count such a body as
+checked, since a body may skip niyam there (athya-rules' does), and says only
+the pull request's checks may hold the work rules. The client workflow re-runs the checks when a
 pull request's description is edited. After upgrading niyam, run
 `onboard` again: it upgrades the hook entries in `.claude/settings.json` and
 the workflow. An older release's workflow, one job that let every run write

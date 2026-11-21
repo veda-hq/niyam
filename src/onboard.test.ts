@@ -18,7 +18,7 @@ import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { BY_HAND_WIDTH, wrap } from './layout.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
@@ -1248,6 +1248,107 @@ describe('onboard', () => {
     const { out } = await run(ours);
     assert.deepEqual(planned(out, 'This Mac'), []);
     assert.ok(!byHand(out).some((line) => line.includes('pre-push')));
+  });
+
+  describe('a hook that hands off to a body under dvara (#540)', () => {
+    // athya_mono's .husky/pre-push since its W-61 (athya-hq/athya_mono#3814), as written.
+    const HANDOFF = [
+      '#!/usr/bin/env bash',
+      "# Athya's pre-push runs from athya-rules, under dvara (0114 W-61).",
+      '. scripts/lib/select-node.sh && athya_select_node || exit 1',
+      '. scripts/lib/deps-fallback.sh && athya_deps_bootstrap . pre-push || exit 1',
+      'B=node_modules/@athya-hq/rules/dvara/hooks/pre-push',
+      '[ -x node_modules/.bin/dvara ] || { echo "❌ pre-push: node_modules has no dvara" >&2; exit 1; }',
+      '[ -f "$B" ] || { echo "❌ pre-push: athya-rules is not installed" >&2; exit 1; }',
+      'exec node_modules/.bin/dvara run "$B" "$@"',
+      '',
+    ].join('\n');
+    const BODY = `${ROOT}/node_modules/@athya-hq/rules/dvara/hooks/pre-push`;
+    // athya-rules 0.5.7's body, its niyam lines as written.
+    const BODY_TEXT = [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'if [ "$#" -gt 0 ] && [ "${CLAUDE_CODE_REMOTE:-}" != true ] &&',
+      '   { [ -n "${NIYAM_AGENT:-}" ] || [ "${CLAUDECODE:-}" = 1 ]; }; then',
+      '  cli="$HOME/.config/niyam/bin/niyam"',
+      '  [ -x "$cli" ] || cli=niyam',
+      '  "$cli" pre-push "$@" <<<"$PREPUSH_REFS" || exit 1',
+      'fi',
+      'pnpm test',
+      '',
+    ].join('\n');
+    const ADD = 'Once on this Mac: add the line `niyam pre-push "$@"` to the pre-push git hook .git/hooks/pre-push, which is your own.';
+
+    /** A repository whose hook is `hook` and whose body, unless null, is `body`. */
+    function handingOff(hook: string, body: string | null = BODY_TEXT): FakeSys {
+      const sys = fresh();
+      sys.files.set(PRE_PUSH, hook);
+      if (body !== null) sys.files.set(BODY, body);
+      return sys;
+    }
+
+    it("reads athya_mono's hook, whose body runs niyam, as wired: no step by hand, the hook left as it is", async () => {
+      const sys = handingOff(HANDOFF);
+      assert.deepEqual(prePushHook(sys, ROOT), { path: '.git/hooks/pre-push', file: PRE_PUSH, state: 'body', body: 'node_modules/@athya-hq/rules/dvara/hooks/pre-push' });
+      const { out } = await run(sys);
+      assert.deepEqual(planned(out, 'This Mac'), []);
+      assert.ok(!byHand(out).some((line) => line.includes('pre-push')), out.join('\n'));
+      assert.ok(!(opened(sys)?.body ?? '').includes('pre-push git hook'), 'nor the pull request');
+      assert.equal(sys.files.get(PRE_PUSH), HANDOFF);
+    });
+
+    it('follows a literal path, a braced or quoted variable, and a path through ./ and ..', () => {
+      for (const line of [
+        'dvara run node_modules/@athya-hq/rules/dvara/hooks/pre-push "$@"',
+        'B="node_modules/@athya-hq/rules/dvara/hooks/pre-push"\nexec dvara run ${B} "$@"',
+        `exec ./node_modules/.bin/dvara run '${BODY}' "$@"`,
+        'exec dvara run ./hooks/../node_modules/@athya-hq/rules/dvara/hooks/pre-push "$@"',
+      ]) {
+        assert.equal(prePushHook(handingOff(`#!/bin/sh\n${line}\n`), ROOT).state, 'body', line);
+      }
+    });
+
+    it("leaves as the client's own any hand-off it cannot follow to a body that runs niyam", async () => {
+      const misses: [string, string, string?][] = [
+        ['the body is not there', HANDOFF],
+        ['the body runs no niyam', HANDOFF, '#!/bin/sh\npnpm test\n# "$cli" pre-push is run elsewhere\n'],
+        ['the hand-off is a comment', HANDOFF.replace('exec node_modules', '# exec node_modules')],
+        ['the variable is never assigned', HANDOFF.replace('B=node_modules', 'C=node_modules')],
+        ['the variable is assigned twice', HANDOFF.replace('B=node_modules', 'B=other\nB=node_modules')],
+        ['the variable is built from another', HANDOFF.replace('B=node_modules', 'B=$HOME/node_modules')],
+        ['the variable is set again with a comment', HANDOFF.replace('[ -x', 'B=other # note\n[ -x')],
+        ['the variable is exported again', HANDOFF.replace('[ -x', 'export B=other\n[ -x')],
+        ['the variable is set again from a command', HANDOFF.replace('[ -x', 'B="$(cmd arg)"\n[ -x')],
+        ['the variable is set again on a condition', HANDOFF.replace('[ -x', '[ -n "$X" ] && B=other\n[ -x')],
+        ['the variable is added to', HANDOFF.replace('[ -x', 'B+=/x\n[ -x')],
+        ['the variable is set after the hand-off', HANDOFF.replace('B=node_modules/@athya-hq/rules/dvara/hooks/pre-push\n', '').replace('"$B" "$@"\n', '"$B" "$@"\nB=node_modules/@athya-hq/rules/dvara/hooks/pre-push\n')],
+        ['the variable is only set with a comment', HANDOFF.replace('B=node_modules/@athya-hq/rules/dvara/hooks/pre-push', 'B=node_modules/@athya-hq/rules/dvara/hooks/pre-push # body')],
+        ['the hand-off is inside an if block', HANDOFF.replace('exec node_modules', 'if [ -n "$X" ]; then\n  exec node_modules').replace('"$B" "$@"\n', '"$B" "$@"\nfi\n')],
+        ['the hand-off is inside a function', HANDOFF.replace('exec node_modules', 'push() {\n  exec node_modules').replace('"$B" "$@"\n', '"$B" "$@"\n}\n')],
+        ['the hand-off is inside a loop', HANDOFF.replace('exec node_modules', 'while false; do\nexec node_modules').replace('"$B" "$@"\n', '"$B" "$@"\ndone\n')],
+        ['the variable is set inside an if block', HANDOFF.replace('B=node_modules/@athya-hq/rules/dvara/hooks/pre-push', 'if [ -n "$X" ]; then\nB=node_modules/@athya-hq/rules/dvara/hooks/pre-push\nfi')],
+        ['the path leaves the repository', '#!/bin/sh\nexec dvara run ../elsewhere/pre-push "$@"\n'],
+        ['git\'s arguments are not passed', HANDOFF.replace('"$B" "$@"', '"$B"')],
+        ['two hand-offs', `${HANDOFF}exec dvara run other "$@"\n`],
+        ['a marker comment alone', '#!/bin/sh\n# niyam onboard recognises the "$cli" pre-push line\npnpm test\n'],
+      ];
+      for (const [why, hook, body] of misses) {
+        const sys = handingOff(hook, why === 'the body is not there' ? null : body);
+        sys.files.set(join(ROOT, '../elsewhere/pre-push'), BODY_TEXT);
+        assert.equal(prePushHook(sys, ROOT).state, 'own', why);
+      }
+      const unreadable = handingOff(HANDOFF);
+      const read = unreadable.read.bind(unreadable);
+      unreadable.read = (path: string) => {
+        if (path === BODY) throw new Error('EISDIR: illegal operation on a directory');
+        return read(path);
+      };
+      assert.equal(prePushHook(unreadable, ROOT).state, 'own', 'a body it cannot read');
+      const closed = 'if [ -n "$X" ]; then echo x; fi\n[ -x d ] || { echo "${B} missing"; exit 1; }\n';
+      assert.equal(prePushHook(handingOff(HANDOFF.replace('exec node_modules', `${closed}exec node_modules`)), ROOT).state, 'body', 'blocks closed before the hand-off');
+      const { out } = await run(handingOff(HANDOFF, null));
+      assert.ok(byHand(out).includes(ADD), out.join('\n'));
+    });
   });
 
   it('replaces a workflow that differs', async () => {

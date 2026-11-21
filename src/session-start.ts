@@ -187,7 +187,10 @@ async function cloudStart(sys: Sys): Promise<Said> {
     ? ` Its pre-push hook ${hook.path} does not run niyam, so only the pull request's checks hold the work rules.`
     : hook.state === 'outside'
       ? ` Its pre-push hook ${hook.path} is outside the repository and was not checked, so only the pull request's checks may hold the work rules.`
-      : '';
+      : hook.state === 'body'
+        // A body may skip niyam in a cloud session (athya-rules' does), so its hand-off is not counted as checked here (#540).
+        ? ` Its pre-push hook ${hook.path} hands off to ${hook.body}, which was not checked for a cloud session, so only the pull request's checks may hold the work rules.`
+        : '';
   const signed = cloudCommits(sys, root, envFile, asked, pinnedCloudKeys(settings, asked.login));
   return { line: `niyam: this cloud session works as ${asked.login} on GitHub.${unchecked}${signed}`, agent: asked.login };
 }
