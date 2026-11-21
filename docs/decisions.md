@@ -2551,3 +2551,16 @@
     weaker than the title read (which still needs a tested pull request's
     approved slice) that leaves PR identity red; and an `if:` skip, which
     passes a required check (#526).
+- **2026-11-21 — Record: doctor takes a hook that sets its gh to `as-agent`
+  and runs `"$@"` as routed (State #537 of P-43).** `doctor` 0.7.12 in
+  athya_mono warned that `.claude/hooks/sarathi-install.sh` reaches GitHub
+  outside `as-agent`. It does not on a Mac: it runs `set -- gh`, then, where
+  niyam's launcher is, `set -- "$agent" as-agent --session "$session" -- gh`,
+  then `"$@" api …`. `hooksHittingLock` dropped the `as-agent` form and kept
+  `set -- gh`, the cloud's fallback. It now drops `set -- gh` when the same
+  judged text has the `as-agent` form, looked for after the cloud-only cut,
+  so on a Mac a form past that exit excuses nothing. Every other command is
+  still judged, so a plain `gh` beside it is named, and so is `set -- gh`
+  alone. Read as text, so which `"$@"` runs which is not followed, the same
+  limit as #211's helper rule. Rejected: taking the whole script as routed,
+  as `routedByHelper` does, which would pass a plain `gh` beside it.

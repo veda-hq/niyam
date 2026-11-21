@@ -143,8 +143,12 @@ const OWN_COMMANDS = new Set([HOOK_COMMAND, GUARD_COMMAND, ...OLDER_HOOK_COMMAND
  * reads text, so a script that runs another script is missed. Comments and
  * docstrings are left out, so prose that names gh or git push is not a call.
  * A script that loads a repo helper running `as-agent` is taken as routed
- * through it (`routedByHelper`). Outside a cloud session, a script is read
- * only up to a top-level line that exits there (`CLOUD_ONLY`).
+ * through it (`routedByHelper`). A script that sets its positional
+ * parameters to `as-agent` running gh and runs `"$@"` is taken as routed,
+ * its plain `set -- gh` being the cloud's (`withoutRoutedSetGh`); read as
+ * text, so which `"$@"` runs which is not followed. Outside a cloud session,
+ * a script is read only up to a top-level line that exits there
+ * (`CLOUD_ONLY`), before either form is looked for.
  */
 export function hooksHittingLock(sys: Sys): string[] {
   const top = sys.exec('git', ['rev-parse', '--show-toplevel'], { cwd: sys.cwd });
@@ -159,7 +163,7 @@ export function hooksHittingLock(sys: Sys): string[] {
     const judgedScript = script && !routedByHelper(sys, root, script.text) ? script : undefined;
     const [line, code] = [withoutComments(command), withoutComments(judgedScript?.text ?? '')];
     const judged = cloud ? `${line}\n${code}` : `${beforeCloudOnly(line)}\n${beforeCloudOnly(code)}`;
-    if (reachesGitHub(withoutAsAgent(judged))) found.push(`${file} ${event} ${kind} ${judgedScript ? judgedScript.path : JSON.stringify(command)}`);
+    if (reachesGitHub(withoutAsAgent(withoutRoutedSetGh(judged)))) found.push(`${file} ${event} ${kind} ${judgedScript ? judgedScript.path : JSON.stringify(command)}`);
   }
   return found;
 }
@@ -323,6 +327,28 @@ function routedByHelper(sys: Sys, root: string, script: string): boolean {
         return false;
       }
     });
+}
+
+/** A command that only puts gh in the positional parameters, for `"$@"` to run: `set -- gh …`, with no command substitution in it. */
+const SET_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+gh(?:\s(?:(?!\$\(|`).)*)?$/;
+/** One that puts `as-agent` running gh there instead: `set -- "$cli" as-agent --session "$sid" -- gh …`. */
+const SET_AS_AGENT_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+.*\bas-agent\s.*\s--\s+gh(?:\s|$)/;
+
+/**
+ * The text without its `set -- gh` commands, when it also has a
+ * `set -- … as-agent … -- gh`: a script that builds its gh in the
+ * positional parameters and runs it as `"$@"` has gh plain only where it
+ * finds no niyam to run `as-agent` with, which is the cloud, whose proxy
+ * authenticates it; a Mac with no launcher is `doctor`'s own ✗ already
+ * (`launcherFinding`). Each other command is kept, so a plain `gh` call in
+ * the same script is still judged, and so is a `set -- gh` that runs a
+ * command substitution. Without the `as-agent` form, `set -- gh` is kept:
+ * its `"$@"` runs gh plain.
+ */
+function withoutRoutedSetGh(text: string): string {
+  const commands = text.split(/[;&|\n]+/);
+  if (!commands.some((command) => SET_AS_AGENT_GH.test(command))) return text;
+  return commands.filter((command) => !SET_GH.test(command)).join('\n');
 }
 
 /** The text with each command that runs `as-agent` taken out, the rest of its line kept. */
