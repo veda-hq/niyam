@@ -633,6 +633,8 @@ describe('judging a pull request', () => {
       assert.deepEqual(mergifyTests(draft(), REPO, 1), [2]);
       assert.deepEqual(mergifyTests(draft('merge queue: checking #3751 on main (0aa2f20), stacked on #3754'), REPO, 1), [3751, 3754]);
       assert.deepEqual(mergifyTests(draft('merge queue: checking #2 on main (0aa2f20), stacked on #3, #4 and #2'), REPO, 1), [2, 3, 4]);
+      // Merged and closed, Mergify retitles it with the merged pull request's own title, whose numbers are not read (#532).
+      assert.deepEqual(mergifyTests(draft('merge queue: merged #2: ✨ feat(x): y, after #3'), REPO, 1), [2]);
       // Its own number is not a pull request it tests.
       assert.equal(mergifyTests(draft('merge queue: checking #1 on main (0aa2f20)'), REPO, 1), undefined);
       for (const [why, pull] of [
@@ -641,7 +643,7 @@ describe('judging a pull request', () => {
         ['another branch', draft(undefined, { head: { sha: 'h', ref: 'mergify/bp/main/pr-2', repo: { full_name: REPO } } })],
         ['a fork', draft(undefined, { head: { sha: 'h', ref: 'mergify/merge-queue/x', repo: { full_name: 'someone/r' } } })],
         ['a deleted head repository', draft(undefined, { head: { sha: 'h', ref: 'mergify/merge-queue/x', repo: null } })],
-        ['an older title', draft('merge queue: merged #2: ✨ feat(x): y')],
+        ['a merged title of a batch, never seen', draft('merge queue: merged #2 + #3: ✨ feat(x): y')],
         ['a title naming more after it', draft('merge queue: checking #2 on main (634865a) and #9')],
         ['no title', draft(null)],
       ]) {
@@ -686,8 +688,8 @@ describe('judging a pull request', () => {
         assert.notEqual(groupOf(draft(), 1), groupOf(draft(), 2));
       });
 
-      test('a draft of Mergify’s whose title names no pull request still never cancels: Mergify drops the pull request it tests all the same', () => {
-        for (const title of ['merge queue: merged #2: ✨ feat(x): y', null]) {
+      test('a draft of Mergify’s whose title is in no form mergifyTests reads still never cancels: Mergify drops the pull request it tests all the same', () => {
+        for (const title of ['merge queue: merged #2 + #3: ✨ feat(x): y', null]) {
           assert.equal(mergifyTests(draft(title), REPO, 1), undefined, String(title));
           assert.notEqual(groupOf(draft(title), 1), groupOf(draft(title), 2), String(title));
         }
@@ -699,6 +701,16 @@ describe('judging a pull request', () => {
       const gh = github({ files, body: githooks, pull: draft(), over: tested(2, 'Slice: #10') });
       assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
       assert.ok(gh.calls.includes(`/repos/${REPO}/pulls/2`));
+    });
+
+    test('a merged draft, retitled after it closes, is judged as the pull request it merged, as it was while checking (#532)', async () => {
+      const files = [modified('.githooks/pre-push')];
+      const merged = draft('merge queue: merged #2: ✨ feat(x): y', { state: 'closed', draft: true });
+      assert.deepEqual(await judge(github({ files, body: githooks, pull: merged, over: tested(2, 'Slice: #10') }), REPO, 1, OWNERS), []);
+      // athya_mono#3839: judged as itself, it named no slice and was refused.
+      const refusals = await judge(github({ files, body: githooks, pull: merged, over: tested(2, 'no slice here') }), REPO, 1, OWNERS);
+      assert.equal(refusals.length, 1);
+      assert.match(refusals[0].message, /^This is Mergify's merge-queue draft testing #2, and none of them passes this\. As #2: /);
     });
 
     test('one no tested pull request passes is refused, saying so', async () => {

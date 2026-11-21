@@ -1863,7 +1863,8 @@ goes on. Any other failure to read it fails closed.
 - opened as `mergify[bot]` on a `mergify/merge-queue/` branch of the repository;
 - titled `merge queue: checking #A on main (sha)`, or `#A + #B together` for a batch (#524);
 - with `, stacked on #B` when it tests several;
-- or, from four ahead, `, stacked on N pull requests ahead`, whose numbers come from the body's `### Queued ahead of this batch` list, only when it names exactly N.
+- or, from four ahead, `, stacked on N pull requests ahead`, whose numbers come from the body's `### Queued ahead of this batch` list, only when it names exactly N;
+- once it has merged #A and closed the draft, retitled `merge queue: merged #A: <A's title>`, read as testing #A alone (#532). Only the number after `merged #` is read: the rest is #A's own title. That edit runs Guard and PR identity again, and they judge the closed draft as they did while it was checking #A.
 
 `scripts/merge-queue.mjs`, a guard file that imports nothing, reads this for Guard and for PR identity alike.
 
