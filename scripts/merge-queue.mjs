@@ -19,6 +19,13 @@ export const MERGE_QUEUE_SIGNER = 'mergify-commit-signer';
  */
 const MERGE_QUEUE_TITLE =
   /^merge queue: checking (#\d+(?: \+ #\d+)*)(?: together)? on \S+ \([0-9a-f]+\)(?:, stacked on (?:(#\d+(?:(?:,\s*|\s+and\s+)#\d+)*)|(\d+) pull requests ahead))?$/;
+/**
+ * The title Mergify gives the draft once it has merged the pull request it
+ * tested and closed the draft: `merge queue: merged #A: <A's title>`, as on
+ * athya_mono#3839. The group is the tested pull request; the rest is A's own
+ * title, which A's author writes, so nothing in it is read.
+ */
+const MERGED_TITLE = /^merge queue: merged #(\d+): /;
 /** The body's list of the pull requests queued ahead, which a deep stack's title only counts. */
 const QUEUED_AHEAD = /^### Queued ahead of this batch\n([\s\S]*?)(?=^#{1,3} |^<details>|(?![\s\S]))/m;
 /** Mergify's merge of a tested pull request into its draft. */
@@ -46,6 +53,8 @@ export function isMergifyDraft(pull, repo) {
  */
 export function mergifyTests(pull, repo, pr) {
   if (!isMergifyDraft(pull, repo)) return undefined;
+  const merged = MERGED_TITLE.exec(pull.title ?? '')?.[1];
+  if (merged !== undefined) return Number(merged) === pr ? undefined : [Number(merged)];
   const title = MERGE_QUEUE_TITLE.exec(pull.title ?? '');
   if (!title) return undefined;
   const [, batch = '', stacked = '', ahead] = title;

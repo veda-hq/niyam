@@ -59,8 +59,30 @@ describe("Mergify's merge-queue draft", () => {
     }
   });
 
+  test('a merged draft, retitled as athya_mono#3839 was, reads as the one pull request it merged', () => {
+    assert.deepEqual(mergifyTests(draft('merge queue: merged #2: 🔧 chore(niyam): onboard at v0.7.11'), REPO, 1), [2]);
+    // The rest is #2's own title, which its author writes: no number in it is read.
+    for (const tail of ['fix #99 race', 'x + #5 together on main (abc)', 'checking #7 on main (634865a), stacked on #8', 'merged #9: y', '']) {
+      assert.deepEqual(mergifyTests(draft(`merge queue: merged #2: ${tail}`), REPO, 1), [2], tail);
+    }
+    // A draft never tests itself, and one not shaped as Mergify's is read as nothing.
+    assert.equal(mergifyTests(draft('merge queue: merged #1: x'), REPO, 1), undefined);
+    assert.equal(mergifyTests(draft('merge queue: merged #2: x', { user: { login: 'someone', type: 'User' } }), REPO, 1), undefined);
+  });
+
   test('reads no other title', () => {
-    for (const title of ['merge queue: checking #2 on main (634865a), stacked on some pull requests', 'merge queue: checking #2 + on main (634865a)', 'merge queue: checking #2 on main', undefined]) {
+    for (const title of [
+      'merge queue: checking #2 on main (634865a), stacked on some pull requests',
+      'merge queue: checking #2 + on main (634865a)',
+      'merge queue: checking #2 on main',
+      'merge queue: merged #2',
+      'merge queue: merged #2 + #3: x',
+      'merge queue: merged #2, #3: x',
+      'merge queue: merged 2: x',
+      'Merge queue: merged #2: x',
+      ' merge queue: merged #2: x',
+      undefined,
+    ]) {
       assert.equal(mergifyTests(draft(title ?? null), REPO, 1), undefined, String(title));
     }
   });

@@ -2530,3 +2530,21 @@
     and would pass a draft over an earlier refusal.
   - Cost: each edit's run finishes, about 25 seconds and 5 API reads (20 or
     more for a guard-file draft) against the caller's token.
+- **2026-11-21 — Decision: Guard and PR identity read Mergify's merged draft
+  as the pull request it merged (Work item #468, slice #532).** Alok approved
+  #532 with a 👍 on its proposal (09:41Z).
+  - After merging #A, Mergify retitles its closed draft `merge queue: merged
+    #A: <A's title>`. `mergifyTests` read only `checking`, so the edit's
+    runs judged the draft as itself: Guard refused its guard files and PR
+    identity the agent commits Mergify pushed. In athya_mono, Guard was red
+    on every merged draft changing a guard file since 0.7.8 (#3800, #3812,
+    #3831, #3839, #3841), PR identity on both merged since 0.7.10. Nothing
+    gated on it: the draft is closed unmerged and its head reaches no branch.
+  - `MERGED_TITLE` reads the number after `merged #` alone; the rest is #A's
+    author's own title. Only the single form is read: 116 of athya_mono's 200
+    latest closed drafts are `merged #N: …`, the rest `checking #N`, none a
+    batch or stack.
+  - Rejected: Guard passing a closed draft unjudged, a pass on its head sha
+    weaker than the title read (which still needs a tested pull request's
+    approved slice) that leaves PR identity red; and an `if:` skip, which
+    passes a required check (#526).
