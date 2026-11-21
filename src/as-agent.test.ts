@@ -291,6 +291,47 @@ describe('hooksHittingLock', () => {
     ]);
   });
 
+  /** athya_mono's `sarathi-install.sh` shape: gh built in the positional parameters, through as-agent where niyam is, and run as `"$@"`. */
+  const setGhHook = (extra = ''): string =>
+    [
+      '#!/bin/bash',
+      'download() {',
+      '  agent="$HOME/.config/niyam/bin/niyam"',
+      '  set -- gh',
+      '  if [ -x "$agent" ] && [ -z "$session" ]; then',
+      '    echo "downloaded here only through niyam as-agent; run `niyam doctor`" >"$tmp.err"',
+      '    return 1',
+      '  elif [ -x "$agent" ]; then',
+      '    set -- "$agent" as-agent --session "$session" -- gh',
+      '  fi',
+      '  id="$("$@" api "repos/o/r/releases/tags/v1" --jq ".assets[] | .id" 2>"$tmp.err")" || return 1',
+      `  "$@" api -H "Accept: application/octet-stream" "repos/o/r/releases/assets/$id" >"$tmp.dl/x.tgz"${extra}`,
+      '}',
+      'download',
+      '',
+    ].join('\n');
+
+  it('takes a script that sets its gh to as-agent in the positional parameters and runs "$@" as routed, its plain set -- gh being the cloud\'s', () => {
+    const hooks = ['.claude/hooks/routed.sh', '.claude/hooks/plain.sh', '.claude/hooks/unrouted.sh', '.claude/hooks/same-line.sh', '.claude/hooks/late.sh', '.claude/hooks/then.sh'];
+    const files = {
+      '.claude/hooks/routed.sh': setGhHook(),
+      '.claude/hooks/plain.sh': setGhHook('\n  gh api repos/o/r/releases'),
+      '.claude/hooks/unrouted.sh': '#!/bin/bash\nset -- gh\n"$@" api repos/o/r\n',
+      '.claude/hooks/same-line.sh': '#!/bin/bash\nset -- gh; gh api x\n[ -x "$cli" ] && set -- "$cli" as-agent --session "$sid" -- gh\n"$@" api y\n',
+      '.claude/hooks/late.sh': '#!/bin/bash\nset -- gh\n[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0\nset -- "$cli" as-agent --session "$sid" -- gh\n"$@" api y\n',
+      '.claude/hooks/then.sh': '#!/bin/bash\nif [ -x "$cli" ]; then set -- "$cli" as-agent --session "$sid" -- gh; else set -- gh; fi\n"$@" api y\n',
+    };
+    const named = [
+      '.claude/settings.json PreToolUse hook .claude/hooks/plain.sh',
+      '.claude/settings.json PreToolUse hook .claude/hooks/unrouted.sh',
+      '.claude/settings.json PreToolUse hook .claude/hooks/same-line.sh',
+    ];
+    assert.deepEqual(hooksHittingLock(withHooks({ PreToolUse: hooks }, files)), [...named, '.claude/settings.json PreToolUse hook .claude/hooks/late.sh'], 'on a Mac, an as-agent form past a cloud-only exit excuses nothing');
+    const cloud = withHooks({ PreToolUse: hooks }, files);
+    cloud.env.CLAUDE_CODE_REMOTE = 'true';
+    assert.deepEqual(hooksHittingLock(cloud), named, 'in a cloud session the whole script is read, so late.sh has both forms');
+  });
+
   it('leaves out comments and docstrings, which only name gh or git push', () => {
     const sys = withHooks(
       { PreToolUse: ['.claude/hooks/commented.sh', '.claude/hooks/heredoc.sh', '.claude/hooks/after.sh'] },

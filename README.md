@@ -1408,7 +1408,12 @@ run in the client repo, warns under "This repo" about each hook in `.claude/sett
 calls `gh` or git's remote commands outside `as-agent`. A script that
 imports a Python module tracked in the repo whose code runs `as-agent` (a
 helper wrapping each `gh` call) counts as routed through it; the hook's
-command is still judged. Outside a cloud session, a script is read only up
+command is still judged. So does a script that builds its gh in the
+positional parameters and runs it as `"$@"`: `set -- gh`, then, where
+niyam's launcher is, `set -- "$cli" as-agent --session "$sid" -- gh`. Its
+plain `set -- gh` is the cloud's, whose proxy authenticates it, so it is not
+counted; every other `gh` in the script still is, and `set -- gh` with no
+`as-agent` form beside it counts. Outside a cloud session, a script is read only up
 to a line, at column 0, that exits there,
 `[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0` or
 `[ "$CLAUDE_CODE_REMOTE" != true ] && exit`, when only blank lines, `set`,

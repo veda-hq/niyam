@@ -42,6 +42,16 @@ function marked(out: string[], mark: string): string[] {
   return out.filter((line) => line.startsWith(`${mark}  `));
 }
 
+/** A SessionStart hook whose gh is `set -- gh`, then `set -- "$agent" as-agent … -- gh` where niyam is, run as `"$@"`, as athya_mono's `sarathi-install.sh`; `extra` adds a line. */
+function setGhHook(sys: FakeSys, extra = ''): void {
+  const script = `#!/bin/bash\nagent="$HOME/.config/niyam/bin/niyam"\nset -- gh\nif [ -x "$agent" ]; then\n  set -- "$agent" as-agent --session "$session" -- gh\nfi\n"$@" api repos/o/r/releases/tags/v1\n${extra}`;
+  sys.files.set(`${ROOT}/.claude/hooks/install.sh`, script);
+  const hooks = { SessionStart: [{ hooks: [{ type: 'command', command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/install.sh' }] }] };
+  sys.files.set(`${ROOT}/.claude/settings.json`, JSON.stringify({ hooks, permissions: { allow: [...AUTO_FIX_RULES, ...ARTIFACT_RULES] } }));
+}
+const SET_GH_WARNING =
+  '▲  .claude/settings.json SessionStart hook .claude/hooks/install.sh reaches GitHub outside as-agent, so gets 401 → run its gh or git via niyam as-agent --session <session_id> -- (exit 77 when not the agent)';
+
 describe('doctor', () => {
   it('refuses a platform with no token store, naming macOS', async () => {
     assert.deepEqual(await check(Object.assign(healthy(), { platform: 'win32' })), {
@@ -113,6 +123,17 @@ describe('doctor', () => {
       '│',
       '└  1 to fix',
     ]);
+  });
+
+  it('warns of no hook that sets its gh to as-agent and runs "$@", and still of a plain gh beside it', async () => {
+    const routed = healthy();
+    setGhHook(routed);
+    const { code, out } = await check(routed);
+    assert.equal(code, 0);
+    assert.deepEqual(marked(out, '▲'), [], out.join('\n'));
+    const plain = healthy();
+    setGhHook(plain, 'gh api repos/o/r/releases\n');
+    assert.deepEqual(marked((await check(plain)).out, '▲'), [SET_GH_WARNING]);
   });
 
   it('warns of a hook in both settings.json and sarathi.json for one event, which runs twice (P-66)', async () => {
@@ -964,6 +985,15 @@ describe('doctor in a Claude cloud session', () => {
       '│',
       '└  1 to fix',
     ]);
+  });
+
+  it('warns of no hook that sets its gh to as-agent and runs "$@", and still of a plain gh beside it, as on a Mac', async () => {
+    const routed = cloud();
+    setGhHook(routed);
+    assert.deepEqual(marked((await check(routed)).out, '▲'), []);
+    const plain = cloud();
+    setGhHook(plain, 'gh api repos/o/r/releases\n');
+    assert.deepEqual(marked((await check(plain)).out, '▲'), [SET_GH_WARNING]);
   });
 
   describe("the shared Guard's caller (#470)", () => {
