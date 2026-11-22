@@ -9,25 +9,61 @@ import { boardStarted } from './board.ts';
 import { gate } from './handoff.ts';
 import { ownersAlone, whyNotCounted } from './edits.ts';
 import { batchAnswers } from './approvals.ts';
+import { approvalsOf } from './issue-types.ts';
 import { PAGE_LINK, askProblem } from './asks.ts';
 
-/** How a pull request or a commit names the slice it builds. */
-const SLICE_LINE = new RegExp(`^Slice:\\s*(?:#|https://${GITHUB_HOST_RE}/[^/\\s]+/[^/\\s]+/issues/)(\\d+)\\s*$`, 'gim');
-
-/** How a pull request names a State of its slice that it delivers. */
-const STATE_LINE = new RegExp(`^State:\\s*(?:#|https://${GITHUB_HOST_RE}/[^/\\s]+/[^/\\s]+/issues/)(\\d+)\\s*$`, 'gim');
-
-/** The issues `line` names in `text`, in order, without repeats. */
-const named = (line: RegExp, text: string): number[] => [...new Set([...text.matchAll(line)].map((match) => Number(match[1])))];
-
-/** The slices `text` names, in order, without repeats. */
-export function slicesNamed(text: string): number[] {
-  return named(SLICE_LINE, text);
+/** An issue a `Slice:` or `State:` line names: its repository, `owner/name`, and its number. */
+export interface IssueRef {
+  repo: string;
+  number: number;
 }
 
-/** The States `text` names with a line `State: #N`, in order, without repeats. */
-export function statesNamed(text: string): number[] {
-  return named(STATE_LINE, text);
+/**
+ * How a line names an issue: `#N` in the repository it is in, or another
+ * repository's issue as `owner/name#N` or by its full address.
+ */
+const REPO_NAMED = '[A-Za-z0-9-]+/[A-Za-z0-9._-]+';
+const ISSUE_NAMED = `(?:#(\\d+)|(${REPO_NAMED})#(\\d+)|https://${GITHUB_HOST_RE}/(${REPO_NAMED})/issues/(\\d+))`;
+
+/** How a pull request or a commit names the slice it builds. */
+const SLICE_LINE = new RegExp(`^Slice:\\s*${ISSUE_NAMED}\\s*$`, 'gim');
+
+/** How a pull request names a State of its slice that it delivers. */
+const STATE_LINE = new RegExp(`^State:\\s*${ISSUE_NAMED}\\s*$`, 'gim');
+
+/** Whether `a` and `b` name one repository: GitHub reads owner and name in any case. */
+const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** Whether `a` and `b` are one issue. */
+export const sameIssue = (a: IssueRef, b: IssueRef): boolean => a.number === b.number && sameRepo(a.repo, b.repo);
+
+/** How a message names `ref` from repository `here`: `#N` there, `owner/name#N` anywhere else. */
+export function refName(ref: IssueRef, here: string): string {
+  return sameRepo(ref.repo, here) ? `#${ref.number}` : `${ref.repo}#${ref.number}`;
+}
+
+/**
+ * The issues `line` names in `text`, read from repository `here`, in order,
+ * without repeats: a line naming `here` by name is one of its own issues.
+ */
+function named(line: RegExp, text: string, here: string): IssueRef[] {
+  const refs: IssueRef[] = [];
+  for (const match of text.matchAll(line)) {
+    const repo = match[2] ?? match[4];
+    const ref = { repo: repo === undefined || sameRepo(repo, here) ? here : repo, number: Number(match[1] ?? match[3] ?? match[5]) };
+    if (!refs.some((one) => sameIssue(one, ref))) refs.push(ref);
+  }
+  return refs;
+}
+
+/** The slices `text` names, read from repository `here`, in order, without repeats. */
+export function slicesNamed(text: string, here: string): IssueRef[] {
+  return named(SLICE_LINE, text, here);
+}
+
+/** The States `text` names with a line `State: #N`, read from repository `here`, in order, without repeats. */
+export function statesNamed(text: string, here: string): IssueRef[] {
+  return named(STATE_LINE, text, here);
 }
 
 interface Comment {
@@ -67,31 +103,42 @@ interface Reaction {
   created_at: string;
 }
 
+/** The slice a read is for, as its errors name it: a number in this repository, another's `owner/name#N`. */
+type Slice = number | string;
+
+/** How an error names `slice`. */
+const tagOf = (slice: Slice): string => (typeof slice === 'number' ? `#${slice}` : slice);
+
 /**
  * Reads `url` from GitHub's REST API for slice `slice`'s work rules: its
  * JSON, or undefined on 404 when `missing` allows it. The work rules read
  * REST alone, so they run wherever GitHub's REST API answers, a Claude
  * cloud session's GitHub proxy included, which refuses GraphQL.
  */
-async function rest(sys: Sys, token: string, slice: number, url: string, missing = false): Promise<unknown> {
+async function rest(sys: Sys, token: string, slice: Slice, url: string, missing = false): Promise<unknown> {
   const { status, json } = await sys.http(url, { token });
   if (status === 404 && missing) return undefined;
   if (status !== 200) {
     const why = (json as { message?: string } | null)?.message ?? `HTTP ${status}`;
-    // A client workflow from before the work rules grants no issues: read.
-    const hint = /not accessible/i.test(why) ? '; the client workflow needs issues: read, so run niyam onboard to update it' : '';
-    throw new Error(`cannot read #${slice}: ${why} (${url.replace(API, '')})${hint}`);
+    // A client workflow from before the work rules grants no issues: read. Another repository's slice is read with
+    // whatever the token reaches there, which onboard does not set.
+    const hint = /not accessible/i.test(why)
+      ? typeof slice === 'number'
+        ? '; the client workflow needs issues: read, so run niyam onboard to update it'
+        : `; this token cannot read ${slice.replace(/#\d+$/, '')}`
+      : '';
+    throw new Error(`cannot read ${tagOf(slice)}: ${why} (${url.replace(API, '')})${hint}`);
   }
   return json;
 }
 
 /** Every item of a REST list at `url`, 100 a page: GitHub's most. */
-async function every<T>(sys: Sys, token: string, slice: number, url: string, missing = false): Promise<T[]> {
+async function every<T>(sys: Sys, token: string, slice: Slice, url: string, missing = false): Promise<T[]> {
   const items: T[] = [];
   for (let page = 1; ; page++) {
     const json = await rest(sys, token, slice, `${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`, missing);
     if (json === undefined) return items;
-    if (!Array.isArray(json)) throw new Error(`cannot read #${slice}: GitHub did not answer a list (${url.replace(API, '')})`);
+    if (!Array.isArray(json)) throw new Error(`cannot read ${tagOf(slice)}: GitHub did not answer a list (${url.replace(API, '')})`);
     items.push(...(json as T[]));
     if (json.length < 100) return items;
   }
@@ -192,69 +239,112 @@ async function readIssue(sys: Sys, token: string, slug: string, number: number):
  * Read from the parent endpoint, not the issue's `parent_issue_url`: on a
  * private repository a workflow's GITHUB_TOKEN gets that field back as null.
  */
-async function parentOf(sys: Sys, token: string, issue: Issue): Promise<{ parent?: Issue; problem?: string }> {
+async function parentOf(sys: Sys, token: string, issue: Issue, nameOf = (number: number): string => `#${number}`): Promise<{ parent?: Issue; problem?: string }> {
   const { status, json } = await sys.http(`${issue.url}/parent`, { token });
   if (status === 200) return { parent: json as Issue };
   const message = (json as { message?: string } | null)?.message;
   // An issue with no parent reads as 404 "No parent issue found"; any other failure is a read that failed, not a missing parent.
   if (status === 404 && message && /no parent/i.test(message)) return {};
-  return { problem: `could not read #${issue.number}'s parent (HTTP ${status}${message ? `: ${message}` : ''})` };
+  return { problem: `could not read ${nameOf(issue.number)}'s parent (HTTP ${status}${message ? `: ${message}` : ''})` };
 }
 
 /**
- * Reads slice `slice` against the work rules' approvals: the problems that
+ * Issue `ref` from another repository than `here`, or the problem that
+ * refuses it: one the token cannot read there (GitHub answers 404 or 403
+ * for a private repository it does not reach) or a pull request.
+ */
+async function foreignIssue(sys: Sys, token: string, here: string, ref: IssueRef): Promise<{ issue?: Issue; problem?: string }> {
+  const name = refName(ref, here);
+  const url = `${API}/repos/${ref.repo}/issues/${ref.number}`;
+  const { status, json } = await sys.http(url, { token });
+  const message = (json as { message?: string } | null)?.message;
+  if (status === 404 || status === 403 || status === 401) {
+    return {
+      problem: `${name} cannot be read with this token (HTTP ${status}${message ? `: ${message}` : ''}): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads no private repository but ${here}`,
+    };
+  }
+  if (status !== 200) throw new Error(`cannot read ${name}: ${message ?? `HTTP ${status}`} (${url.replace(API, '')})`);
+  const issue = json as Issue;
+  return issue.pull_request ? { problem: `${name} is a pull request, not an issue` } : { issue };
+}
+
+/**
+ * Reads slice `ref` against the work rules' approvals: the problems that
  * stop it outright (not a Slice under a Work item an owner approved), else
- * the decisions it owes an owner and whether each was given.
+ * the decisions it owes an owner and whether each was given. The slice may
+ * be in another repository than `here`, the one being pushed or checked:
+ * it is then read there, by the owners and agents `here`'s settings name,
+ * and the Approvals issue is the one that repository's settings name.
  */
 async function readSlice(
   sys: Sys,
   token: string,
-  slug: string,
-  slice: number,
-  { owners, agents, approvals }: Settings,
-): Promise<{ problems: string[]; parent?: number; owed: Owed[]; closed?: boolean; states?: Issue[] }> {
-  const issue = await readIssue(sys, token, slug, slice);
+  here: string,
+  ref: IssueRef,
+  settings: Settings,
+): Promise<{ problems: string[]; parent?: number; owed: Owed[]; closed?: boolean; states?: Issue[]; approvals?: number }> {
+  const { owners, agents } = settings;
+  const { repo: slug, number: slice } = ref;
+  const foreign = !sameRepo(slug, here);
+  const nameOf = (number: number): string => refName({ repo: slug, number }, here);
+  // How errors name the slice: a number here, `owner/name#N` from another repository.
+  const tag: Slice = foreign ? nameOf(slice) : slice;
+  let issue: Issue | undefined;
+  if (foreign) {
+    const read = await foreignIssue(sys, token, here, ref);
+    if (read.problem) return { problems: [read.problem], owed: [] };
+    issue = read.issue;
+  } else {
+    issue = await readIssue(sys, token, slug, slice);
+  }
   if (!issue) return { problems: [`#${slice} is not an issue in ${slug}`], owed: [] };
-  if (issue.type?.name !== 'Slice') return { problems: [`#${slice} is not a Slice (its type is ${issue.type?.name ?? 'none'})`], owed: [] };
-  const { parent, problem } = await parentOf(sys, token, issue);
+  if (issue.type?.name !== 'Slice') return { problems: [`${nameOf(slice)} is not a Slice (its type is ${issue.type?.name ?? 'none'})`], owed: [] };
+  const { parent, problem } = await parentOf(sys, token, issue, nameOf);
   if (problem) return { problems: [problem], owed: [] };
-  if (parent?.type?.name !== 'Work item') return { problems: [`#${slice} is not a sub-issue of a Work item`], owed: [] };
+  if (parent?.type?.name !== 'Work item') return { problems: [`${nameOf(slice)} is not a sub-issue of a Work item`], owed: [] };
+  // Another repository's batch answers are on its own Approvals issue.
+  const approvals = foreign
+    ? await approvalsOf(sys, token, slug).catch(() => {
+        // fail-open: settings there that cannot be read name no Approvals issue, which only takes a way to pass away.
+        return undefined;
+      })
+    : settings.approvals;
 
-  const events = await every<TimelineEvent>(sys, token, slice, `${parent.url}/timeline`);
+  const events = await every<TimelineEvent>(sys, token, tag, `${parent.url}/timeline`);
   const approval = events
     .filter((event): event is Extract<TimelineEvent, { event: 'labeled' | 'unlabeled' }> => (event.event === 'labeled' || event.event === 'unlabeled') && event.label.name === 'approved')
     .at(-1);
   if (approval?.event !== 'labeled') {
-    return { problems: [`work item #${parent.number}, ${issueUrl(slug, parent.number)}, is not approved: ${either(owners)} adds the approved label before any slice starts`], owed: [] };
+    return { problems: [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, is not approved: ${either(owners)} adds the approved label before any slice starts`], owed: [] };
   }
   if (!anyLogin(owners, approval.actor?.login)) {
-    return { problems: [`work item #${parent.number}, ${issueUrl(slug, parent.number)}, was labeled approved by ${approval.actor?.login ?? 'someone unknown'}, not ${either(owners)}`], owed: [] };
+    return { problems: [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, was labeled approved by ${approval.actor?.login ?? 'someone unknown'}, not ${either(owners)}`], owed: [] };
   }
   const approvedAt = approval.created_at;
   const parentComments = events.filter((event): event is { event: 'commented' } & Comment => event.event === 'commented');
   // Every comment on the slice, so a proposal or decision that later discussion pushed back still counts.
-  const comments = await every<Comment>(sys, token, slice, `${issue.url}/comments`);
+  const comments = await every<Comment>(sys, token, tag, `${issue.url}/comments`);
   // Every state, however many: one past the first page can be a dropped one.
-  const states = await every<Issue>(sys, token, slice, `${issue.url}/sub_issues`);
+  const states = await every<Issue>(sys, token, tag, `${issue.url}/sub_issues`);
   // The Approvals issue's comments, read once a check and only when a decision owed may need them; an
   // Approvals issue GitHub cannot find answers nothing. Only an owner's comment whose first line approves
   // `number`, made after `since`, counts there.
   let batch: Comment[] | undefined;
   const batchFor = async (number: number, since: string): Promise<Comment[]> => {
     if (approvals === undefined) return [];
-    batch ??= await every<Comment>(sys, token, slice, `${API}/repos/${slug}/issues/${approvals}/comments`, true);
+    batch ??= await every<Comment>(sys, token, tag, `${API}/repos/${slug}/issues/${approvals}/comments`, true);
     return batchAnswers(batch, owners, number, since);
   };
 
   const owed: Owed[] = [];
   // When the slice was last added to its work item. A workflow's GITHUB_TOKEN on a private repository reads the
   // work item's sub_issue_added events with `sub_issue` null, so the slice's own parent_issue_added events say it.
-  const joined = async (number: number, url: string): Promise<string[]> =>
+  const joined = async (number: Slice, url: string): Promise<string[]> =>
     (await every<TimelineEvent>(sys, token, number, `${url}/timeline`))
       .filter((event) => event.event === 'parent_issue_added')
       .map((event) => (event as { created_at: string }).created_at);
   const mine = [
-    ...(await joined(slice, issue.url)),
+    ...(await joined(tag, issue.url)),
     ...events.flatMap((event) => (event.event === 'sub_issue_added' && event.sub_issue?.number === slice ? [event.created_at] : [])),
   ];
   // An addition after approval that names no issue may be this slice's. It is put down to another sub-issue of the
@@ -264,9 +354,9 @@ async function readSlice(
     event.event === 'sub_issue_added' && !event.sub_issue && event.created_at > approvedAt && !mine.includes(event.created_at) ? [event.created_at] : [],
   );
   if (hidden.length > 0) {
-    for (const sibling of await every<Issue>(sys, token, slice, `${parent.url}/sub_issues`)) {
+    for (const sibling of await every<Issue>(sys, token, tag, `${parent.url}/sub_issues`)) {
       if (sibling.number === slice || hidden.length === 0) continue;
-      const theirs = await joined(slice, sibling.url);
+      const theirs = await joined(tag, sibling.url);
       hidden = hidden.filter((at) => !theirs.includes(at));
     }
   }
@@ -294,7 +384,7 @@ async function readSlice(
     // unedited decision on the slice settles it.
     const decisions = onSlice.some((one) => !editedAt(one))
       ? onSlice
-      : [...onSlice, ...decisionsIn(await every<Comment>(sys, token, slice, `${state.url}/comments`), owners), ...(await batchFor(state.number, state.closed_at))];
+      : [...onSlice, ...decisionsIn(await every<Comment>(sys, token, tag, `${state.url}/comments`), owners), ...(await batchFor(state.number, state.closed_at))];
     owed.push({
       kind: 'dropped',
       number: state.number,
@@ -308,10 +398,10 @@ async function readSlice(
   // Reactions are read only for the proposals that could still settle something; a deleted proposal has none.
   const reactions = new Map<Comment['id'], Reaction[]>();
   for (const proposal of owed.filter((one) => !one.settled).flatMap((one) => one.proposals)) {
-    reactions.set(proposal.id, await every<Reaction>(sys, token, slice, `${API}/repos/${slug}/issues/comments/${proposal.id}/reactions?content=%2B1`, true));
+    reactions.set(proposal.id, await every<Reaction>(sys, token, tag, `${API}/repos/${slug}/issues/comments/${proposal.id}/reactions?content=%2B1`, true));
   }
   for (const one of owed) one.settled ||= thumbsUp(one.proposals, reactions, owners, one.since);
-  return { problems: [], parent: parent.number, owed, closed: issue.state === 'closed', states };
+  return { problems: [], parent: parent.number, owed, closed: issue.state === 'closed', states, ...(approvals === undefined ? {} : { approvals }) };
 }
 
 /**
@@ -320,37 +410,47 @@ async function readSlice(
  * under the slice, and a pull request for a slice closed already, a fix,
  * must name the open State it is filed as.
  */
-function stateProblems(slice: number, closed: boolean, states: Issue[], names: number[]): string[] {
-  const problems = names.flatMap((number) =>
-    states.some((state) => state.number === number && state.type?.name === 'State')
+function stateProblems(slice: IssueRef, here: string, closed: boolean, states: Issue[], names: IssueRef[]): string[] {
+  const name = refName(slice, here);
+  // A State is a sub-issue of the slice, so it is in the slice's repository.
+  const ours = (ref: IssueRef): boolean => sameRepo(ref.repo, slice.repo);
+  const problems = names.flatMap((ref) =>
+    ours(ref) && states.some((state) => state.number === ref.number && state.type?.name === 'State')
       ? []
-      : [`#${number} is not a State under slice #${slice}; a "State: #N" line names a State sub-issue of the slice the pull request builds`],
+      : [`${refName(ref, here)} is not a State under slice ${name}; a "State: #N" line names a State sub-issue of the slice the pull request builds`],
   );
-  const open = states.some((state) => names.includes(state.number) && state.type?.name === 'State' && state.state !== 'closed');
+  const open = states.some((state) => names.some((ref) => ours(ref) && ref.number === state.number) && state.type?.name === 'State' && state.state !== 'closed');
   if (closed && !open) {
-    problems.push(`#${slice} is closed, so this pull request is a fix: file it as a State under #${slice} and name it with a line "State: #N"`);
+    problems.push(`${name} is closed, so this pull request is a fix: file it as a State under ${name} and name it with a line "State: ${sameRepo(slice.repo, here) ? '#N' : `${slice.repo}#N`}"`);
   }
   return problems;
 }
 
-/** Why `owed` stops slice `slice`, and how the owner settles it. */
-function owedProblem(slug: string, one: Owed, slice: number, parent: number | undefined, { owners, agents, approvals }: Settings): string {
+/**
+ * Why `owed` stops slice `slice`, and how the owner settles it; a slice in
+ * another repository than `here` is settled there, on its Approvals issue
+ * `approvals`.
+ */
+function owedProblem(one: Owed, slice: IssueRef, here: string, parent: number | undefined, approvals: number | undefined, { owners, agents }: Settings): string {
   const owner = either(owners);
   // The agent proposes as itself; with several, any of them.
   const agent = either(agents);
-  const ask = `${one.note ? ` (${one.note})` : ''}${one.proposals.length > 0 ? '' : `; ${agent} proposes it with: ${proposeCommand(one.number)}`}`;
+  const at = (number: number | undefined): string => (number === undefined ? '#undefined' : refName({ repo: slice.repo, number }, here));
+  const s = at(slice.number);
+  const where = sameRepo(slice.repo, here) ? '' : ` in a clone of ${slice.repo}`;
+  const ask = `${one.note ? ` (${one.note})` : ''}${one.proposals.length > 0 ? '' : `; ${agent} proposes it${where} with: ${proposeCommand(one.number)}`}`;
   // Each place the owner acts, by its full address, so an agent passes on a link, never a bare number.
-  const issue = (number: number | undefined): string => issueUrl(slug, number);
+  const issue = (number: number | undefined): string => issueUrl(slice.repo, number);
   // The comment the owner reacts to, where there is one; else the slice, where the proposal is to be posted.
   const on =
     one.proposals.length > 0
       ? `${agent}'s proposal${one.kind === 'added' ? '' : ' for it'}, ${newest(one.proposals).html_url}`
-      : `${agent}'s proposal${one.kind === 'added' ? '' : ' for it'} on #${slice}, ${issue(slice)}`;
+      : `${agent}'s proposal${one.kind === 'added' ? '' : ' for it'} on ${s}, ${issue(slice.number)}`;
   // Where the settings name an Approvals issue, one comment there answers this among a batch.
-  const batch = approvals === undefined ? '' : `, or ${owner} comments on #${approvals}, the Approvals issue, ${issue(approvals)}, with a first line "Decision: approve #${one.number}"`;
+  const batch = approvals === undefined ? '' : `, or ${owner} comments on ${at(approvals)}, the Approvals issue, ${issue(approvals)}, with a first line "Decision: approve #${one.number}"`;
   return one.kind === 'added'
-    ? `#${slice} was added to work item #${parent}, ${issue(parent)}, after its approval; ${owner} reacts 👍 on ${on}, or adds a "Decision:" comment naming #${slice} on ${issue(slice)}, or #${slice} links ${owner}'s request for it on #${parent}${batch}${ask}`
-    : `state #${one.number}, ${issue(one.number)}, was closed as not planned after approval; ${owner} reacts 👍 on ${on}, or adds a "Decision:" comment to it${batch}${ask}`;
+    ? `${s} was added to work item ${at(parent)}, ${issue(parent)}, after its approval; ${owner} reacts 👍 on ${on}, or adds a "Decision:" comment naming #${slice.number} on ${issue(slice.number)}, or ${s} links ${owner}'s request for it on ${at(parent)}${batch}${ask}`
+    : `state ${at(one.number)}, ${issue(one.number)}, was closed as not planned after approval; ${owner} reacts 👍 on ${on}, or adds a "Decision:" comment to it${batch}${ask}`;
 }
 
 /** Issue `number`'s own address on GitHub, where the owner acts on it. */
@@ -386,9 +486,9 @@ export function deleteBranchCommand(ref: string): string {
  * and, when it is superseded, what to do: close it and, for a branch in this
  * repository (`here`), delete its branch, as an agent does itself.
  */
-function secondPull(slug: string, slice: number, pull: OpenPull, here: boolean): string {
+function secondPull(slug: string, slice: IssueRef, pull: OpenPull, here: boolean): string {
   const remedy = here ? `close it and delete its branch: ${deleteBranchCommand(pull.head.ref)}` : 'close it';
-  return `#${slice} already has pull request #${pull.number}, ${pullUrl(slug, pull.number, pull.html_url)}; one slice, one pull request. If #${pull.number} is superseded, ${remedy}`;
+  return `${refName(slice, slug)} already has pull request #${pull.number}, ${pullUrl(slug, pull.number, pull.html_url)}; one slice, one pull request. If #${pull.number} is superseded, ${remedy}`;
 }
 
 /**
@@ -404,14 +504,16 @@ export async function sliceProblems(
   sys: Sys,
   token: string,
   slug: string,
-  slice: number,
+  which: number | IssueRef,
   accounts: Settings,
-  mine: { pull?: number; branch?: string; states?: number[] },
+  mine: { pull?: number; branch?: string; states?: IssueRef[] },
 ): Promise<string[]> {
+  // A slice in this repository may be given by its number alone.
+  const slice = typeof which === 'number' ? { repo: slug, number: which } : which;
   const read = await readSlice(sys, token, slug, slice, accounts);
   if (read.problems.length > 0) return read.problems;
-  const problems = read.owed.filter((one) => !one.settled).map((one) => owedProblem(slug, one, slice, read.parent, accounts));
-  if (mine.states) problems.push(...stateProblems(slice, read.closed ?? false, read.states ?? [], mine.states));
+  const problems = read.owed.filter((one) => !one.settled).map((one) => owedProblem(one, slice, slug, read.parent, read.approvals, accounts));
+  if (mine.states) problems.push(...stateProblems(slice, slug, read.closed ?? false, read.states ?? [], mine.states));
 
   // The pull request being checked: by number, or by its branch in this repository (not a fork's of the same name).
   for (let page = 1; ; page++) {
@@ -420,7 +522,7 @@ export async function sliceProblems(
     for (const pull of pulls.json as OpenPull[]) {
       const here = pull.head.repo?.full_name.toLowerCase() === slug.toLowerCase();
       if (pull.number === mine.pull || (pull.head.ref === mine.branch && here)) continue;
-      if (slicesNamed(pull.body ?? '').includes(slice)) problems.push(secondPull(slug, slice, pull, here));
+      if (slicesNamed(pull.body ?? '', slug).some((one) => sameIssue(one, slice))) problems.push(secondPull(slug, slice, pull, here));
     }
     if (pulls.json.length < 100) break;
   }
@@ -495,17 +597,17 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
       return 0;
     }
   }
-  const slices = slicesNamed(pull.body ?? '');
+  const slices = slicesNamed(pull.body ?? '', slug);
   if (slices.length !== 1) {
     return report(io, 'pr-work-rules', [
       slices.length === 0
         ? `#${pull.number} names no slice; add a line "Slice: #N" to its description`
-        : `#${pull.number} names ${slices.length} slices (${slices.map((n) => `#${n}`).join(', ')}); an agent pull request builds exactly one`,
+        : `#${pull.number} names ${slices.length} slices (${slices.map((one) => refName(one, slug)).join(', ')}); an agent pull request builds exactly one`,
     ]);
   }
-  const [slice] = slices as [number];
-  const problems = await sliceProblems(sys, token, slug, slice, accounts, { pull: pull.number, states: statesNamed(pull.body ?? '') });
-  if (problems.length === 0) io.out(`✓ pr-work-rules: #${pull.number} builds slice #${slice}, which may be built`);
+  const [slice] = slices as [IssueRef];
+  const problems = await sliceProblems(sys, token, slug, slice, accounts, { pull: pull.number, states: statesNamed(pull.body ?? '', slug) });
+  if (problems.length === 0) io.out(`✓ pr-work-rules: #${pull.number} builds slice ${refName(slice, slug)}, which may be built`);
   return report(io, 'pr-work-rules', problems);
 }
 
@@ -631,31 +733,31 @@ export async function prePush(sys: Sys, io: Output, refLines: string, url: strin
     let log = gitLog(sys, root, ['--format=%B', ...rangeOf(base)]);
     if (!log.trim()) continue;
     // Asked of GitHub only when the push would be refused: what its merges brought from the default branch.
-    if (branch && slicesNamed(log).length !== 1) {
+    if (branch && slicesNamed(log, slug).length !== 1) {
       const merged = await mergedFromDefault(sys, root, slug, token, branch, rangeOf(base));
       if (merged.length > 0) {
         base = [...base, ...merged];
         log = gitLog(sys, root, ['--format=%B', ...rangeOf(base)]);
       }
     }
-    if (slicesNamed(log).length === 0) {
+    if (slicesNamed(log, slug).length === 0) {
       log = (base.length > 0 ? gitLog(sys, root, ['--format=%B', local, '--not', ...base]) : branchBeyondMerges(sys, root, rangeOf(base))) ?? log;
     }
     messages += `${log}\n`;
     branches.push(remoteRef.replace(/^refs\/heads\//, ''));
   }
   if (branches.length === 0) return 0;
-  const slices = slicesNamed(messages);
+  const slices = slicesNamed(messages, slug);
   const where = branches.join(', ');
   if (slices.length !== 1) {
     return report(io, 'pre-push', [
       slices.length === 0
         ? `the commits for ${where} name no slice; add a trailer "Slice: #N" to a commit message`
-        : `the commits for ${where} name ${slices.length} slices (${slices.map((n) => `#${n}`).join(', ')}); one push builds one slice`,
+        : `the commits for ${where} name ${slices.length} slices (${slices.map((one) => refName(one, slug)).join(', ')}); one push builds one slice`,
     ]);
   }
   if (branches.length > 1) return report(io, 'pre-push', [`one push builds one slice on one branch; this one pushes ${where}`]);
-  const [slice] = slices as [number];
+  const [slice] = slices as [IssueRef];
   const problems = await sliceProblems(sys, token, slug, slice, accounts, { branch: branches[0] as string });
   if (problems.length === 0 && isOn(sys, root, 'board')) await moveBoard(sys, io, token, slug, slice);
   return report(io, 'pre-push', problems);
@@ -673,15 +775,16 @@ const CLOUD_PROXY_REFUSAL = /sessions are bound to their configured repositories
  * shared workflow's Slice started job moves the slice when its pull request
  * opens.
  */
-async function moveBoard(sys: Sys, io: Output, token: string, slug: string, slice: number): Promise<void> {
+async function moveBoard(sys: Sys, io: Output, token: string, here: string, ref: IssueRef): Promise<void> {
+  const slice = refName(ref, here);
   try {
-    for (const line of await boardStarted(sys, token, slug, slice)) io.err(line);
+    for (const line of await boardStarted(sys, token, ref.repo, ref.number)) io.err(line);
   } catch (error) {
     const message = (error as Error).message;
     io.err(
       CLOUD_PROXY_REFUSAL.test(message)
-        ? `- board: this cloud session cannot reach the board; niyam's workflow moves #${slice} when its pull request opens`
-        : `! board: could not read where #${slice} and its work item are on the board, so nothing moved (${message}); the push goes on`,
+        ? `- board: this cloud session cannot reach the board; niyam's workflow moves ${slice} when its pull request opens`
+        : `! board: could not read where ${slice} and its work item are on the board, so nothing moved (${message}); the push goes on`,
     );
   }
 }
@@ -764,11 +867,20 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
     io.out(`pr-merged: #${pull.number} merged into ${pull.base.ref}, not ${branch}; its slices stay open until their work reaches ${branch}`);
     return 0;
   }
-  const slices = slicesNamed(pull.body ?? '');
+  const slices = slicesNamed(pull.body ?? '', slug);
   if (slices.length === 0) io.out(`pr-merged: #${pull.number} names no slice; nothing to close`);
+  // A slice or State in another repository is closed there, by whoever builds the rest of it: this workflow's
+  // GITHUB_TOKEN writes only here, and never touches this repository's issue of the same number.
+  const elsewhere = (ref: IssueRef): boolean => {
+    if (sameRepo(ref.repo, slug)) return false;
+    io.out(`- ${refName(ref, slug)} is in another repository; left as it is`);
+    return true;
+  };
   // The slices named that are Slices: a State is closed only under one of them.
   const built: number[] = [];
-  for (const slice of slices) {
+  for (const ref of slices) {
+    if (elsewhere(ref)) continue;
+    const slice = ref.number;
     const issue = await readIssue(sys, token, slug, slice);
     if (issue?.type?.name !== 'Slice') {
       io.out(`- #${slice} is not a Slice in ${slug}; left as it is`);
@@ -778,7 +890,9 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
     // GitHub closes a slice itself when the pull request also says "Closes #N"; the slice still gets its comment, once.
     await closeBuilt(sys, io, token, issue, pull);
   }
-  for (const number of statesNamed(pull.body ?? '')) {
+  for (const ref of statesNamed(pull.body ?? '', slug)) {
+    if (elsewhere(ref)) continue;
+    const { number } = ref;
     const issue = await readIssue(sys, token, slug, number);
     if (issue?.type?.name !== 'State') {
       io.out(`- #${number} is not a State in ${slug}; left as it is`);
@@ -837,30 +951,31 @@ export async function prStarted(sys: Sys, io: Output): Promise<number> {
     io.out(offLine('pr-started', 'work-rules', PERSONAL_REPO));
     return 0;
   }
-  const slices = slicesNamed(pull.body ?? '');
+  const slices = slicesNamed(pull.body ?? '', slug);
   if (slices.length !== 1) {
     io.out(`pr-started: #${pull.number} names ${slices.length === 0 ? 'no slice' : `${slices.length} slices`}; nothing moves on the board`);
     return 0;
   }
-  const [slice] = slices as [number];
+  const [ref] = slices as [IssueRef];
+  const slice = refName(ref, slug);
   if (!board) {
     io.out(
-      `pr-started: no board app token here (the NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY secrets are not passed, or GitHub would not make the token), so #${slice} moves on the board only from a desktop push`,
+      `pr-started: no board app token here (the NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY secrets are not passed, or GitHub would not make the token), so ${slice} moves on the board only from a desktop push`,
     );
     return 0;
   }
   try {
-    const problems = await sliceProblems(sys, token, slug, slice, loadSettings(sys, sys.cwd), { pull: pull.number, states: statesNamed(pull.body ?? '') });
+    const problems = await sliceProblems(sys, token, slug, ref, loadSettings(sys, sys.cwd), { pull: pull.number, states: statesNamed(pull.body ?? '', slug) });
     if (problems.length > 0) {
-      io.out(`pr-started: #${slice} may not be built yet (Work rules says why), so nothing moves on the board`);
+      io.out(`pr-started: ${slice} may not be built yet (Work rules says why), so nothing moves on the board`);
       return 0;
     }
-    const moved = await boardStarted(sys, board, slug, slice);
+    const moved = await boardStarted(sys, board, ref.repo, ref.number);
     for (const line of moved) io.out(line);
-    if (moved.length === 0) io.out(`pr-started: #${slice} and its work item are where they belong on the board already`);
+    if (moved.length === 0) io.out(`pr-started: ${slice} and its work item are where they belong on the board already`);
   } catch (error) {
     // fail-open: the board never fails a pull request; Work rules judges the slice, and the line says what GitHub refused.
-    io.out(`! board: nothing moved for #${slice} (${(error as Error).message}); the pull request's checks go on`);
+    io.out(`! board: nothing moved for ${slice} (${(error as Error).message}); the pull request's checks go on`);
   }
   return 0;
 }
@@ -997,7 +1112,7 @@ async function proposeOne(
   if (problem) return { code: report(io, 'propose', [problem]), waiting: [] };
   const state = parent?.type?.name === 'Slice';
   const slice = state ? parent.number : number;
-  const read = await readSlice(sys, token, slug, slice, accounts);
+  const read = await readSlice(sys, token, slug, { repo: slug, number: slice }, accounts);
   if (read.problems.length > 0) return { code: report(io, 'propose', read.problems), waiting: [] };
   const owner = either(accounts.owners);
   const asked = read.owed.filter((one) => !state || one.number === number);

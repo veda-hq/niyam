@@ -188,7 +188,7 @@ async function untyped(sys: Sys, token: string, repo: string): Promise<Omit<Hold
  * standing record the owner answers batches on, never closed, which no work
  * model type fits.
  */
-async function approvalsOf(sys: Sys, token: string, repo: string): Promise<number | undefined> {
+export async function approvalsOf(sys: Sys, token: string, repo: string): Promise<number | undefined> {
   const { status, json } = await sys.http(`${API}/repos/${repo}/contents/${SETTINGS_PATH}`, { token });
   if (status === 404) return undefined;
   const content = (json as { content?: unknown } | null)?.content;
