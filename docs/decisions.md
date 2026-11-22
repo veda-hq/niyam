@@ -2582,3 +2582,23 @@
     when `CLAUDE_CODE_REMOTE=true`.
   - Rejected: a marker comment (asserts, never verifies); following every
     `exec`, `.` or `source`, or more hops (no client needs them).
+- **2026-11-22 — Record: board-audit reads as the agent when `GH_TOKEN` is
+  unset (State #548 of #408).** On 2026-11-22 the owner ran
+  `niyam board-audit` in their terminal, right after `niyam machine` had
+  signed them out of `gh`. It refused, and told them to run it with
+  `GH_TOKEN="$(gh auth token)"`, which needs that sign-in back. The audit
+  only reads, and the agent's classic token has `project` and `read:org`, so
+  without `GH_TOKEN` it now reads with the agent's token from the keychain.
+  The agent is the one the clone's settings name that sessions here work as
+  (`agentHere`), or outside a clone the one `machine` set up on this Mac.
+  The keychain is read under the login as `machine` spelled it. A missing or
+  ambiguous setup reads nothing, never a guess, and names its fix:
+  - no agent set up, or none of the settings' agents: `niyam machine <agent>`;
+  - no token stored for the agent: `niyam machine <agent>`;
+  - several set up outside a clone: run it in a clone of the repository;
+  - several named and set up: remove the other agents' folders, as
+    `session-start` asks.
+  A locked session's `GH_TOKEN`, the lock's placeholder, is no token. The
+  audit reads nothing and never works around the lock with the keychain.
+  Rejected: the owner's one-time browser sign-in, as `owner-step` uses,
+  because it costs a device code for a read the agent can do.

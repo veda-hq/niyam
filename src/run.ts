@@ -118,7 +118,8 @@ Commands:
   board-audit [owner/repo] [--project <title>]
                    Read only: the open issues not on the work board, items whose Status disagrees with
                    their issue, and whether the auto-add workflows are on; exit 3 when something is to fix.
-                   Needs GH_TOKEN; cannot run in a Claude cloud session, whose proxy refuses Projects
+                   Reads with GH_TOKEN, else the agent's token from this Mac's keychain; cannot run in
+                   a Claude cloud session, whose proxy refuses Projects
   help            Show this text
   version          Print the installed version
 

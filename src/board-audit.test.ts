@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { pathsFor, sessionScript } from './agent.ts';
 import { auditArgs, boardAudit } from './board-audit.ts';
 import { BUILT_IN, Board, OWNER_TOKEN, SLUG, URL } from './fake-board.test.ts';
 import { FakeSys, ROOT, capture } from './fake.test.ts';
@@ -182,13 +183,113 @@ describe('board-audit', () => {
     assert.deepEqual(await audit(elsewhere.sys, ['example-org/gone', '--project', 'example-app work']), { code: 1, out: [], err: ['niyam board-audit: GitHub shows no repository example-org/gone'] });
   });
 
-  it('needs GH_TOKEN', async () => {
-    const { sys } = setUp();
-    sys.env = {};
-    const { code, err } = await audit(sys);
-    assert.equal(code, 1);
-    assert.match(err[0] ?? '', /^niyam board-audit: board-audit needs GH_TOKEN/);
-    assert.deepEqual(sys.requests, []);
+  describe('with no GH_TOKEN, as in the owner\'s terminal once niyam machine has signed them out of gh (#548)', () => {
+    const AGENT_TOKEN = 'ghp_agent';
+    const setUpAgent = (sys: FakeSys, agent: string) =>
+      sys.files.set(`${sys.home}/.config/niyam/${agent.toLowerCase()}/session.sh`, sessionScript(agent, 42, pathsFor(sys.home, agent)));
+    const readsAs = (sys: FakeSys, token: string) => sys.requests.length > 0 && sys.requests.every((request) => request.token === token);
+
+    it("reads the board as the agent the clone's settings name, with its token from this Mac's keychain", async () => {
+      const { sys } = setUp();
+      sys.env = {};
+      sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      const { code, err } = await audit(sys);
+      assert.deepEqual(err, []);
+      assert.equal(code, 0);
+      assert.ok(readsAs(sys, AGENT_TOKEN));
+    });
+
+    it("reads the keychain under the login as niyam machine spelled it, whatever case the settings use", async () => {
+      const { sys } = setUp({ agent: 'examplebot' });
+      sys.env = {};
+      setUpAgent(sys, 'ExampleBot');
+      sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      const { code, err } = await audit(sys);
+      assert.deepEqual(err, []);
+      assert.equal(code, 0);
+      assert.ok(readsAs(sys, AGENT_TOKEN));
+    });
+
+    it("takes a locked session's placeholder as no token: reads nothing, and never the keychain's instead", async () => {
+      const { sys } = setUp();
+      sys.env = { GH_TOKEN: 'niyam-no-agent-token' };
+      sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      assert.deepEqual(await audit(sys), {
+        code: 1,
+        out: [],
+        err: ["niyam board-audit: board-audit has no token: GH_TOKEN is the lock's niyam-no-agent-token, as in a session niyam has not given the agent identity, so nothing was read; run niyam doctor"],
+      });
+      assert.deepEqual(sys.requests, []);
+      assert.ok(!sys.calls.some((call) => call.command === '/usr/bin/security'), 'never reads the keychain');
+    });
+
+    it('on a platform with no token store, says GH_TOKEN is needed there, not niyam machine, and reads nothing', async () => {
+      const { sys } = setUp();
+      sys.env = {};
+      sys.platform = 'linux';
+      assert.deepEqual(await audit(sys), {
+        code: 1,
+        out: [],
+        err: ["niyam board-audit: board-audit needs GH_TOKEN here, as an agent session has it: niyam supports macOS only, where the keychain holds the agent's token; this machine runs linux"],
+      });
+      assert.deepEqual(sys.requests, []);
+    });
+
+    it('outside a clone, reads as the one agent niyam machine set up on this Mac', async () => {
+      const { sys } = setUp();
+      sys.env = {};
+      sys.inRepo = false;
+      setUpAgent(sys, 'ExampleBot');
+      sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      const { code, err } = await audit(sys, [SLUG, '--project', 'example-app work']);
+      assert.deepEqual(err, []);
+      assert.equal(code, 0);
+      assert.ok(readsAs(sys, AGENT_TOKEN));
+    });
+
+    it("says how to set the agent up, never the owner's gh token, and reads nothing", async () => {
+      const none = setUp();
+      none.sys.env = {};
+      assert.deepEqual(await audit(none.sys), {
+        code: 1,
+        out: [],
+        err: ["niyam board-audit: board-audit needs GH_TOKEN, as an agent session has it, or ExampleBot's token from this Mac's keychain, which holds none; run niyam machine ExampleBot"],
+      });
+
+      const nobody = setUp();
+      nobody.sys.env = {};
+      nobody.sys.inRepo = false;
+      assert.deepEqual((await audit(nobody.sys, [SLUG])).err, [
+        "niyam board-audit: board-audit needs GH_TOKEN, as an agent session has it, or the agent's token from this Mac's keychain: niyam machine has set up no agent on this Mac; run niyam machine <agent>, or run it in an agent session",
+      ]);
+
+      const two = setUp();
+      two.sys.env = {};
+      two.sys.inRepo = false;
+      setUpAgent(two.sys, 'ExampleBot');
+      setUpAgent(two.sys, 'OtherBot');
+      two.sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      assert.match((await audit(two.sys, [SLUG])).err[0] ?? '', /niyam machine has set up ExampleBot and OtherBot on this Mac, and no \.github\/niyam\.json here names one; run it in a clone of the repository, or in an agent session$/);
+
+      const listed = setUp({ agent: ['ExampleBot', 'OtherBot'] });
+      listed.sys.env = {};
+      listed.sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      assert.match((await audit(listed.sys)).err[0] ?? '', /names the agents .*, and niyam machine has set up none of them on this machine; or run it in an agent session$/);
+
+      for (const { sys } of [none, nobody, two, listed]) assert.deepEqual(sys.requests, []);
+      for (const { sys } of [none, nobody, two, listed]) assert.ok(!sys.calls.some((call) => call.command === 'gh'), 'never asks gh for a token');
+    });
+
+    it('in a clone whose settings name several agents, reads as the one niyam machine set up on this Mac', async () => {
+      const { sys } = setUp({ agent: ['ExampleBot', 'OtherBot'] });
+      sys.env = {};
+      setUpAgent(sys, 'OtherBot');
+      sys.keychain.set('niyam/OtherBot', AGENT_TOKEN);
+      const { code, err } = await audit(sys);
+      assert.deepEqual(err, []);
+      assert.equal(code, 0);
+      assert.ok(readsAs(sys, AGENT_TOKEN));
+    });
   });
 
   it('says it cannot run in a Claude cloud session, whose proxy refuses Projects, and reads nothing', async () => {

@@ -1,5 +1,6 @@
-import { API, SETTINGS_PATH, repoAt } from './agent.ts';
+import { API, NO_TOKEN, SETTINGS_PATH, agentHere, agentsSetUp, hasSettings, isNoToken, loadSettings, readToken, repoAt, sameLogin } from './agent.ts';
 import { AUTO_ADD, AUTO_ADD_FILTER, graphql } from './board.ts';
+import { tokenStore, unsupported } from './token-store.ts';
 import type { Output, Sys } from './types.ts';
 
 /** What the audit found: the Project, and where it and the repository disagree. */
@@ -176,6 +177,51 @@ export function auditLines(audit: Audit, slug: string): { lines: string[]; wrong
 }
 
 /**
+ * The token the audit reads with: `GH_TOKEN`, as an agent session has it,
+ * else the agent's own, which `machine` keeps in this Mac's keychain. The
+ * audit only reads, and the agent's token can read the board, so the owner
+ * runs it in a terminal with no `gh` signed in. It never asks for the
+ * owner's own token, which `machine` signs out of `gh` (veda-hq/niyam#548).
+ */
+export function auditToken(sys: Sys): string {
+  const given = sys.env.GH_TOKEN;
+  // A locked session's placeholder is no token, and the lock is never worked around with the keychain's.
+  if (isNoToken(given)) throw new Error(`board-audit has no token: GH_TOKEN is the lock's ${NO_TOKEN}, as in a session niyam has not given the agent identity, so nothing was read; run niyam doctor`);
+  if (given) return given;
+  if (!tokenStore(sys)) throw new Error(`board-audit needs GH_TOKEN here, as an agent session has it: ${unsupported(sys)}`);
+  const agent = auditAgent(sys);
+  if ('problem' in agent) throw new Error(`board-audit needs GH_TOKEN, as an agent session has it, or the agent's token from this Mac's keychain: ${agent.problem}`);
+  // The keychain item is under the login as `machine` spelled it, which the settings may spell in another case.
+  const login = agentsSetUp(sys).find((one) => sameLogin(one, agent.agent)) ?? agent.agent;
+  const token = readToken(sys, login);
+  if (!token) throw new Error(`board-audit needs GH_TOKEN, as an agent session has it, or ${login}'s token from this Mac's keychain, which holds none; run niyam machine ${login}`);
+  return token;
+}
+
+/**
+ * The agent whose token the audit reads with outside an agent session: in a
+ * clone with settings, the one they name that sessions here work as
+ * (`agentHere`); elsewhere, the one `machine` set up on this Mac. A clone
+ * without settings counts as elsewhere: the audit takes any repository by
+ * name, so it needs no client clone. Never a guess.
+ */
+function auditAgent(sys: Sys): { agent: string } | { problem: string } {
+  const top = sys.exec('git', ['rev-parse', '--show-toplevel'], { cwd: sys.cwd });
+  const root = top.stdout.trim();
+  if (top.code === 0 && hasSettings(sys, root)) {
+    const here = agentHere(sys, loadSettings(sys, root).agents);
+    return 'problem' in here ? { problem: `${here.problem}; or run it in an agent session` } : here;
+  }
+  const setUp = agentsSetUp(sys);
+  if (setUp.length === 1) return { agent: setUp[0] as string };
+  return {
+    problem: setUp.length === 0
+      ? 'niyam machine has set up no agent on this Mac; run niyam machine <agent>, or run it in an agent session'
+      : `niyam machine has set up ${setUp.join(' and ')} on this Mac, and no ${SETTINGS_PATH} here names one; run it in a clone of the repository, or in an agent session`,
+  };
+}
+
+/**
  * `niyam board-audit [owner/repo] [--project <title>]`: lists where the
  * repository and its work board disagree, changing nothing. The repository
  * is the clone's here when none is named; the Project is the one the
@@ -190,8 +236,7 @@ export async function boardAudit(sys: Sys, io: Output, args: readonly string[]):
     return 1;
   }
   const parsed = auditArgs(args);
-  const token = sys.env.GH_TOKEN;
-  if (!token) throw new Error('board-audit needs GH_TOKEN, with read access to the Project: run it in an agent session, or GH_TOKEN="$(gh auth token)" niyam board-audit');
+  const token = auditToken(sys);
   const slug = parsed.slug ?? repoAt(sys).slug;
   const title = parsed.project ?? (await settingsTitle(sys, token, slug)) ?? `${slug.split('/')[1] as string} work`;
   const { lines, wrong } = auditLines(await auditBoard(sys, token, slug, title), slug);
