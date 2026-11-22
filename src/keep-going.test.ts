@@ -426,6 +426,11 @@ describe('gather', () => {
       );
       assert.deepEqual((await gather(later, ROOT, SETTINGS, false, undefined)).left.map((one) => one.ref), ['still-here']);
       assert.ok(!later.requests.some((request) => request.url.includes('past-budget')));
+      // A branch read GitHub refuses is no deleted branch: the scan stops there, naming none past it.
+      const refused = sliced(['try-0', 'try-1'].map((ref, n) => closedPull({ number: 20 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], { 'try-0': 500, 'try-1': 200 });
+      refused.handlers.unshift((method, url) => (url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : undefined));
+      assert.deepEqual((await gather(refused, ROOT, SETTINGS, false, undefined)).left, []);
+      assert.ok(!refused.requests.some((request) => request.url.includes('try-1')));
       for (const failing of ['pulls?state=open&head=', '/git/ref/heads/']) {
         const down = sliced(refs.map((ref, n) => closedPull({ number: 20 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], {});
         down.handlers.unshift((method, url) => (url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : url.includes('/git/ref/heads/') ? { status: 200, json: {} } : undefined));

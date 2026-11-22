@@ -418,10 +418,10 @@ export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSe
       // fail-open: a branch GitHub cannot be asked about is not held against the session.
       return undefined;
     });
-    // GitHub not answering stops the reads: the next would wait as long, and the hook fails open.
-    if (ref === undefined) break;
-    // 404: deleted already. Anything else but 200 says nothing.
-    if (ref.status !== 200) continue;
+    // 404 alone says deleted already, so the scan goes on past it.
+    if (ref?.status === 404) continue;
+    // GitHub not answering, or answering anything but 200, stops the reads: the next would fare no better, and the hook fails open.
+    if (ref?.status !== 200) break;
     reads++;
     // A branch an open pull request still builds from is not left over: asked by its own head, so no page can hide one.
     const open = await list(`state=open&head=${encodeURIComponent(`${slug.split('/')[0]}:${one.ref}`)}&per_page=100`);

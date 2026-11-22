@@ -1083,7 +1083,8 @@ pull requests and checks their branches newest first. A branch deleted
 already costs one read, so it hides none after it. Each stop names at
 most five branches still there; the rest show at a later stop, once those
 five are deleted. A stop spends at most 30 reads, and stops reading at
-the first one GitHub does not answer. The session is sent back with each
+the first one GitHub does not answer, or answers with anything but found
+or not found (404). The session is sent back with each
 pull request's address and
 `git push origin --delete <branch>`; anything GitHub or the settings cannot
 say holds nothing. A pull request of the session's own branch closed
