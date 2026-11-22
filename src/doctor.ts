@@ -21,8 +21,8 @@ import {
 } from './agent.ts';
 import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
 import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
-import { GITHUB_NOREPLY } from './host.ts';
-import { featuresIn } from './features.ts';
+import { GITHUB_NOREPLY, GITHUB_WEB } from './host.ts';
+import { featuresIn, readRepo } from './features.ts';
 import { callerAt, callerIsOnboards, pushBranch } from './guard-caller.ts';
 import { typesDrift } from './issue-types.ts';
 import { type Finding, closing, findingLines, heading, painter, tilde } from './layout.ts';
@@ -114,6 +114,7 @@ export async function doctor(sys: Sys, io: Output, named?: string): Promise<numb
     }),
     ...(await typesFindings(sys, token)),
     ...(await boardAppFindings(sys, token)),
+    ...(await branchFindings(sys, token)),
   ];
 
   return report(sys, io, agent, [
@@ -221,6 +222,44 @@ async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Fi
   } catch (error) {
     // fail-open: a read that failed is the one ▲ here, as a missing secret breaks nothing.
     return [{ mark: '▲', text: `board app secrets: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
+  }
+}
+
+/**
+ * Whether GitHub deletes a pull request's branch once it merges, the
+ * repository's "Automatically delete head branches" (`delete_branch_on_merge`,
+ * which a writer's token reads): required in an onboarded repository, so a
+ * merged branch never waits on anyone, as an agent deletes a closed one
+ * itself (#557). Turning it on takes an admin, so the fix names the owner
+ * and the settings page by its full address. GitHub not saying says nothing.
+ */
+async function branchFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
+  let slug: string;
+  let owner: string;
+  try {
+    const found = repoAt(sys);
+    if (!token || !hasSettings(sys, found.root)) return [];
+    slug = found.slug;
+    owner = either(loadSettings(sys, found.root).owners);
+  } catch {
+    // fail-open: outside a client's clone, or settings doctor cannot read, there is no repository to check; onboard says what is wrong with them.
+    return [];
+  }
+  try {
+    const { status, json } = await readRepo(sys, slug, token);
+    const on = status === 200 ? (json as { delete_branch_on_merge?: unknown } | null)?.delete_branch_on_merge : undefined;
+    if (on === true) return [{ mark: '✓', text: 'merged pull requests’ branches are deleted' }];
+    if (on !== false) return [];
+    return [
+      {
+        mark: '✗',
+        text: `${slug} keeps a merged pull request’s branch: "Automatically delete head branches" is off`,
+        fix: `${owner} ticks it under General at ${GITHUB_WEB}/${slug}/settings`,
+      },
+    ];
+  } catch (error) {
+    // fail-open: a read that failed is worth asking again, and breaks nothing yet.
+    return [{ mark: '▲', text: `merged branches: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
   }
 }
 

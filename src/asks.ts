@@ -4,6 +4,7 @@ import { approvedIn, batchAnswers, firstIssue } from './approvals.ts';
 import { isOn, notAdoptedLine, offLine } from './features.ts';
 import { type ReadFile, type Simple, type Text, UNKNOWN, commands } from './shell.ts';
 import type { Output, Sys } from './types.ts';
+import { GITHUB_WEB } from './host.ts';
 
 /** The label an ask puts on its issue, which the board's "Needs you" view lists. */
 export const NEEDS_OWNER = 'needs-owner';
@@ -260,6 +261,8 @@ interface Comment {
   user?: { login?: string } | null;
   created_at: string;
   updated_at?: string;
+  /** Its own address on GitHub, `…/issues/N#issuecomment-ID`: where the owner answers it. */
+  html_url?: string;
 }
 
 interface Reaction {
@@ -413,9 +416,14 @@ async function answeredSince(
   return answers.length > 0 && (await ownersAlone(sys, token, answers, owners)).kept.length > 0 ? `a "Decision: approve" on #${approvals}, the Approvals issue` : undefined;
 }
 
-/** The asks still waiting, as the sweep names them. */
-function waitingOn(waiting: Owed[]): string {
-  return waiting.map(({ kind, number }) => (kind === 'Proposal' ? `the proposal for #${number}` : 'the Needs you: ask')).join(', ');
+/** Where the owner answers ask `ask` on issue `number`: the comment's own address, else the issue's. */
+function askUrl(slug: string, number: number, ask: { html_url?: string | undefined } | undefined): string {
+  return ask?.html_url?.startsWith('https://') ? ask.html_url : `${GITHUB_WEB}/${slug}/issues/${number}`;
+}
+
+/** The asks still waiting on issue `issue`, as the sweep names them, each by the address the owner answers it at. */
+function waitingOn(slug: string, issue: number, waiting: Owed[]): string {
+  return waiting.map(({ kind, number, ask }) => `${kind === 'Proposal' ? `the proposal for #${number}` : 'the Needs you: ask'}, ${askUrl(slug, issue, ask)}`).join('; ');
 }
 
 /**
@@ -439,7 +447,7 @@ async function sweep(sys: Sys, token: string, slug: string, settings: Settings, 
   for (const { number } of waiting) {
     const standing = await answered(sys, token, slug, number, settings, batch);
     if ('waiting' in standing) {
-      io.out(`#${number}: waits on the owner (${waitingOn(standing.waiting)})`);
+      io.out(`#${number}: waits on the owner (${waitingOn(slug, number, standing.waiting)})`);
     } else if ('answer' in standing) {
       await removeLabel(sys, token, slug, number);
       cleared++;
@@ -457,7 +465,7 @@ async function sweep(sys: Sys, token: string, slug: string, settings: Settings, 
 
 interface Event {
   action?: string;
-  comment?: { id?: number; node_id?: string; body?: string | null; user?: { login?: string } | null; created_at?: string; updated_at?: string };
+  comment?: { id?: number; node_id?: string; body?: string | null; user?: { login?: string } | null; created_at?: string; updated_at?: string; html_url?: string };
   issue?: { number: number; labels?: { name: string }[] };
   pull_request?: { number: number; labels?: { name: string }[] };
   label?: { name?: string };
@@ -515,7 +523,7 @@ export async function needsOwner(sys: Sys, io: Output): Promise<number> {
         io.out(`needs-owner: #${issue} asks the owner (${kind}:), and the owner answered with ${after} as it was labelled; ${NEEDS_OWNER} taken off`);
         return 0;
       }
-      io.out(`needs-owner: #${issue} asks the owner (${kind}:); labelled ${NEEDS_OWNER}`);
+      io.out(`needs-owner: #${issue} asks the owner (${kind}:) at ${askUrl(slug, issue, event.comment)}; labelled ${NEEDS_OWNER}`);
       return 0;
     }
     // The owner's batch answer on the Approvals issue names a proposal's own issue, such as a dropped State, not

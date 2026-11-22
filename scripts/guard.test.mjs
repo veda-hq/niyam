@@ -420,10 +420,10 @@ describe('judging a pull request', () => {
     assert.equal(refusal.file, '.githooks/pre-push');
     assert.match(refusal.message, /changes a guard file, \.githooks\/pre-push/);
     assert.match(refusal.message, /slice #10's \*\*Guards:\*\* section, as it stood when Work item #9 got the approved label/);
-    assert.match(refusal.message, /name `\.githooks\/pre-push` in the slice's \*\*Guards:\*\* section/);
+    // The slice by its full address, where the owner approves it again, so the agent can pass the link on (#557).
+    assert.match(refusal.message, /name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and have Owner approve the slice again at https:\/\/github\.com\/o\/r\/issues\/10;/);
     assert.match(refusal.message, /edit or push this pull request/);
   });
-
   test('a Guards: line written after the approval does not count', async () => {
     const issue = {
       body: '**Guards:** `.githooks/`',
@@ -449,7 +449,8 @@ describe('judging a pull request', () => {
 
   test('a pull request that names no slice is refused', async () => {
     const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], pull: { body: null } }), REPO, 1, OWNERS);
-    assert.match(refusal.message, /names no slice\. Add a "Slice: #N" line/);
+    // With no slice there is no address to give yet.
+    assert.match(refusal.message, /names no slice\. Add a "Slice: #N" line to its body, name `\.githooks\/pre-push` in the slice's \*\*Guards:\*\* section, and have Owner approve the slice again; then edit/);
   });
 
   test('a Work item not approved, or approved by someone else, is refused', async () => {
@@ -458,7 +459,7 @@ describe('judging a pull request', () => {
       { event: 'unlabeled', label: { name: 'approved' }, actor: { login: 'Owner' }, created_at: APPROVED },
     ]]) {
       const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/9/timeline`]: events } }), REPO, 1, OWNERS);
-      assert.match(refusal.message, /Work item #9 is not approved by Owner/);
+      assert.match(refusal.message, /Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, is not approved by Owner/);
     }
   });
 
@@ -481,7 +482,7 @@ describe('judging a pull request', () => {
 
     // None yet.
     let [refusal] = await judge(github({ files, over: { ...joined, ...graphql } }), REPO, 1, OWNERS);
-    assert.match(refusal.message, /joined Work item #9 after its approval, and Owner has written no unedited Decision:/);
+    assert.match(refusal.message, /slice #10, https:\/\/github\.com\/o\/r\/issues\/10, joined Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, after its approval, and Owner has written no unedited Decision:/);
 
     // One on the slice after the Guards: line: it counts from then.
     const later = { [`/repos/${REPO}/issues/10/comments`]: [decision('2026-01-06T00:00:00Z')] };
@@ -535,7 +536,7 @@ describe('judging a pull request', () => {
       answer('Decision: approve #10', '2026-01-06T00:00:00Z', { user: { login: 'AthyaBot' } }),
     ]) {
       const [refusal, ...rest] = (await run(batch(comment))).refusals;
-      assert.match(refusal.message, /has written no unedited Decision: settling it since, on the slice, on Work item #9 or in a batch answer on the Approvals issue, #7\./, comment.body);
+      assert.match(refusal.message, /has written no unedited Decision: settling it since, on the slice, on Work item #9 or in a batch answer on the Approvals issue, #7, https:\/\/github\.com\/o\/r\/issues\/7\./, comment.body);
       assert.deepEqual(rest, []);
     }
 
@@ -547,7 +548,7 @@ describe('judging a pull request', () => {
     // An Approvals issue GitHub cannot find answers nothing, and the slice still passes on its own Decision.
     assert.deepEqual((await run(later)).refusals, []);
     [refusal] = (await run({})).refusals;
-    assert.match(refusal.message, /in a batch answer on the Approvals issue, #7\./);
+    assert.match(refusal.message, /in a batch answer on the Approvals issue, #7, https:\/\/github\.com\/o\/r\/issues\/7\./);
 
     // Any other failure to read it fails closed.
     await assert.rejects(run({ [`/repos/${REPO}/issues/7/comments`]: { status: 502, json: { message: 'Bad gateway' } } }), /GitHub did not answer \/repos\/o\/r\/issues\/7\/comments \(HTTP 502: Bad gateway\)/);
@@ -601,6 +602,13 @@ describe('judging a pull request', () => {
       assert.match(refusal.message, agents.length > 0 ? /has written no unedited Decision: settling it since, nor reacted 👍 to an agent's proposal for it\./ : /has written no unedited Decision: settling it since\./);
       assert.deepEqual(rest, []);
     }
+
+    // The agent's proposal by its own address, where GitHub gives one, so the agent passes on the comment to 👍 (#557).
+    const at = 'https://github.com/o/r/issues/10#issuecomment-1';
+    const [linked] = await run({ ...onSlice(proposal({ html_url: at })), ...thumbs('2026-01-06T00:00:00Z', 'AthyaBot') });
+    assert.match(linked.message, /nor reacted 👍 to an agent's proposal for it, https:\/\/github\.com\/o\/r\/issues\/10#issuecomment-1\./);
+    const [bare] = await run({ ...onSlice(proposal({ html_url: 'not a link' })), ...thumbs('2026-01-06T00:00:00Z', 'AthyaBot') });
+    assert.match(bare.message, /nor reacted 👍 to an agent's proposal for it\./);
 
     // The earliest answer counts: a 👍 before the Guards: line, a Decision after it.
     const early = onSlice(proposal({ created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' }), comment('Decision: yes', '2026-01-06T00:00:00Z', { id: 2, user: { login: 'Owner' } }));

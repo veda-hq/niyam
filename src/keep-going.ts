@@ -1,10 +1,10 @@
 import { basename, dirname } from 'node:path';
 
-import { githubSlug, isNoToken, SETTINGS_PATH } from './agent.ts';
+import { anyLogin, githubSlug, isNoToken, loadSettings, SETTINGS_PATH } from './agent.ts';
 import { agentEnv } from './as-agent.ts';
 import { GITHUB_API } from './host.ts';
 import type { Output, Sys } from './types.ts';
-import { sessionToken } from './work.ts';
+import { deleteBranchCommand, pullUrl, sessionToken, slicesNamed } from './work.ts';
 
 /**
  * Claude Code's Stop hook: a session whose branch has commits the default
@@ -20,12 +20,14 @@ import { sessionToken } from './work.ts';
  *   branch while its own is not pushed (that branch carries them);
  * - it wrote a stop note at this commit (`niyam keep-going --stop <why>`);
  *   the hook shows the owner the reason once;
- * - its pull request merged at this commit, or GitHub cannot say (fail open);
+ * - its pull request merged at this commit, or GitHub cannot say (fail open),
+ *   and no agent pull request for its slice was closed unmerged with its
+ *   branch still on origin (#557): an agent deletes such a branch itself;
  * - a background task, or a `git commit` or `git push` in its worktree,
  *   still runs (its exit wakes the session), unless it runs in print mode,
  *   where the task dies with the turn;
  * - it is a desktop session, clean, with every commit on a ready pull
- *   request: the app's Autofix wakes it;
+ *   request, and no such closed branch left: the app's Autofix wakes it;
  * - it was sent back five times at one commit: the hook writes the stop note
  *   itself and sends it back once more to say so.
  *
@@ -93,6 +95,15 @@ export interface PullRequest {
   state: 'OPEN' | 'MERGED' | 'CLOSED';
   isDraft: boolean;
   headRefOid: string;
+  /** Its own address on GitHub, which a message passes on. */
+  url: string;
+}
+
+/** An agent pull request for this branch's slice, closed without merging, whose branch is still on origin. */
+export interface LeftBranch {
+  number: number;
+  url: string;
+  ref: string;
 }
 
 /** A session's recorded reason to stop, valid at one commit. */
@@ -122,6 +133,8 @@ export interface Facts {
   remote: string | null;
   /** null: no pull request; 'unknown': GitHub could not say. */
   pr: PullRequest | null | 'unknown';
+  /** Agent pull requests for this branch's slice closed unmerged, their branches still on origin; none when GitHub cannot say. */
+  left: LeftBranch[];
   /** A background task, or a commit or push, is running: its exit wakes the session. */
   pushing: boolean;
   /** Tracked files changed but not committed. */
@@ -150,14 +163,19 @@ export function decide(facts: Facts, previous: Counter | null, settings: KeepGoi
   if (facts.subagent || notStarted(facts, settings)) return { stop: true, counter };
   if (noteHolds(facts)) return facts.note.shown ? { stop: true, counter } : { stop: true, counter, say: facts.note.reason };
   if ((facts.pushing && !facts.print) || pr === 'unknown') return { stop: true, counter };
+  // A closed pull request's branch left on origin holds the session whatever else is done: the agent deletes it, never the owner (#557).
+  const leftOver = facts.left.map(
+    (one) => `PR ${one.number}, ${one.url}, for this slice was closed without merging and its branch ${one.ref} is still on origin: delete it yourself with \`${deleteBranchCommand(one.ref)}\`, never asking the owner`,
+  );
   // A merge releases the session only if it merged this commit: a reused
   // branch name can still show an older merged pull request, and work left
   // uncommitted on top is not merged either.
-  if (pr?.state === 'MERGED' && pr.headRefOid === facts.head && !facts.dirty) return { stop: true, counter };
+  const merged = pr?.state === 'MERGED' && pr.headRefOid === facts.head && !facts.dirty;
+  if (merged && leftOver.length === 0) return { stop: true, counter };
   const pushed = facts.remote === facts.head;
   // A draft still needs the session; only a ready pull request waits on
   // events Autofix reports, and only once nothing is left uncommitted.
-  if (facts.desktop && pr?.state === 'OPEN' && !pr.isDraft && pushed && !facts.dirty) return { stop: true, counter };
+  if (facts.desktop && pr?.state === 'OPEN' && !pr.isDraft && pushed && !facts.dirty && leftOver.length === 0) return { stop: true, counter };
 
   const count = counter.count + 1;
   const next = { head: facts.head, count };
@@ -171,8 +189,12 @@ export function decide(facts: Facts, previous: Counter | null, settings: KeepGoi
   const release = `If only ${settings.owner} can unblock it, or it is proven unneeded, run \`${STOP_COMMAND}\` and say so to ${settings.owner}; then you may stop. After ${CAP}, the hook writes that note itself.`;
   // A running task in print mode (only then does one get here): gather read
   // nothing past it, since the task may still be changing the branch.
-  const left = facts.pushing ? ['a commit, push or background task is running, and in print mode it dies with this turn: wait for it in the foreground'] : stillToDo(facts, pr, pushed);
-  const what = `Branch ${facts.branch} has ${facts.ahead} commit(s) origin/${settings.base} lacks, and started work runs to merge`;
+  const left = facts.pushing
+    ? ['a commit, push or background task is running, and in print mode it dies with this turn: wait for it in the foreground']
+    : [...leftOver, ...(merged ? [] : stillToDo(facts, pr, pushed))];
+  const what = merged
+    ? `PR ${(pr as PullRequest).number} merged branch ${facts.branch}, and started work ends with no closed branch left behind`
+    : `Branch ${facts.branch} has ${facts.ahead} commit(s) origin/${settings.base} lacks, and started work runs to merge`;
   return {
     stop: false,
     counter: next,
@@ -189,7 +211,11 @@ function stillToDo(facts: Facts, pr: PullRequest | null, pushed: boolean): strin
   }
   if (pr === null) left.push('no pull request yet: open it');
   else if (pr.state === 'MERGED') left.push(`PR ${pr.number} merged an older commit; the work since is not merged: commit it and open a new PR`);
-  else if (pr.state !== 'OPEN') left.push(`PR ${pr.number} was closed without merging: reopen it, or record why the work stops`);
+  else if (pr.state !== 'OPEN') {
+    left.push(
+      `PR ${pr.number}, ${pr.url}, was closed without merging: reopen it, or, if it is superseded, delete its branch yourself with \`${deleteBranchCommand(facts.branch)}\` and record why the work stops`,
+    );
+  }
   else if (pushed && pr.isDraft) left.push(`PR ${pr.number} is a draft: finish the work, push, mark it ready`);
   else if (pushed) left.push(`PR ${pr.number} is open: carry it to merge, polling checks and review threads with foreground waits`);
   return left;
@@ -289,10 +315,19 @@ function tokenFor(sys: Sys, root: string, session: string | undefined, err?: (li
  * when origin is not on GitHub, there is no token, or GitHub cannot say.
  */
 export async function readPr(sys: Sys, root: string, branch: string, head: string, session: string | undefined, err?: (line: string) => void): Promise<PullRequest | null | 'unknown'> {
+  const github = reach(sys, root, session, err);
+  return github ? readPrAt(sys, github, branch, head) : 'unknown';
+}
+
+/** Where to ask GitHub: origin's repository and the token to read it with; undefined when origin is not on GitHub or there is no token. */
+function reach(sys: Sys, root: string, session: string | undefined, err?: (line: string) => void): { slug: string; token: string } | undefined {
   const slug = githubSlug(out(sys, root, 'git', ['config', '--get', 'remote.origin.url']) ?? '');
-  if (!slug) return 'unknown';
+  if (!slug) return undefined;
   const token = tokenFor(sys, root, session, err);
-  if (!token) return 'unknown';
+  return token ? { slug, token } : undefined;
+}
+
+async function readPrAt(sys: Sys, { slug, token }: { slug: string; token: string }, branch: string, head: string): Promise<PullRequest | null | 'unknown'> {
   const pulls: unknown[] = [];
   const route = `${GITHUB_API}/repos/${slug}/pulls?head=${encodeURIComponent(`${slug.split('/')[0]}:${branch}`)}&state=all&per_page=100`;
   // Each page bounded, and the pages too, under the hook's own timeout.
@@ -310,15 +345,79 @@ export async function readPr(sys: Sys, root: string, branch: string, head: strin
   }
   const own: PullRequest[] = [];
   for (const item of pulls) {
-    const pull = item as { number?: unknown; state?: unknown; draft?: unknown; merged_at?: unknown; head?: { sha?: unknown; repo?: { full_name?: unknown } | null } };
+    const pull = item as { number?: unknown; state?: unknown; draft?: unknown; merged_at?: unknown; html_url?: unknown; head?: { sha?: unknown; repo?: { full_name?: unknown } | null } };
     if (!Number.isInteger(pull.number) || typeof pull.state !== 'string' || typeof pull.draft !== 'boolean' || typeof pull.head?.sha !== 'string') return 'unknown';
     // A fork's branch can share the name.
     const from = pull.head.repo?.full_name;
     if (typeof from !== 'string' || from.toLowerCase() !== slug.toLowerCase()) continue;
-    own.push({ number: pull.number as number, state: pull.merged_at ? 'MERGED' : pull.state === 'open' ? 'OPEN' : 'CLOSED', isDraft: pull.draft, headRefOid: pull.head.sha });
+    const number = pull.number as number;
+    own.push({ number, state: pull.merged_at ? 'MERGED' : pull.state === 'open' ? 'OPEN' : 'CLOSED', isDraft: pull.draft, headRefOid: pull.head.sha, url: pullUrl(slug, number, pull.html_url) });
   }
   // A reused branch name lists several: the one carrying this commit is the branch's, else the newest.
   return own.find((pr) => pr.headRefOid === head) ?? own[0] ?? null;
+}
+
+/** A pull request as GitHub's REST list gives it, as far as `leftBranches` reads it. */
+interface ListedPull {
+  number?: unknown;
+  body?: unknown;
+  merged_at?: unknown;
+  html_url?: unknown;
+  user?: { login?: unknown } | null;
+  head?: { ref?: unknown; repo?: { full_name?: unknown } | null } | null;
+}
+
+/**
+ * The agents' pull requests for the slices this branch's own commits name
+ * (`Slice: #N` trailers), closed without merging, from this repository,
+ * whose branch is still on origin and builds no open pull request: a
+ * superseded one, whose branch the agent deletes itself (#557). The most
+ * recently updated hundred closed pull requests are read, each page and
+ * branch with a timeout; whatever GitHub or the settings cannot say gives
+ * none, so the hook fails open.
+ */
+export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSettings, branch: string, { slug, token }: { slug: string; token: string }): Promise<LeftBranch[]> {
+  const slices = slicesNamed(out(sys, root, 'git', ['log', '--format=%B', `origin/${settings.base}..HEAD`]) ?? '');
+  if (slices.length === 0) return [];
+  let agents: string[];
+  try {
+    agents = loadSettings(sys, root).agents;
+  } catch {
+    // fail-open: settings the hook cannot read name no agent, so no closed branch is the session's to delete.
+    return [];
+  }
+  const list = async (query: string): Promise<ListedPull[] | undefined> => {
+    const got = await sys.http(`${GITHUB_API}/repos/${slug}/pulls?${query}`, { token, timeoutMs: 15_000 }).catch(() => {
+      // fail-open: GitHub not answering says nothing about closed branches, and the hook lets the session stop.
+      return undefined;
+    });
+    return got?.status === 200 && Array.isArray(got.json) ? (got.json as ListedPull[]) : undefined;
+  };
+  const here = (pull: ListedPull): boolean => typeof pull.head?.repo?.full_name === 'string' && pull.head.repo.full_name.toLowerCase() === slug.toLowerCase();
+  const closed = await list('state=closed&sort=updated&direction=desc&per_page=100');
+  const candidates = (closed ?? []).flatMap((pull): LeftBranch[] => {
+    const ref = pull.head?.ref;
+    if (!Number.isInteger(pull.number) || pull.merged_at || typeof ref !== 'string' || ref === branch || !here(pull)) return [];
+    if (!anyLogin(agents, typeof pull.user?.login === 'string' ? pull.user.login : undefined)) return [];
+    if (!slicesNamed(typeof pull.body === 'string' ? pull.body : '').some((slice) => slices.includes(slice))) return [];
+    return [{ number: pull.number as number, url: pullUrl(slug, pull.number as number, pull.html_url), ref }];
+  });
+  if (candidates.length === 0) return [];
+  // A branch an open pull request still builds from is not left over.
+  const open = await list('state=open&per_page=100');
+  if (!open) return [];
+  const live = new Set(open.flatMap((pull) => (here(pull) && typeof pull.head?.ref === 'string' ? [pull.head.ref] : [])));
+  const left: LeftBranch[] = [];
+  for (const one of candidates) {
+    if (live.has(one.ref) || left.some((other) => other.ref === one.ref)) continue;
+    const ref = await sys.http(`${GITHUB_API}/repos/${slug}/git/ref/heads/${one.ref.split('/').map(encodeURIComponent).join('/')}`, { token, timeoutMs: 15_000 }).catch(() => {
+      // fail-open: a branch GitHub cannot be asked about is not held against the session.
+      return undefined;
+    });
+    // 404: deleted already. Anything else but 200 says nothing.
+    if (ref?.status === 200) left.push(one);
+  }
+  return left;
 }
 
 export async function gather(sys: Sys, root: string, settings: KeepGoingSettings, subagent: boolean, session: string | undefined, err?: (line: string) => void): Promise<Facts> {
@@ -335,6 +434,7 @@ export async function gather(sys: Sys, root: string, settings: KeepGoingSettings
     note: null,
     remote: out(sys, root, 'git', ['rev-parse', '--verify', '--quiet', '@{u}']),
     pr: null,
+    left: [],
     pushing: false,
     dirty: false,
   };
@@ -349,7 +449,9 @@ export async function gather(sys: Sys, root: string, settings: KeepGoingSettings
   if (facts.pushing) return facts;
   // Its own records, and pr-autocreate's, are no work left, where a client does not ignore .tmp/.
   facts.dirty = Boolean(out(sys, root, 'git', ['status', '--porcelain', '--', '.', `:(exclude)${STORE}`, ':(exclude).tmp/pr-autocreate']));
-  facts.pr = await readPr(sys, root, branch, head, session, err);
+  const github = reach(sys, root, session, err);
+  facts.pr = github ? await readPrAt(sys, github, branch, head) : 'unknown';
+  if (github && facts.pr !== 'unknown') facts.left = await leftBranches(sys, root, settings, branch, github);
   return facts;
 }
 
