@@ -12,6 +12,8 @@ import { askProblem } from './asks.ts';
 import { prMerged, prStarted, prePush, prWorkRules, propose, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
 
 const SLUG = 'example-org/example-app';
+/** Another repository, where a slice this one builds can be planned. */
+const PLANS = 'example-org/example-plans';
 const OWNER = 'example-owner';
 const ACCOUNTS = { owners: [OWNER], agents: [AGENT] };
 const T0 = '2026-10-01T00:00:00Z';
@@ -69,9 +71,9 @@ const ISSUES = `https://api.github.com/repos/${SLUG}/issues`;
 const LIST = /^(.*?)[?&]per_page=100&page=(\d+)$/;
 
 /** What GitHub's REST API answers `url` with for slice `issue`'s model, or undefined for a path it does not hold. */
-function answer(issue: Node | null, url: string): { status: number; json: unknown } | undefined {
+function answer(issue: Node | null, url: string, issues = ISSUES): { status: number; json: unknown } | undefined {
   const list = LIST.exec(url);
-  const path = (list ? list[1] as string : url).replace(ISSUES, '');
+  const path = (list ? list[1] as string : url).replace(issues, '');
   const page = (items: Node[] | undefined): { status: number; json: unknown } | undefined => {
     if (!items) return undefined;
     const from = (Number(list?.[2]) - 1) * 100;
@@ -80,23 +82,23 @@ function answer(issue: Node | null, url: string): { status: number; json: unknow
   if (!issue) return undefined;
   if (path === `/${APPROVALS}/comments`) return page(issue.approvals as Node[]);
   const parent = issue.parent as Node | null;
-  const states = (issue.states as Node[]).map((state): Node => ({ ...state, url: `${ISSUES}/${state.number}` }));
+  const states = (issue.states as Node[]).map((state): Node => ({ ...state, url: `${issues}/${state.number}` }));
   // As a workflow's GITHUB_TOKEN reads a private repository: no parent_issue_url, the parent from its endpoint alone.
-  if (path === '/12') return { status: 200, json: { ...issue, url: `${ISSUES}/12`, parent_issue_url: null } };
+  if (path === '/12') return { status: 200, json: { ...issue, url: `${issues}/12`, parent_issue_url: null } };
   if (path === '/12/parent') {
-    return parent ? { status: 200, json: { ...parent, url: `${ISSUES}/10` } } : { status: 404, json: { message: 'No parent issue found' } };
+    return parent ? { status: 200, json: { ...parent, url: `${issues}/10` } } : { status: 404, json: { message: 'No parent issue found' } };
   }
   if (path === '/10/timeline') return page(issue.timeline as Node[]);
   if (path === '/12/timeline') return page(issue.own as Node[]);
   const siblings = (issue.siblings as Node[] | undefined) ?? [];
-  if (path === '/10/sub_issues') return page([{ ...issue, url: `${ISSUES}/12` }, ...siblings.map((one) => ({ ...one, url: `${ISSUES}/${one.number}` }))]);
+  if (path === '/10/sub_issues') return page([{ ...issue, url: `${issues}/12` }, ...siblings.map((one) => ({ ...one, url: `${issues}/${one.number}` }))]);
   const sibling = siblings.find((one) => path === `/${one.number}/timeline`);
   if (sibling) return page(sibling.own as Node[]);
   if (path === '/12/comments') return page(issue.comments as Node[]);
   if (path === '/12/sub_issues') return page(states);
   const own = /^\/(\d+)(\/comments|\/parent)?$/.exec(path);
   const state = states.find((one) => one.number === Number(own?.[1]));
-  if (state && own?.[2] === '/parent') return { status: 200, json: { ...issue, url: `${ISSUES}/12` } };
+  if (state && own?.[2] === '/parent') return { status: 200, json: { ...issue, url: `${issues}/12` } };
   if (state) return own?.[2] ? page(state.comments as Node[]) : { status: 200, json: state };
   const reactions = /^\/comments\/([^/]+)\/reactions\?content=%2B1$/.exec(path);
   // A deleted comment reads as 404.
@@ -105,12 +107,13 @@ function answer(issue: Node | null, url: string): { status: number; json: unknow
 }
 
 /** GitHub as slice `issue`'s model says, read when asked so a test can change it after; routes a test sets win. */
-function github(sys: FakeSys, issue: Node | null, pulls: Node[] = []): void {
+function github(sys: FakeSys, issue: Node | null, pulls: Node[] = [], repo = SLUG): void {
+  const issues = `https://api.github.com/repos/${repo}/issues`;
   const http = sys.http.bind(sys);
   sys.http = (url, options = {}) => {
     const key = `${options.method ?? 'GET'} ${url}`;
-    if (!sys.routes.has(key) && (options.method ?? 'GET') === 'GET' && url.startsWith(ISSUES)) {
-      sys.route('GET', url, () => answer(issue, url) ?? { status: 404, json: { message: 'Not Found' } });
+    if (!sys.routes.has(key) && (options.method ?? 'GET') === 'GET' && url.startsWith(issues)) {
+      sys.route('GET', url, () => answer(issue, url, issues) ?? { status: 404, json: { message: 'Not Found' } });
     }
     return http(url, options);
   };
@@ -178,15 +181,43 @@ const TEAM = { owners: [OWNER, OWNER_2], agents: [AGENT, AGENT_2] };
 const TEAM_SETTINGS = JSON.stringify({ owner: TEAM.owners, agent: TEAM.agents });
 
 describe('slicesNamed', () => {
+  const here = (number: number): { repo: string; number: number } => ({ repo: SLUG, number });
   it('reads "Slice: #N" lines and issue links, once each', () => {
-    assert.deepEqual(slicesNamed('Intro\nSlice: #12\nslice:  https://github.com/a/b/issues/7 \nSlice: #12\nnot Slice: #9'), [12, 7]);
-    assert.deepEqual(slicesNamed('Fixes #12'), []);
+    assert.deepEqual(slicesNamed(`Intro\nSlice: #12\nslice:  https://github.com/${SLUG}/issues/7 \nSlice: #12\nnot Slice: #9`, SLUG), [here(12), here(7)]);
+    assert.deepEqual(slicesNamed('Fixes #12', SLUG), []);
+  });
+
+  it("reads another repository's slice by its link or as owner/name#N, in its own repository", () => {
+    const plans = { repo: 'athya-hq/athya_mono', number: 3850 };
+    assert.deepEqual(slicesNamed('Slice: https://github.com/athya-hq/athya_mono/issues/3850', SLUG), [plans]);
+    assert.deepEqual(slicesNamed('Slice: athya-hq/athya_mono#3850', SLUG), [plans]);
+    // The same slice twice, written both ways and in another case, is one; a number here is another slice.
+    assert.deepEqual(slicesNamed('Slice: athya-hq/athya_mono#3850\nSlice: https://github.com/Athya-HQ/athya_mono/issues/3850\nSlice: #3850', SLUG), [plans, here(3850)]);
+  });
+
+  it('reads a link or owner/name#N naming this repository, in any case, as a slice here', () => {
+    assert.deepEqual(slicesNamed('Slice: Example-Org/example-app#12\nSlice: #12', SLUG), [here(12)]);
+    assert.deepEqual(slicesNamed('Slice: https://github.com/example-org/Example-App/issues/12', SLUG), [here(12)]);
+  });
+
+  it('reads no other shapes', () => {
+    assert.deepEqual(
+      slicesNamed('Slice: athya_mono#3850\nSlice: https://example.com/a/b/issues/3\nSlice: a/b#3 and more\nSlice: a/b/c#3\nSlice: https://github.com/a/b?x/issues/3\nSlice: https://github.com/a%2Fb/c/issues/3', SLUG),
+      [],
+    );
   });
 });
 
 describe('statesNamed', () => {
   it('reads each "State: #N" line, by number or link, without repeats, and not prose', () => {
-    assert.deepEqual(statesNamed('Builds State #30 of P-01.\nSlice: #12\nState: #31\nstate:  https://github.com/a/b/issues/32 \nState: #31'), [31, 32]);
+    assert.deepEqual(statesNamed(`Builds State #30 of P-01.\nSlice: #12\nState: #31\nstate:  https://github.com/${SLUG}/issues/32 \nState: #31`, SLUG), [
+      { repo: SLUG, number: 31 },
+      { repo: SLUG, number: 32 },
+    ]);
+    assert.deepEqual(statesNamed('State: a/b#4\nState: https://github.com/a/b/issues/5', SLUG), [
+      { repo: 'a/b', number: 4 },
+      { repo: 'a/b', number: 5 },
+    ]);
   });
 });
 
@@ -741,6 +772,121 @@ describe('sliceProblems', () => {
     sys.route('GET', `/repos/${SLUG}/pulls?state=open&per_page=100&page=1`, { status: 403, json: null });
     await assert.rejects(sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), /cannot list open pull requests \(HTTP 403\)/);
   });
+
+  describe('a slice in another repository', () => {
+    const PLANS_ISSUES = `https://api.github.com/repos/${PLANS}/issues`;
+    const theirs = { repo: PLANS, number: 12 };
+    async function foreign(issue: Node | null, pulls: Node[] = [], accounts: Settings = ACCOUNTS, mine: { pull?: number; states?: { repo: string; number: number }[] } = {}): Promise<{ problems: string[]; sys: FakeSys }> {
+      const sys = new FakeSys();
+      github(sys, issue, pulls, PLANS);
+      return { problems: await sliceProblems(sys, 'tok', SLUG, theirs, accounts, mine), sys };
+    }
+
+    it('lets it be built when it is a Slice under a Work item the owner approved there, reading nothing of this repository\'s #12', async () => {
+      const { problems: found, sys } = await foreign(graph().issue);
+      assert.deepEqual(found, []);
+      assert.ok(sys.requests.some((request) => request.url === `${PLANS_ISSUES}/12`));
+      assert.ok(sys.requests.some((request) => request.url.startsWith(`${PLANS_ISSUES}/10/timeline`)));
+      assert.equal(sys.requests.some((request) => request.url.startsWith(`${ISSUES}/`)), false);
+    });
+
+    for (const status of [404, 403]) {
+      it(`refuses one the token cannot read (HTTP ${status}), naming it in full`, async () => {
+        const sys = new FakeSys();
+        github(sys, graph().issue, [], PLANS);
+        sys.route('GET', `${PLANS_ISSUES}/12`, { status, json: { message: status === 404 ? 'Not Found' : 'Resource not accessible by integration' } });
+        assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), [
+          `${PLANS}#12 cannot be read with this token (HTTP ${status}: ${status === 404 ? 'Not Found' : 'Resource not accessible by integration'}): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads only ${SLUG}`,
+        ]);
+      });
+    }
+
+    it('refuses a pull request there', async () => {
+      const sys = new FakeSys();
+      sys.route('GET', `${PLANS_ISSUES}/12`, { status: 200, json: { number: 12, pull_request: {} } });
+      assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), [`${PLANS}#12 is a pull request, not an issue`]);
+    });
+
+    it('refuses one that is not a Slice, or not under a Work item, naming it in full', async () => {
+      assert.deepEqual((await foreign({ ...graph().issue, type: { name: 'Task' } })).problems, [`${PLANS}#12 is not a Slice (its type is Task)`]);
+      assert.deepEqual((await foreign({ ...graph().issue, parent: null })).problems, [`${PLANS}#12 is not a sub-issue of a Work item`]);
+    });
+
+    it('refuses one whose Work item there is not approved, or approved by someone else', async () => {
+      const g = graph();
+      g.timeline.splice(1, 1);
+      assert.deepEqual((await foreign(g.issue)).problems, [`work item ${PLANS}#10 is not approved: example-owner adds the approved label before any slice starts`]);
+      g.timeline.push({ event: 'labeled', created_at: APPROVED, actor: { login: AGENT }, label: { name: 'approved' } });
+      assert.deepEqual((await foreign(g.issue)).problems, [`work item ${PLANS}#10 was labeled approved by ExampleBot, not example-owner`]);
+    });
+
+    describe('added after approval', () => {
+      const added = (): ReturnType<typeof graph> => {
+        const g = graph();
+        g.timeline[0] = { event: 'sub_issue_added', created_at: LATER, sub_issue: { number: 12 } };
+        return g;
+      };
+      const proposed = `${PLANS}#12 was added to work item ${PLANS}#10 after its approval; example-owner reacts 👍 on ExampleBot's proposal on ${PLANS}#12, or adds a "Decision:" comment naming #12, or ${PLANS}#12 links example-owner's request for it on ${PLANS}#10`;
+      const proposes = `; ExampleBot proposes it in a clone of ${PLANS} with: niyam propose 12 --page <page url>`;
+
+      it('is refused without the owner\'s say there, which is to be proposed from its own repository', async () => {
+        assert.deepEqual((await foreign(added().issue)).problems, [`${proposed}${proposes}`]);
+      });
+
+      it("passes with the owner's 👍 on the agent's proposal there", async () => {
+        const g = added();
+        const proposal = comment('Proposal: add #12 (Add the thing) to work item #10.', LATER, AGENT);
+        g.comments.push(proposal);
+        g.thumbs.set(proposal.id as string, [thumb()]);
+        const { problems: found, sys } = await foreign(g.issue);
+        assert.deepEqual(found, []);
+        assert.ok(sys.requests.some((request) => request.url.startsWith(`https://api.github.com/repos/${PLANS}/issues/comments/${proposal.id}/reactions`)));
+      });
+
+      it("passes with a batch answer on that repository's Approvals issue, never this one's", async () => {
+        const g = added();
+        g.approvals.push(comment('Decision: approve #12'));
+        const settings = { status: 200, json: { content: Buffer.from(JSON.stringify({ approvals: APPROVALS })).toString('base64') } };
+        const sys = new FakeSys();
+        github(sys, g.issue, [], PLANS);
+        sys.route('GET', `/repos/${PLANS}/contents/.github/niyam.json`, settings);
+        // This repository's settings name an Approvals issue of their own number, which is not read.
+        assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, { ...ACCOUNTS, approvals: 999 }, {}), []);
+        assert.equal(sys.requests.some((request) => request.url.includes('/issues/999/')), false);
+      });
+
+      it('names that Approvals issue in full, and none where its settings cannot be read', async () => {
+        const sys = new FakeSys();
+        github(sys, added().issue, [], PLANS);
+        sys.route('GET', `/repos/${PLANS}/contents/.github/niyam.json`, { status: 200, json: { content: Buffer.from(JSON.stringify({ approvals: APPROVALS })).toString('base64') } });
+        assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), [
+          `${proposed}, or example-owner comments on ${PLANS}#700, the Approvals issue, with a first line "Decision: approve #12"${proposes}`,
+        ]);
+        // The settings there unread (404 here): no batch path, as for a repository whose settings name none.
+        assert.deepEqual((await foreign(added().issue, [], WITH_APPROVALS)).problems, [`${proposed}${proposes}`]);
+      });
+    });
+
+    it('reads its States there, and refuses a State named in this repository', async () => {
+      const g = graph();
+      g.states.push({ number: 31, title: 'The thing', type: { name: 'State' }, state: 'open', state_reason: null, closed_at: null, comments: [] });
+      assert.deepEqual((await foreign(g.issue, [], ACCOUNTS, { states: [{ repo: PLANS, number: 31 }] })).problems, []);
+      assert.deepEqual((await foreign(g.issue, [], ACCOUNTS, { states: [{ repo: SLUG, number: 31 }] })).problems, [
+        `#31 is not a State under slice ${PLANS}#12; a "State: #N" line names a State sub-issue of the slice the pull request builds`,
+      ]);
+    });
+
+    it('is one slice per pull request by its whole name: this repository\'s #12 is another slice', async () => {
+      const pulls = [
+        { number: 6, body: 'Slice: #12', head: { ref: 'a', repo: { full_name: SLUG } } },
+        { number: 7, body: `Slice: https://github.com/${PLANS}/issues/12`, head: { ref: 'b', repo: { full_name: SLUG } } },
+      ];
+      assert.deepEqual((await foreign(graph().issue, pulls)).problems, [`${PLANS}#12 already has pull request #7; one slice, one pull request`]);
+      const sys = new FakeSys();
+      github(sys, graph().issue, [pulls[1] as Node]);
+      assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), []);
+    });
+  });
 });
 
 describe('prWorkRules', () => {
@@ -756,6 +902,28 @@ describe('prWorkRules', () => {
     const { io, out, err } = capture();
     return { code: await prWorkRules(sys, io), out, err };
   }
+
+  for (const line of [`Slice: https://github.com/${PLANS}/issues/12`, `Slice: ${PLANS}#12`]) {
+    it(`passes an agent pull request naming another repository's slice as "${line}"`, async () => {
+      const sys = actions(agentPull(`Builds the thing.\n\n${line}`));
+      github(sys, graph().issue, [{ number: 40, body: line, head: { ref: 'work' } }], PLANS);
+      assert.deepEqual(await check(sys), { code: 0, out: [`✓ pr-work-rules: #40 builds slice ${PLANS}#12, which may be built`], err: [] });
+    });
+  }
+
+  it("refuses another repository's slice that the workflow's token cannot read", async () => {
+    const sys = actions(agentPull(`Slice: ${PLANS}#12`));
+    github(sys, graph().issue, [], PLANS);
+    sys.route('GET', `/repos/${PLANS}/issues/12`, { status: 404, json: { message: 'Not Found' } });
+    assert.deepEqual(await check(sys), {
+      code: 1,
+      out: [],
+      err: [
+        `✗ ${PLANS}#12 cannot be read with this token (HTTP 404: Not Found): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads only ${SLUG}`,
+        'pr-work-rules: refused by the work rules',
+      ],
+    });
+  });
 
   it('passes an agent pull request naming a slice that may be built', async () => {
     const sys = actions(agentPull('Builds the thing.\n\nSlice: #12'));
@@ -999,6 +1167,48 @@ describe('prePush', () => {
       err: ['✗ the commits for work name no slice; add a trailer "Slice: #N" to a commit message', 'pre-push: refused by the work rules'],
     });
     assert.equal((await push(session('Slice: #12\nSlice: #13'), `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}`)).err[0], '✗ the commits for work name 2 slices (#12, #13); one push builds one slice');
+  });
+
+  describe("a trailer naming another repository's slice", () => {
+    function planned(log: string): FakeSys {
+      const sys = session(log);
+      // This repository has no #12: the slice is planned in PLANS.
+      github(sys, null);
+      github(sys, graph().issue, [], PLANS);
+      // The board holds that repository's #12 In Progress already, so the push moves nothing.
+      sys.route('GET', `/repos/${PLANS}`, { status: 200, json: { owner: { login: 'example-org', type: sys.ownerType } } });
+      sys.route('GET', `/repos/${PLANS}/issues?state=open&type=Work%20item&sort=created&direction=desc&per_page=100`, { status: 200, json: [] });
+      sys.route('GET', '/orgs/example-org/projectsV2/3/items?per_page=100&fields=2', {
+        status: 200,
+        json: [{ id: 100, content_type: 'Issue', content: { number: 12, repository_url: `https://api.github.com/repos/${PLANS}`, state: 'open' }, fields: [{ id: 2, value: { name: 'In Progress' } }] }],
+      });
+      return sys;
+    }
+
+    for (const trailer of [`Slice: https://github.com/${PLANS}/issues/12`, `Slice: ${PLANS}#12`]) {
+      it(`lets an agent push commits naming it as "${trailer}"`, async () => {
+        const sys = planned(`Add the thing\n\n${trailer}\n`);
+        assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [] });
+        assert.ok(sys.requests.some((request) => request.url === `https://api.github.com/repos/${PLANS}/issues/12`));
+      });
+    }
+
+    it('refuses one the agent cannot read there', async () => {
+      const sys = planned(`Slice: ${PLANS}#12`);
+      sys.route('GET', `/repos/${PLANS}/issues/12`, { status: 404, json: { message: 'Not Found' } });
+      assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
+        code: 1,
+        err: [
+          `✗ ${PLANS}#12 cannot be read with this token (HTTP 404: Not Found): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads only ${SLUG}`,
+          'pre-push: refused by the work rules',
+        ],
+      });
+    });
+
+    it('counts it and this repository\'s #12 as two slices', async () => {
+      const sys = planned(`Slice: #12\nSlice: ${PLANS}#12`);
+      assert.equal((await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}`)).err[0], `✗ the commits for work name 2 slices (#12, ${PLANS}#12); one push builds one slice`);
+    });
   });
 
   describe('a push of only a merge, such as of the default branch', () => {
@@ -1389,6 +1599,13 @@ describe('prMerged', () => {
       out: ['✓ #12 is closed already; commented that it was built in #40', '- #99 is not a Slice in example-org/example-app; left as it is'],
     });
     assert.deepEqual(writes(sys), [['POST', `${ISSUE}/comments`, { body: 'Built in #40, merged into main.' }, 'ghs_run']]);
+  });
+
+  it("leaves a slice and a State in another repository as they are, never this repository's of the same number", async () => {
+    const sys = actions(merged(`Slice: https://github.com/${PLANS}/issues/12\nState: ${PLANS}#31`));
+    assert.deepEqual(await run(sys), { code: 0, out: [`- ${PLANS}#12 is in another repository; left as it is`, `- ${PLANS}#31 is in another repository; left as it is`] });
+    assert.deepEqual(writes(sys), []);
+    assert.equal(sys.requests.some((request) => request.url.includes('/issues/12')), false);
   });
 
   it('comments only once, closed or open, however often it runs', async () => {

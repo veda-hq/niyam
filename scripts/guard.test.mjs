@@ -216,11 +216,15 @@ describe('reading the slice', () => {
     assert.ok(!named(['.github/'], 'src/.github/x'));
   });
 
-  test('sliceOf reads the first Slice: line', () => {
-    assert.equal(sliceOf('x\nSlice: #12\nSlice: #13'), 12);
-    assert.equal(sliceOf('Slice: https://github.com/o/r/issues/7'), 7);
-    assert.equal(sliceOf('no slice'), undefined);
-    assert.equal(sliceOf(undefined), undefined);
+  test('sliceOf reads the first Slice: line, in the repository it names', () => {
+    assert.deepEqual(sliceOf('x\nSlice: #12\nSlice: #13', 'o/r'), { repo: 'o/r', number: 12 });
+    assert.deepEqual(sliceOf('Slice: https://github.com/O/R/issues/7', 'o/r'), { repo: 'o/r', number: 7 });
+    assert.deepEqual(sliceOf('Slice: https://github.com/other/plans/issues/7', 'o/r'), { repo: 'other/plans', number: 7 });
+    assert.deepEqual(sliceOf('Slice: other/plans#8', 'o/r'), { repo: 'other/plans', number: 8 });
+    assert.equal(sliceOf('Slice: plans#8', 'o/r'), undefined);
+    assert.equal(sliceOf('Slice: https://github.com/a/b?x/issues/3', 'o/r'), undefined);
+    assert.equal(sliceOf('no slice', 'o/r'), undefined);
+    assert.equal(sliceOf(undefined, 'o/r'), undefined);
   });
 
   test('bodyAt reads the revision live at the time', () => {
@@ -412,6 +416,58 @@ describe('judging a pull request', () => {
 
   test('a guard file the approved Guards: names passes', async () => {
     assert.deepEqual(await judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents() }), REPO, 1, OWNERS), []);
+  });
+
+  describe("a slice in another repository, such as a repository's work planned elsewhere", () => {
+    const PLANS = 'other-org/plans';
+    /** The default GitHub, with slice #10 and Work item #9 moved to PLANS, and this repository holding neither. */
+    const elsewhere = ({ settings, ...more } = {}) => {
+      const over = {
+        [`/repos/${REPO}/issues/10/parent`]: undefined,
+        [`/repos/${PLANS}/issues/10/parent`]: { number: 9 },
+        [`/repos/${PLANS}/issues/9/timeline`]: [{ event: 'labeled', label: { name: 'approved' }, actor: { login: 'owner' }, created_at: APPROVED }],
+        [`/repos/${PLANS}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-01T00:00:00Z' }],
+        [`/repos/${PLANS}/issues/10/comments`]: [],
+        ...(settings ? { [`/repos/${PLANS}`]: { default_branch: 'trunk' } } : {}),
+      };
+      const contents = { ...ciContents(), ...(settings ? { [`.github/niyam.json@trunk`]: settings } : {}) };
+      const gh = github({ files: [modified('.github/workflows/ci.yml')], pull: { body: `Slice: https://github.com/${PLANS}/issues/10` }, contents, over, ...more });
+      const posts = [];
+      const post = gh.post;
+      gh.post = async (path, body) => {
+        posts.push(body);
+        return post(path, body);
+      };
+      return { gh, posts };
+    };
+
+    test('is judged there: its Work item, its approval and its body', async () => {
+      const { gh, posts } = elsewhere();
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+      assert.ok(gh.calls.includes(`/repos/${PLANS}/issues/10/parent`));
+      assert.ok(!gh.calls.some((call) => call.startsWith(`/repos/${REPO}/issues/`)));
+      assert.deepEqual(posts[0]?.variables, { owner: 'other-org', name: 'plans', number: 10 });
+    });
+
+    test('is refused, named in full, where GitHub will not show it', async () => {
+      const { gh } = elsewhere();
+      gh.calls.length = 0;
+      const routes = { [`/repos/${PLANS}/issues/10/parent`]: { status: 404, json: { message: 'Not Found' } } };
+      const get = gh.get;
+      gh.get = async (path) => routes[path] ?? get(path);
+      const [refusal, ...rest] = await judge(gh, REPO, 1, OWNERS);
+      assert.equal(rest.length, 0);
+      assert.match(refusal.message, /but slice other-org\/plans#10 is not a sub-issue of a Work item GitHub can read \(HTTP 404\)/);
+    });
+
+    test("is refused, named in full, where its Work item there is not approved, and reads that repository's Approvals issue, not this one's", async () => {
+      const { gh } = elsewhere({ settings: JSON.stringify({ owner: 'owner', agent: 'AthyaBot', approvals: 77 }) });
+      const get = gh.get;
+      gh.get = async (path) => (path.startsWith(`/repos/${PLANS}/issues/9/timeline`) ? { status: 200, json: [] } : get(path));
+      const [refusal] = await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 55);
+      assert.match(refusal.message, /but Work item other-org\/plans#9 is not approved by Owner, so slice other-org\/plans#10's \*\*Guards:\*\* names nothing yet/);
+      assert.ok(gh.calls.includes(`/repos/${PLANS}/contents/.github/niyam.json?ref=trunk`));
+    });
   });
 
   test('a guard file the Guards: does not name is refused, naming the file and how to pass', async () => {

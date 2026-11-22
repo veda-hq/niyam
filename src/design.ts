@@ -1,6 +1,6 @@
 import { API, SETTINGS_PATH, anyLogin, loadSettings } from './agent.ts';
 import type { Output, Sys } from './types.ts';
-import { slicesNamed } from './work.ts';
+import { refName, slicesNamed } from './work.ts';
 import { FIGMA_FILE_KEY, PERSONAL_REPO, isOn, isPersonal, notAdoptedLine, offLine, renamedLines } from './features.ts';
 
 const FIGMA = 'https://api.figma.com/v1';
@@ -163,14 +163,17 @@ export async function prDesign(sys: Sys, io: Output): Promise<number> {
   const event = JSON.parse(sys.read(eventPath)) as { pull_request?: { number: number; body: string | null; user: { login: string } } };
   const pull = event.pull_request;
   const { agents } = loadSettings(sys, sys.cwd);
-  const [slice] = slicesNamed(pull?.body ?? '');
-  if (!pull || !anyLogin(agents, pull.user.login) || slice === undefined) {
+  const [ref] = slicesNamed(pull?.body ?? '', slug);
+  if (!pull || !anyLogin(agents, pull.user.login) || ref === undefined) {
     io.out('pr-design: not an agent pull request naming a slice; nothing to check');
     return 0;
   }
+  // A slice in another repository is read there.
+  const { number: slice } = ref;
+  const label = refName(ref, slug);
 
   // Every state of the slice, 100 a page: GitHub's most.
-  const [owner, name] = slug.split('/');
+  const [owner, name] = ref.repo.split('/');
   const states: State[] = [];
   for (let after: string | null = null; ; ) {
     const { status, json } = await sys.http(`${API}/graphql`, {
@@ -183,13 +186,13 @@ export async function prDesign(sys: Sys, io: Output): Promise<number> {
     });
     const issue = (json as { data?: { repository?: { issue?: { parent?: { number: number; body: string | null; issueType?: { name: string } | null } | null; subIssues: { nodes: State[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } } } | null } } } | null)?.data?.repository?.issue;
     const page = issue?.subIssues;
-    if (status !== 200 || !page) throw new Error(`cannot read the states of #${slice} (HTTP ${status})`);
+    if (status !== 200 || !page) throw new Error(`cannot read the states of ${label} (HTTP ${status})`);
     // The work item's kind, read with the first page: only Experience work is designed in Figma.
     const parent = issue.parent;
     if (after === null && parent?.issueType?.name === 'Work item') {
       const kind = workItemKind(parent.body);
       if (kind && kind.toLowerCase() !== DESIGNED_KIND.toLowerCase()) {
-        io.out(`✓ pr-design: #${slice} builds ${kind} work item #${parent.number}; frames are for ${DESIGNED_KIND} work`);
+        io.out(`✓ pr-design: ${label} builds ${kind} work item #${parent.number}; frames are for ${DESIGNED_KIND} work`);
         return 0;
       }
     }
@@ -215,6 +218,6 @@ export async function prDesign(sys: Sys, io: Output): Promise<number> {
     io.err('pr-design: refused by the design check');
     return 1;
   }
-  io.out(`✓ pr-design: ${checked} state${checked === 1 ? '' : 's'} of #${slice}, each a frame built from the design library`);
+  io.out(`✓ pr-design: ${checked} state${checked === 1 ? '' : 's'} of ${label}, each a frame built from the design library`);
   return 0;
 }

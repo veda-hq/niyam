@@ -647,6 +647,16 @@ slice may be built:
   slice, and when the slice is closed already, so the pull request is a fix,
   it names at least one open State: the one the fix is filed as.
 
+**A slice in another repository.** A repository whose work is planned in
+another one names that repository's slice as `Slice: owner/name#N` or by its
+address, `Slice: https://github.com/owner/name/issues/N`, and its States as
+`State: owner/name#N`; a bare `#N` is always this repository's. The slice is
+read there by the same rules, judged by this repository's owners, with that
+repository's own Approvals issue. It counts only where the token reads that
+repository. A workflow's own token reads only its repository, so the pull
+request check refuses a private one, saying so. The pre-push hook, on the
+agent's token, can pass it. Slice done leaves it to its own repository.
+
 **One comment answers a batch.** Settings that name the repository's standing
 Approvals issue (`"approvals": N`) let the owner answer many asks at once:
 an owner's comment there whose first line opens `Decision: approve`, then
