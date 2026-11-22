@@ -49,14 +49,6 @@
           }
         },
         "reason": "it reads only the --body-file it is given and writes nothing locally (niyam 0.6.20 audited); it replies to, resolves or reacts on the thread on GitHub"
-      },
-      {
-        "program": "athya-rules",
-        "subcommands": {
-          "agent wait": {},
-          "agent status": {}
-        },
-        "reason": "the subagent router's read-only commands, which a session runs with Bash run_in_background while a routed run works; each writes nothing (athya-rules 0.5.9 audited, athya-hq/athya-rules#95 and #97): agent wait --out <file> [--timeout <s>] only reads its --out file and <out>.running marker, and agent status only reads ~/.local/state/athya-rules/agents/ and asks the Keychain whether an item exists. agent run (it writes under ~/.local/state) and agent hook stay unlisted"
       }
     ],
     "ownCheckout": {
