@@ -471,6 +471,10 @@ describe('judging a pull request', () => {
     const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 404, json: { message: 'No parent issue found' } } } }), REPO, 1, OWNERS);
     assert.match(refusal.message, /slice #10 is not a sub-issue of a Work item GitHub can read \(HTTP 404\)/);
     assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and add slice #10, https:\/\/github\.com\/o\/r\/issues\/10, as a sub-issue of its Work item, and have Owner approve it there; then edit/);
+    // A parent GitHub does not answer for is no missing parent: the remedy is a re-run, not a new link.
+    const [unread] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 502, json: { message: 'Bad gateway' } } } }), REPO, 1, OWNERS);
+    assert.match(unread.message, /\(HTTP 502\)\. To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and run Guard again once GitHub answers for slice #10's Work item; then edit/);
+    assert.doesNotMatch(unread.message, /as a sub-issue/);
   });
 
   test('a slice added after approval counts from the Decision that settled it', async () => {

@@ -538,7 +538,11 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents) {
   if (parent.status !== 200) {
     return {
       problem: `slice #${slice} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})`,
-      remedy: `add slice #${slice}, ${issueUrl(repo, slice)}, as a sub-issue of its Work item, and have ${who} approve it there`,
+      // Only a 404 says the slice has no parent; any other answer is GitHub not answering, which a re-run may fix.
+      remedy:
+        parent.status === 404
+          ? `add slice #${slice}, ${issueUrl(repo, slice)}, as a sub-issue of its Work item, and have ${who} approve it there`
+          : `run Guard again once GitHub answers for slice #${slice}'s Work item`,
     };
   }
   const item = parent.json.number;
