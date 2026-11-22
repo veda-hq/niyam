@@ -30,6 +30,28 @@ describe('tagOnMain (P-61)', () => {
     assert.match((await tagOnMain(sys, '0.6.9') as { problem: string }).problem, /GitHub's comparison: null\)/);
   });
 
+  it("asks with the token it is given, so the compare counts against the token's limit, and with none when GitHub refuses it (#546)", async () => {
+    const sys = new FakeSys().route('GET', COMPARE, { status: 200, json: { status: 'ahead', base_commit: { sha: TAG_SHA } } });
+    assert.deepEqual(await tagOnMain(sys, '0.6.9', 'ghp_agent'), { sha: TAG_SHA });
+    assert.deepEqual(sys.requests.map((request) => [request.token, request.timeoutMs]), [['ghp_agent', 15_000]]);
+    const refusing = new FakeSys().route('GET', COMPARE, () =>
+      refusing.requests.at(-1)?.token ? { status: 401, json: null } : { status: 200, json: { status: 'identical', base_commit: { sha: TAG_SHA } } },
+    );
+    assert.deepEqual(await tagOnMain(refusing, '0.6.9', 'ghp_expired'), { sha: TAG_SHA });
+    assert.deepEqual(refusing.requests.map((request) => [request.token, request.timeoutMs]), [['ghp_expired', 15_000], [undefined, 15_000]]);
+  });
+
+  it('names the rate limit and its reset when GitHub refuses the compare for it', async () => {
+    const sys = new FakeSys().route('GET', COMPARE, {
+      status: 403,
+      json: { message: 'API rate limit exceeded' },
+      headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1795337721' },
+    });
+    assert.deepEqual(await tagOnMain(sys, '0.6.9'), {
+      problem: "GitHub could not say whether the v0.6.9 tag is on main: GitHub's limit for requests with no token, 60 an hour from this address, has run out until 08:55 UTC (HTTP 403)",
+    });
+  });
+
   it('refuses a tag GitHub does not have', async () => {
     const sys = new FakeSys().route('GET', COMPARE, { status: 404, json: { message: 'Not Found' } });
     assert.deepEqual(await tagOnMain(sys, '0.6.9'), { problem: 'veda-hq/niyam has no v0.6.9 tag that GitHub can compare with main' });
@@ -46,7 +68,7 @@ describe('tagOnMain (P-61)', () => {
       throw 'socket hang up';
     });
     assert.deepEqual(await tagOnMain(sys, '0.6.9'), { problem: 'GitHub could not be asked whether the v0.6.9 tag is on main (socket hang up)' });
-    sys.route('GET', COMPARE, { status: 403, json: { message: 'API rate limit exceeded' } });
+    sys.route('GET', COMPARE, { status: 403, json: { message: 'Forbidden' } });
     assert.deepEqual(await tagOnMain(sys, '0.6.9'), { problem: 'GitHub answered HTTP 403 when asked whether the v0.6.9 tag is on main' });
     for (const json of [null, { status: 'ahead' }, { status: 'ahead', base_commit: { sha: 'main' } }]) {
       sys.route('GET', COMPARE, { status: 200, json });

@@ -577,7 +577,7 @@ export async function issueType(sys: Sys, io: Output): Promise<number> {
   const event = JSON.parse(sys.read(eventPath)) as IssueEvent;
   const { approvals } = loadSettings(sys, sys.cwd);
   if (name === 'schedule' && event.schedule === HOURLY) {
-    if (!(await isOrganisation(sys, slug.split('/')[0] as string))) {
+    if (!(await isOrganisation(sys, slug.split('/')[0] as string, token))) {
       io.out('issue-type: GitHub has issue types for organisations only; nothing to do');
       return 0;
     }

@@ -193,7 +193,7 @@ async function typesFindings(sys: Sys, token: string | undefined): Promise<Findi
   const approvals = typeof named === 'number' ? named : undefined;
   const org = slug.split('/')[0] as string;
   try {
-    return (await isOrganisation(sys, org)) ? [await typesDrift(sys, token, org, slug, approvals)] : [];
+    return (await isOrganisation(sys, org, token)) ? [await typesDrift(sys, token, org, slug, approvals)] : [];
   } catch (error) {
     return [{ mark: '✗', text: `issue types: cannot ask GitHub (${message(error)})`, fix: 'niyam doctor again' }];
   }
@@ -211,7 +211,7 @@ async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Fi
   if (!here || !token) return [];
   const { slug } = here;
   try {
-    if (!(await isOrganisation(sys, slug.split('/')[0] as string))) return [];
+    if (!(await isOrganisation(sys, slug.split('/')[0] as string, token))) return [];
     const names = await secretNames(sys, slug, token);
     if (names === undefined) return [];
     const missing = BOARD_SECRETS.filter((name) => !names.includes(name));

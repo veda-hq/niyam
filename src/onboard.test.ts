@@ -1398,7 +1398,7 @@ describe('onboard', () => {
       const { code, err } = await run(sys);
       assert.deepEqual({ code, err }, { code: 1, err: [message] });
       assert.deepEqual(sys.files, before, 'writes nothing');
-      assert.equal(sys.requests.find((request) => request.url.endsWith(compare))?.token, undefined, 'asks with no token');
+      assert.equal(sys.requests.find((request) => request.url.endsWith(compare))?.token, TOKEN, "asks with the agent's token (#546)");
       assert.equal(sys.requests.some((request) => request.method !== 'GET'), false, 'changes nothing on GitHub');
     }
   });
@@ -3629,5 +3629,78 @@ describe("the agent's cloud signing key (#417)", () => {
     assert.equal(code, 0);
     assert.ok(out.includes("│  ! cloud signing key not checked (GitHub answered HTTP 403 when asked for ExampleBot's signing keys); niyam cloud-key ExampleBot makes one"), out.join('\n'));
     assert.ok(!keyMade(sys));
+  });
+});
+
+describe('onboard on a Mac with no requests left that need no token (#546)', () => {
+  /**
+   * The Mac veda-hq/veda's onboard ran on, 2026-11-22: every read of GitHub's
+   * API with no token is refused for the rate limit, 0 left of 60, until
+   * 08:55:21Z. A read with a token is answered as before.
+   */
+  function limited(sys: FakeSys): FakeSys & { refused: string[] } {
+    const http = sys.http.bind(sys);
+    const refused: string[] = [];
+    sys.http = (url, options = {}) => {
+      if (options.token || !url.startsWith('https://api.github.com/')) return http(url, options);
+      refused.push(url);
+      return Promise.resolve({ status: 403, json: { message: 'API rate limit exceeded' }, headers: { 'x-ratelimit-limit': '60', 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1795337721' } });
+    };
+    return Object.assign(sys, { refused });
+  }
+
+  it("gets past the owner-type check and through the run, asking with the agent's token", async () => {
+    const sys = limited(fresh());
+    const { code, err } = await run(sys);
+    assert.deepEqual(err, []);
+    assert.equal(code, 0);
+    const owners = sys.requests.filter((request) => request.url.endsWith('/users/example-org'));
+    assert.deepEqual(owners.map((request) => request.token), [TOKEN]);
+    assert.ok(sys.requests.some((request) => request.url.includes('/compare/refs/tags/') && request.token === TOKEN), 'the release tag is checked with the token');
+    assert.ok(opened(sys), 'the pull request opened');
+    assert.deepEqual(sys.refused, [], 'no read went out with no token');
+  });
+
+  it('does the same with settings and no agent named, using the agent the settings name', async () => {
+    const sys = limited(fresh());
+    sys.files.set(SETTINGS, `${JSON.stringify({ owner: 'example-owner', agent: AGENT, features: [...FEATURES] }, null, 2)}\n`);
+    const { code, err } = await run(sys, []);
+    assert.deepEqual(err, []);
+    assert.equal(code, 0);
+    const users = sys.requests.filter((request) => request.url.includes('/users/'));
+    assert.ok(users.some((request) => request.url.endsWith('/users/example-org')), 'the owner type is asked');
+    assert.ok(users.every((request) => request.token === TOKEN), JSON.stringify(users));
+    assert.deepEqual(sys.refused, [], 'no read went out with no token');
+  });
+
+  it('with no settings and no agent named, asks with the token of the agent set up here', async () => {
+    const sys = limited(fresh());
+    sys.files.set(`${sys.home}/.config/niyam/${AGENT.toLowerCase()}/session.sh`, sessionScript(AGENT, 42, pathsFor(sys.home, AGENT)));
+    sys.files.set(`${sys.home}/.config/niyam/locked/gh/hosts.yml`, '');
+    sys.answers = ['', '', 'y'];
+    const { code, err } = await run(sys, []);
+    assert.deepEqual(err, []);
+    assert.equal(code, 0);
+    assert.deepEqual(sys.requests.filter((request) => request.url.endsWith('/users/example-org')).map((request) => request.token), [TOKEN]);
+    assert.deepEqual(sys.refused, [], 'no read went out with no token');
+  });
+
+  it('reads no agent from settings it cannot read, leaving their refusal for later', async () => {
+    const sys = limited(fresh());
+    sys.files.set(SETTINGS, '{');
+    const { code, err } = await run(sys, []);
+    assert.equal(code, 1);
+    assert.match(err[0] ?? '', /^onboard: GitHub could not say whether the v[\d.]+ tag is on main: GitHub's limit for requests with no token/);
+  });
+
+  it('names the rate limit and its reset when this Mac holds no token to ask with', async () => {
+    const sys = limited(fresh());
+    sys.keychain.clear();
+    const { code, err } = await run(sys);
+    assert.equal(code, 1);
+    assert.deepEqual(err, [
+      `onboard: GitHub could not say whether the v${packageVersion()} tag is on main: GitHub's limit for requests with no token, 60 an hour from this address, has run out until 08:55 UTC (HTTP 403); nothing changed`,
+    ]);
+    assert.ok(changedNothing(sys));
   });
 });
