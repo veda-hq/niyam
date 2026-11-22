@@ -1479,8 +1479,11 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   // Mac's address shares with no token (#546), until the run knows its agent: the agent named, else the settings',
   // and only with neither any agent machine set up here. Never the owner's sign-in, whose scopes depend on whether an
   // organisation owns the repository.
+  // The token's item is under the login as the session file spells it, whatever case it was typed or written in.
+  const setUp = agentsSetUp(sys);
   const known = named[1] ? [named[1]] : settingsAgents(sys, root);
-  let readAs = storedToken(sys, known.length > 0 ? known : agentsSetUp(sys));
+  const spelled = known.flatMap((login) => [login, ...setUp.filter((one) => one !== login && sameLogin(one, login))]);
+  let readAs = storedToken(sys, known.length > 0 ? spelled : setUp);
   // Whether an organisation owns the repository, asked of GitHub once in this run.
   let organisation: Promise<boolean> | undefined;
   const byOrganisation = (): Promise<boolean> => (organisation ??= isOrganisation(sys, slug.split('/')[0] as string, readAs));

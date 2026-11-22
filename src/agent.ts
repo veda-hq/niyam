@@ -493,15 +493,19 @@ export function rateLimited(answer: HttpResult, token: string | undefined): stri
 /**
  * A read of GitHub's public API asked with `token`, so it counts against the
  * token's limit rather than the one this address shares with no token (#546),
- * and asked again with none when GitHub refuses the token (401): a public
- * read is answered without one. Gives the token the answer came with.
+ * and asked again with none only when GitHub refuses the token (401): a
+ * public read is answered without one. A `timeoutMs` bounds both asks
+ * together, the second getting what the first left, and none left gives the
+ * 401. Gives the token the answer came with.
  */
 export async function publicRead(sys: Sys, url: string, token: string | undefined, options: { timeoutMs?: number } = {}): Promise<{ answer: HttpResult; token: string | undefined }> {
-  if (token) {
-    const answer = await sys.http(url, { ...options, token });
-    if (answer.status !== 401) return { answer, token };
-  }
-  return { answer: await sys.http(url, options), token: undefined };
+  if (!token) return { answer: await sys.http(url, options), token: undefined };
+  const started = sys.now().getTime();
+  const answer = await sys.http(url, { ...options, token });
+  if (answer.status !== 401) return { answer, token };
+  if (options.timeoutMs === undefined) return { answer: await sys.http(url, options), token: undefined };
+  const left = options.timeoutMs - (sys.now().getTime() - started);
+  return left > 0 ? { answer: await sys.http(url, { ...options, timeoutMs: left }), token: undefined } : { answer, token };
 }
 
 /**

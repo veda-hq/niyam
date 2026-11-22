@@ -41,6 +41,25 @@ describe('tagOnMain (P-61)', () => {
     assert.deepEqual(refusing.requests.map((request) => [request.token, request.timeoutMs]), [['ghp_expired', 15_000], [undefined, 15_000]]);
   });
 
+  it('gives the second ask only the time the first left, and none left gives the refusal', async () => {
+    let clock = 0;
+    const timed = (spent: number): FakeSys => {
+      const sys = new FakeSys().route('GET', COMPARE, () => {
+        if (!sys.requests.at(-1)?.token) return { status: 200, json: { status: 'ahead', base_commit: { sha: TAG_SHA } } };
+        clock += spent;
+        return { status: 401, json: null };
+      });
+      sys.now = () => new Date(clock);
+      return sys;
+    };
+    const quick = timed(4_000);
+    assert.deepEqual(await tagOnMain(quick, '0.6.9', 'ghp_expired'), { sha: TAG_SHA });
+    assert.deepEqual(quick.requests.map((request) => request.timeoutMs), [15_000, 11_000]);
+    const slow = timed(15_000);
+    assert.deepEqual(await tagOnMain(slow, '0.6.9', 'ghp_expired'), { problem: 'GitHub answered HTTP 401 when asked whether the v0.6.9 tag is on main' });
+    assert.equal(slow.requests.length, 1);
+  });
+
   it('names the rate limit and its reset when GitHub refuses the compare for it', async () => {
     const sys = new FakeSys().route('GET', COMPARE, {
       status: 403,

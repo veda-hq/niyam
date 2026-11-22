@@ -3685,6 +3685,15 @@ describe('onboard on a Mac with no requests left that need no token (#546)', () 
     assert.deepEqual(sys.refused, [], 'no read went out with no token');
   });
 
+  it('finds the agent named in another case by the spelling machine set it up under', async () => {
+    const sys = limited(fresh());
+    sys.files.set(`${sys.home}/.config/niyam/${AGENT.toLowerCase()}/session.sh`, sessionScript(AGENT, 42, pathsFor(sys.home, AGENT)));
+    const { code, err } = await run(sys, ['example-owner', AGENT.toLowerCase()]);
+    assert.deepEqual(err, []);
+    assert.equal(code, 0);
+    assert.deepEqual(sys.refused, [], 'no read went out with no token');
+  });
+
   it('reads no agent from settings it cannot read, leaving their refusal for later', async () => {
     const sys = limited(fresh());
     sys.files.set(SETTINGS, '{');

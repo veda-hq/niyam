@@ -1801,8 +1801,10 @@ With no token they would share the 60 an hour every request from the Mac's
 address gets. Until the run knows its agent, it uses the agent named on the
 command line, else the agent the settings name, else any agent `machine` set
 up on the Mac. It never uses the owner's sign-in for these reads. When GitHub
-refuses a token, the read is asked again with none. When GitHub refuses a read
-for its rate limit, onboard names the limit and when it resets.
+refuses the token (HTTP 401, and only then), the read is asked again with
+none, within the time the first ask had. When GitHub refuses a read for its
+rate limit (403 or 429 with `x-ratelimit-remaining: 0`), onboard names the
+limit, and when it resets if GitHub sends a valid `x-ratelimit-reset`.
 Each job writes the pin twice, `checks.yml@vX.Y.Z` and, two lines
 below it under `with:`, `niyam-ref: vX.Y.Z`, the one input `checks.yml`
 declares; GitHub refuses a caller that passes an input the called workflow
