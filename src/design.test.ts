@@ -327,6 +327,14 @@ describe('prDesign', () => {
     await assert.rejects(check(actions(null)), /cannot read the states of #12 \(HTTP 200\)/);
   });
 
+  it("reads a slice in another repository there, naming it in full", async () => {
+    const sys = actions([state(30, `Frame: ${LINK}`)], AGENT, 'Slice: other-org/plans#12');
+    assert.deepEqual(await check(sys), { code: 0, out: ['✓ pr-design: 1 state of other-org/plans#12, each a frame built from the design library'], err: [] });
+    const asked = sys.requests.find((request) => request.url.endsWith('/graphql'))?.body as { variables: Record<string, unknown> };
+    assert.deepEqual(asked.variables, { owner: 'other-org', name: 'plans', number: 12, after: null });
+    await assert.rejects(check(actions(null, AGENT, 'Slice: https://github.com/other-org/plans/issues/12')), /cannot read the states of other-org\/plans#12 \(HTTP 200\)/);
+  });
+
   it('reads a library with no published components as none', async () => {
     const sys = actions([state(30, LINK)]);
     sys.route('GET', `${FIGMA}/files/LIB1/components`, { status: 200, json: {} });

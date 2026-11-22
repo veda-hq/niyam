@@ -69,7 +69,7 @@ const TEST_CALL = /\b(?:test|it)(?:\.\w+)?\s*\(/g;
 const SKIP_MARK = /\.(?:skip|only|todo)\b|\b(?:skip|only|todo)\s*:/g;
 
 /** How a pull request names the slice it builds, as Work rules reads it. */
-const SLICE_LINE = /^Slice:\s*(?:#|https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/)(\d+)\s*$/im;
+const SLICE_LINE = /^Slice:\s*(?:#(\d+)|([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)#(\d+)|https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/issues\/(\d+))\s*$/im;
 
 /** An onboard pull request's title, gitmoji or not, and the release it moves to. */
 const ONBOARD_TITLE = /^(?:\S+\s+)?chore\(niyam\): onboard at v(\d+\.\d+\.\d+)\b/;
@@ -152,10 +152,17 @@ export function named(names, path) {
   });
 }
 
-/** The slice a pull request body names first, or undefined. @param {string} body */
-export function sliceOf(body) {
+/**
+ * The slice a pull request body names first, or undefined: `#N` in `repo`,
+ * or another repository's as `owner/name#N` or its address, read there. A
+ * line naming `repo` itself, in any case, is one of its own.
+ * @param {string | undefined} body @param {string} repo @returns {{ repo: string, number: number } | undefined}
+ */
+export function sliceOf(body, repo) {
   const match = SLICE_LINE.exec(body ?? '');
-  return match ? Number(match[1]) : undefined;
+  if (!match) return undefined;
+  const there = match[2] ?? match[4];
+  return { repo: there === undefined || there.toLowerCase() === repo.toLowerCase() ? repo : there, number: Number(match[1] ?? match[3] ?? match[5]) };
 }
 
 /**
@@ -522,6 +529,23 @@ async function tagOnMain(gh, repo, tag) {
 }
 
 /**
+ * The Approvals issue another repository's settings name on its default
+ * branch, or undefined: where GitHub cannot find the repository or its
+ * settings, or they name none or cannot be read. Any other failure fails.
+ */
+async function approvalsThere(gh, repo) {
+  const branch = (await read(gh, `/repos/${repo}`, true))?.default_branch;
+  if (typeof branch !== 'string' || branch === '') return undefined;
+  const settings = await textAt(gh, repo, SETTINGS, encodeURIComponent(branch));
+  try {
+    return settings === undefined ? undefined : approvalsIn(settings);
+  } catch {
+    // Settings there that do not parse name no Approvals issue, as for the work rules.
+    return undefined;
+  }
+}
+
+/**
  * When the slice's **Guards:** counts from: the owner's latest answer since
  * the later of the slice joining its Work item and the Work item's last
  * approval (#534). That approval counts for a slice already there; so does,
@@ -531,18 +555,18 @@ async function tagOnMain(gh, repo, tag) {
  * Approvals issue GitHub cannot find answers nothing, as for the work rules.
  * With what it is, for the refusals, or why there is none.
  */
-async function approvedAt(gh, repo, slice, owners, approvals, agents) {
+async function approvedAt(gh, repo, slice, owners, approvals, agents, name = (number) => `#${number}`) {
   const parent = await gh.get(`/repos/${repo}/issues/${slice}/parent`);
   const who = owners.join(' or ');
   // Each problem carries its own remedy: a new proposal settles none of them but the last (#534).
   if (parent.status !== 200) {
     return {
-      problem: `slice #${slice} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})`,
+      problem: `slice ${name(slice)} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})`,
       // Only a 404 says the slice has no parent; any other answer is GitHub not answering, which a re-run may fix.
       remedy:
         parent.status === 404
-          ? `add slice #${slice}, ${issueUrl(repo, slice)}, as a sub-issue of its Work item, and have ${who} approve it there`
-          : `run Guard again once GitHub answers for slice #${slice}'s Work item`,
+          ? `add slice ${name(slice)}, ${issueUrl(repo, slice)}, as a sub-issue of its Work item, and have ${who} approve it there`
+          : `run Guard again once GitHub answers for slice ${name(slice)}'s Work item`,
     };
   }
   const item = parent.json.number;
@@ -550,8 +574,8 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents) {
   const approval = events.filter((event) => (event.event === 'labeled' || event.event === 'unlabeled') && event.label?.name === 'approved').at(-1);
   if (approval?.event !== 'labeled' || !sameLogin(owners, approval.actor?.login)) {
     return {
-      problem: `Work item #${item}, ${issueUrl(repo, item)}, is not approved by ${who}, so slice #${slice}'s **Guards:** names nothing yet`,
-      remedy: `have ${who} put the \`approved\` label on Work item #${item}, ${issueUrl(repo, item)}`,
+      problem: `Work item ${name(item)}, ${issueUrl(repo, item)}, is not approved by ${who}, so slice ${name(slice)}'s **Guards:** names nothing yet`,
+      remedy: `have ${who} put the \`approved\` label on Work item ${name(item)}, ${issueUrl(repo, item)}`,
     };
   }
   const joined = (await every(gh, `/repos/${repo}/issues/${slice}/timeline`)).filter((event) => event.event === 'parent_issue_added').map((event) => event.created_at).sort().at(-1);
@@ -560,17 +584,17 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents) {
   const from = there ? approval.created_at : joined;
   const since = (comment) => sameLogin(owners, comment.user?.login) && comment.created_at > from && comment.updated_at <= comment.created_at;
   const decision = (comment, mention) => since(comment) && /^\s*Decision:/i.test(comment.body ?? '') && (!mention || new RegExp(`#${slice}\\b`).test(comment.body));
-  const settled = `${who}'s Decision: settled slice #${slice}`;
+  const settled = `${who}'s Decision: settled slice ${name(slice)}`;
   const batch = approvals === undefined ? [] : await every(gh, `/repos/${repo}/issues/${approvals}/comments`, 3000, true);
   const comments = await every(gh, `/repos/${repo}/issues/${slice}/comments`);
   const byTime = (a, b) => (a.at < b.at ? -1 : 1);
   const answers = [
-    ...(there ? [{ at: approval.created_at, what: `Work item #${item} got the approved label` }] : []),
+    ...(there ? [{ at: approval.created_at, what: `Work item ${name(item)} got the approved label` }] : []),
     ...comments.filter((comment) => decision(comment, false)).map((comment) => ({ at: comment.created_at, what: settled })),
     ...events.filter((event) => event.event === 'commented' && decision(event, true)).map((event) => ({ at: event.created_at, what: settled })),
     ...batch
       .filter((comment) => since(comment) && approvedIn(comment.body ?? '').includes(slice))
-      .map((comment) => ({ at: comment.created_at, what: `${who}'s batch answer on the Approvals issue, #${approvals}, settled slice #${slice}` })),
+      .map((comment) => ({ at: comment.created_at, what: `${who}'s batch answer on the Approvals issue, ${name(approvals)}, settled slice ${name(slice)}` })),
   ];
   // An owner's 👍 on an agent's proposal for the slice, after it joined and after the proposal's last edit, as the
   // work rules read it (src/work.ts, thumbsUp). A proposal GitHub no longer has answers nothing (#515). A 👍 on any
@@ -580,25 +604,25 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents) {
     const edited = proposal.updated_at > proposal.created_at ? proposal.updated_at : undefined;
     for (const reaction of await every(gh, `/repos/${repo}/issues/comments/${proposal.id}/reactions?content=%2B1`, 3000, true)) {
       if (!sameLogin(owners, reaction.user?.login) || reaction.created_at <= from || (edited && reaction.created_at <= edited)) continue;
-      answers.push({ at: reaction.created_at, what: `${who}'s 👍 on ${proposal.user.login}'s proposal settled slice #${slice}` });
+      answers.push({ at: reaction.created_at, what: `${who}'s 👍 on ${proposal.user.login}'s proposal settled slice ${name(slice)}` });
     }
   }
   // The latest answer settles the slice as it stood then: an edit after it counts for nothing (#534).
   const last = answers.sort(byTime).at(-1);
   if (!last) {
-    const where = approvals === undefined ? '' : `, on the slice, on Work item #${item} or in a batch answer on the Approvals issue, #${approvals}, ${issueUrl(repo, approvals)}`;
+    const where = approvals === undefined ? '' : `, on the slice, on Work item ${name(item)} or in a batch answer on the Approvals issue, ${name(approvals)}, ${issueUrl(repo, approvals)}`;
     // The proposal the owner would 👍, by its own address, so the agent passes on that link.
     const newest = proposals.at(-1)?.html_url;
     const link = typeof newest === 'string' && newest.startsWith('https://') ? `, ${newest}` : '';
     const thumbs = agents.length > 0 ? `, nor reacted 👍 to an agent's proposal for it${link}` : '';
     const answer =
       agents.length === 0
-        ? `write a \`Decision:\` on slice #${slice}, ${issueUrl(repo, slice)}`
+        ? `write a \`Decision:\` on slice ${name(slice)}, ${issueUrl(repo, slice)}`
         : proposals.length > 0
-          ? `react 👍 to the agent's proposal for slice #${slice}${link || `, on ${issueUrl(repo, slice)}`}, or write a \`Decision:\` there`
-          : `react 👍 to a \`Proposal:\` for slice #${slice} that the agent posts on ${issueUrl(repo, slice)}, or write a \`Decision:\` there`;
+          ? `react 👍 to the agent's proposal for slice ${name(slice)}${link || `, on ${issueUrl(repo, slice)}`}, or write a \`Decision:\` there`
+          : `react 👍 to a \`Proposal:\` for slice ${name(slice)} that the agent posts on ${issueUrl(repo, slice)}, or write a \`Decision:\` there`;
     return {
-      problem: `slice #${slice}, ${issueUrl(repo, slice)}, joined Work item #${item}, ${issueUrl(repo, item)}, after its approval, and ${who} has written no unedited Decision: settling it since${where}${thumbs}`,
+      problem: `slice ${name(slice)}, ${issueUrl(repo, slice)}, joined Work item ${name(item)}, ${issueUrl(repo, item)}, after its approval, and ${who} has written no unedited Decision: settling it since${where}${thumbs}`,
       remedy: `have ${who} ${answer}`,
     };
   }
@@ -785,33 +809,40 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
     return refusals;
   }
 
-  const slice = sliceOf(as.body ?? '');
+  const ref = sliceOf(as.body ?? '', repo);
+  // A slice in another repository is read there, as Work rules reads it: its Work item, its Approvals issue, its body.
+  const where = ref?.repo ?? repo;
+  const foreign = where !== repo;
+  const name = (number) => (foreign ? `${where}#${number}` : `#${number}`);
   // The slice's own address, where the owner approves it again, so the agent can pass on the link (#557). Guard
   // reads the section as of the owner's latest answer, so a 👍 on a new proposal approves it again (#534); `niyam
   // propose` posts nothing for a slice already settled, so the refusal does not send the agent to it.
   const who = owners.join(' or ');
-  const it = slice === undefined ? 'the slice' : `slice #${slice}`;
-  const at = slice === undefined ? '' : `, ${issueUrl(repo, slice)}`;
+  const it = ref === undefined ? 'the slice' : `slice ${name(ref.number)}`;
+  const at = ref === undefined ? '' : `, ${issueUrl(where, ref.number)}`;
   const again =
     agents.length > 0
-      ? `post a new \`Proposal:\` comment on ${it}${at}, whose first #N is ${slice === undefined ? 'the slice' : `#${slice}`}, and have ${who} react 👍 to it or write a \`Decision:\` there. Guard reads the section as it stood at ${who}'s latest answer, so a 👍 on the new proposal is enough`
+      ? `post a new \`Proposal:\` comment on ${it}${at}, whose first #N is ${ref === undefined ? 'the slice' : `#${ref.number}`}, and have ${who} react 👍 to it or write a \`Decision:\` there. Guard reads the section as it stood at ${who}'s latest answer, so a 👍 on the new proposal is enough`
       : `have ${who} write a \`Decision:\` on ${it}${at}. Guard reads the section as it stood at ${who}'s latest answer, so a new Decision is enough`;
-  const how = (path) => `name \`${path}\` in ${slice === undefined ? "the slice's" : `slice #${slice}'s`} **Guards:** section, then ${again}; then edit or push this pull request so Guard runs again`;
+  const whose = ref === undefined ? "the slice's" : `slice ${name(ref.number)}'s`;
+  const how = (path) => `name \`${path}\` in ${whose} **Guards:** section, then ${again}; then edit or push this pull request so Guard runs again`;
   // Where the slice is not settled at all, a new proposal is no remedy: the problem's own remedy is.
-  const settle = (path, what) => `name \`${path}\` in ${slice === undefined ? "the slice's" : `slice #${slice}'s`} **Guards:** section, and ${what}; then edit or push this pull request so Guard runs again`;
-  if (slice === undefined) {
+  const settle = (path, what) => `name \`${path}\` in ${whose} **Guards:** section, and ${what}; then edit or push this pull request so Guard runs again`;
+  if (ref === undefined) {
     return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${settle(path, `have ${who} approve that slice`)}.` }))];
   }
-  const approval = await approvedAt(gh, repo, slice, owners, approvals, agents);
+  const { number: slice } = ref;
+  const theirs = foreign ? await approvalsThere(gh, where) : approvals;
+  const approval = await approvedAt(gh, where, slice, owners, theirs, agents, name);
   if (approval.problem) {
     return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${settle(path, approval.remedy)}.` }))];
   }
-  const [owner, name] = repo.split('/');
-  const answer = await gh.post('/graphql', { query: ISSUE_QUERY, variables: { owner, name, number: slice } });
+  const [owner, repoName] = where.split('/');
+  const answer = await gh.post('/graphql', { query: ISSUE_QUERY, variables: { owner, name: repoName, number: slice } });
   const issue = answer.status === 200 ? answer.json?.data?.repository?.issue : undefined;
   const then = issue ? bodyAt(issue, approval.at) : undefined;
   if (then === undefined) {
-    const why = issue ? `GitHub does not show every revision of slice #${slice}'s body back to when ${approval.what}` : `GitHub's GraphQL API did not give slice #${slice}'s body revisions (HTTP ${answer.status})`;
+    const why = issue ? `GitHub does not show every revision of slice ${name(slice)}'s body back to when ${approval.what}` : `GitHub's GraphQL API did not give slice ${name(slice)}'s body revisions (HTTP ${answer.status})`;
     return [...refusals, ...needs.map(({ path, why: what }) => ({ file: path, message: `This pull request ${what}, ${path}, and ${why}, so the guard cannot read its **Guards:** section as approved. To pass, ${how(path)}.` }))];
   }
   const names = guardsNamed(section(then, 'Guards'));
@@ -819,7 +850,7 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
     if (named(names, path)) continue;
     refusals.push({
       file: path,
-      message: `This pull request ${why}, ${path}, and slice #${slice}'s **Guards:** section, as it stood when ${approval.what} (${approval.at}), ${who}'s latest answer, does not name it. To pass, ${how(path)}.`,
+      message: `This pull request ${why}, ${path}, and slice ${name(slice)}'s **Guards:** section, as it stood when ${approval.what} (${approval.at}), ${who}'s latest answer, does not name it. To pass, ${how(path)}.`,
     });
   }
   return refusals;

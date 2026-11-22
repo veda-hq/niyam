@@ -4,7 +4,7 @@ import { anyLogin, githubSlug, isNoToken, loadSettings, SETTINGS_PATH } from './
 import { agentEnv } from './as-agent.ts';
 import { GITHUB_API } from './host.ts';
 import type { Output, Sys } from './types.ts';
-import { deleteBranchCommand, pullUrl, sessionToken, slicesNamed } from './work.ts';
+import { deleteBranchCommand, pullUrl, sameIssue, sessionToken, slicesNamed } from './work.ts';
 
 /**
  * Claude Code's Stop hook: a session whose branch has commits the default
@@ -373,7 +373,7 @@ interface ListedPull {
 
 /**
  * The agents' pull requests for the slices this branch's own commits name
- * (`Slice: #N` trailers), closed without merging, from this repository,
+ * (`Slice:` trailers, here or in another repository), closed without merging, from this repository,
  * whose branch is still on origin and builds no open pull request: a
  * superseded one, whose branch the agent deletes itself (#557). The most
  * recently updated hundred closed pull requests are read, each page and
@@ -381,7 +381,7 @@ interface ListedPull {
  * none, so the hook fails open.
  */
 export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSettings, branch: string, { slug, token }: { slug: string; token: string }): Promise<LeftBranch[]> {
-  const slices = slicesNamed(out(sys, root, 'git', ['log', '--format=%B', `origin/${settings.base}..HEAD`]) ?? '');
+  const slices = slicesNamed(out(sys, root, 'git', ['log', '--format=%B', `origin/${settings.base}..HEAD`]) ?? '', slug);
   if (slices.length === 0) return [];
   let agents: string[];
   try {
@@ -403,7 +403,7 @@ export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSe
     const ref = pull.head?.ref;
     if (!Number.isInteger(pull.number) || pull.merged_at || typeof ref !== 'string' || ref === branch || !here(pull)) return [];
     if (!anyLogin(agents, typeof pull.user?.login === 'string' ? pull.user.login : undefined)) return [];
-    if (!slicesNamed(typeof pull.body === 'string' ? pull.body : '').some((slice) => slices.includes(slice))) return [];
+    if (!slicesNamed(typeof pull.body === 'string' ? pull.body : '', slug).some((slice) => slices.some((mine) => sameIssue(mine, slice)))) return [];
     return [{ number: pull.number as number, url: pullUrl(slug, pull.number as number, pull.html_url), ref }];
   });
   // Each branch once, newest first, until LEFT_MOST are found (the rest show once those are gone) or READS_MOST reads
