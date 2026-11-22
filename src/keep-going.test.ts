@@ -11,6 +11,7 @@ import { FakeSys, HOME, ROOT, capture, type Call } from './fake.test.ts';
 import { GITHUB_API } from './host.ts';
 import {
   CAP,
+  LEFT_MOST,
   STOP_COMMAND,
   STORE,
   backgroundTask,
@@ -407,6 +408,24 @@ describe('gather', () => {
     it('names a branch once, though two closed pull requests had it, and a fork’s open one of that name keeps nothing', async () => {
       const sys = sliced([closedPull(), closedPull({ number: 3 })], [{ head: { ref: 'old-try', repo: { full_name: 'fork/example-app' } } }]);
       assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, [LEFT]);
+    });
+
+    it(`asks after at most ${LEFT_MOST} branches at one stop, and stops asking once GitHub does not answer`, async () => {
+      const refs = Array.from({ length: LEFT_MOST + 2 }, (_, n) => `try-${n}`);
+      const many = sliced(refs.map((ref, n) => closedPull({ number: 20 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], {});
+      many.handlers.unshift((method, url) => (url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : url.includes('/git/ref/heads/') ? { status: 200, json: {} } : undefined));
+      const got = await gather(many, ROOT, SETTINGS, false, undefined);
+      assert.deepEqual(got.left.map((one) => one.ref), refs.slice(0, LEFT_MOST));
+      assert.equal(many.requests.filter((request) => request.url.includes('/git/ref/heads/')).length, LEFT_MOST);
+      for (const failing of ['pulls?state=open&head=', '/git/ref/heads/']) {
+        const down = sliced(refs.map((ref, n) => closedPull({ number: 20 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], {});
+        down.handlers.unshift((method, url) => (url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : undefined));
+        const http = down.http.bind(down);
+        let asked = 0;
+        down.http = (url, options) => (url.includes(failing) ? (asked++, Promise.reject(new Error('timed out'))) : http(url, options));
+        assert.deepEqual((await gather(down, ROOT, SETTINGS, false, undefined)).left, []);
+        assert.equal(asked, 1, failing);
+      }
     });
 
     it('fails open: no slice, no settings, GitHub refusing or offline, or the pull request unknown', async () => {
