@@ -653,8 +653,9 @@ address, `Slice: https://github.com/owner/name/issues/N`, and its States as
 `State: owner/name#N`; a bare `#N` is always this repository's. The slice is
 read there by the same rules, judged by this repository's owners, with that
 repository's own Approvals issue. It counts only where the token reads that
-repository. A workflow's own token reads only its repository, so the pull
-request check refuses a private one, saying so. The pre-push hook, on the
+repository. A workflow's own token reads no private repository but its own,
+so the pull request check refuses a slice in another private repository,
+saying so. The pre-push hook, on the
 agent's token, can pass it. Slice done leaves it to its own repository.
 
 **One comment answers a batch.** Settings that name the repository's standing

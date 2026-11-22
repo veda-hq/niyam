@@ -255,14 +255,16 @@ async function parentOf(sys: Sys, token: string, issue: Issue, nameOf = (number:
  */
 async function foreignIssue(sys: Sys, token: string, here: string, ref: IssueRef): Promise<{ issue?: Issue; problem?: string }> {
   const name = refName(ref, here);
-  const { status, json } = await sys.http(`${API}/repos/${ref.repo}/issues/${ref.number}`, { token });
+  const url = `${API}/repos/${ref.repo}/issues/${ref.number}`;
+  const { status, json } = await sys.http(url, { token });
+  const message = (json as { message?: string } | null)?.message;
   if (status === 404 || status === 403 || status === 401) {
-    const message = (json as { message?: string } | null)?.message;
     return {
-      problem: `${name} cannot be read with this token (HTTP ${status}${message ? `: ${message}` : ''}): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads only ${here}`,
+      problem: `${name} cannot be read with this token (HTTP ${status}${message ? `: ${message}` : ''}): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads no private repository but ${here}`,
     };
   }
-  const issue = (await rest(sys, token, name, `${API}/repos/${ref.repo}/issues/${ref.number}`)) as Issue;
+  if (status !== 200) throw new Error(`cannot read ${name}: ${message ?? `HTTP ${status}`} (${url.replace(API, '')})`);
+  const issue = json as Issue;
   return issue.pull_request ? { problem: `${name} is a pull request, not an issue` } : { issue };
 }
 

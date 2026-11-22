@@ -796,10 +796,17 @@ describe('sliceProblems', () => {
         github(sys, graph().issue, [], PLANS);
         sys.route('GET', `${PLANS_ISSUES}/12`, { status, json: { message: status === 404 ? 'Not Found' : 'Resource not accessible by integration' } });
         assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), [
-          `${PLANS}#12 cannot be read with this token (HTTP ${status}: ${status === 404 ? 'Not Found' : 'Resource not accessible by integration'}): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads only ${SLUG}`,
+          `${PLANS}#12 cannot be read with this token (HTTP ${status}: ${status === 404 ? 'Not Found' : 'Resource not accessible by integration'}): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads no private repository but ${SLUG}`,
         ]);
       });
     }
+
+    it('throws, reading it once, when GitHub there answers otherwise', async () => {
+      const sys = new FakeSys();
+      sys.route('GET', `${PLANS_ISSUES}/12`, { status: 502, json: null });
+      await assert.rejects(sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), new RegExp(`^Error: cannot read ${PLANS}#12: HTTP 502 \\(/repos/${PLANS}/issues/12\\)$`));
+      assert.equal(sys.requests.filter((request) => request.url === `${PLANS_ISSUES}/12`).length, 1);
+    });
 
     it('refuses a pull request there', async () => {
       const sys = new FakeSys();
@@ -919,7 +926,7 @@ describe('prWorkRules', () => {
       code: 1,
       out: [],
       err: [
-        `✗ ${PLANS}#12 cannot be read with this token (HTTP 404: Not Found): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads only ${SLUG}`,
+        `✗ ${PLANS}#12 cannot be read with this token (HTTP 404: Not Found): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads no private repository but ${SLUG}`,
         'pr-work-rules: refused by the work rules',
       ],
     });
@@ -1199,7 +1206,7 @@ describe('prePush', () => {
       assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
         code: 1,
         err: [
-          `✗ ${PLANS}#12 cannot be read with this token (HTTP 404: Not Found): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads only ${SLUG}`,
+          `✗ ${PLANS}#12 cannot be read with this token (HTTP 404: Not Found): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads no private repository but ${SLUG}`,
           'pre-push: refused by the work rules',
         ],
       });

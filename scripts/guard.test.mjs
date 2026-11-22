@@ -460,13 +460,35 @@ describe('judging a pull request', () => {
       assert.match(refusal.message, /but slice other-org\/plans#10 is not a sub-issue of a Work item GitHub can read \(HTTP 404\)/);
     });
 
-    test("is refused, named in full, where its Work item there is not approved, and reads that repository's Approvals issue, not this one's", async () => {
-      const { gh } = elsewhere({ settings: JSON.stringify({ owner: 'owner', agent: 'AthyaBot', approvals: 77 }) });
+    test('is refused, named in full, where its Work item there is not approved', async () => {
+      const { gh } = elsewhere();
       const get = gh.get;
       gh.get = async (path) => (path.startsWith(`/repos/${PLANS}/issues/9/timeline`) ? { status: 200, json: [] } : get(path));
-      const [refusal] = await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 55);
+      const [refusal] = await judge(gh, REPO, 1, OWNERS);
       assert.match(refusal.message, /but Work item other-org\/plans#9 is not approved by Owner, so slice other-org\/plans#10's \*\*Guards:\*\* names nothing yet/);
+    });
+
+    test("added after approval, counts from a batch answer on that repository's Approvals issue, never this one's", async () => {
+      const answer = { user: { login: 'Owner' }, body: 'Decision: approve #10', created_at: '2026-01-06T00:00:00Z', updated_at: '2026-01-06T00:00:00Z' };
+      const { gh } = elsewhere({ settings: JSON.stringify({ owner: 'Owner', agent: 'AthyaBot', approvals: 77 }) });
+      const get = gh.get;
+      const there = {
+        [`/repos/${PLANS}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }],
+        [`/repos/${PLANS}/issues/77/comments`]: [answer],
+      };
+      gh.get = async (path) => {
+        const bare = path.split('?')[0];
+        if (bare in there) {
+          gh.calls.push(path);
+          return /page=[2-9]/.test(path) ? { status: 200, json: [] } : { status: 200, json: there[bare] };
+        }
+        return get(path);
+      };
+      // This repository's settings name Approvals issue #55, which is not read for a slice planned elsewhere.
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 55), []);
       assert.ok(gh.calls.includes(`/repos/${PLANS}/contents/.github/niyam.json?ref=trunk`));
+      assert.ok(gh.calls.some((call) => call.startsWith(`/repos/${PLANS}/issues/77/comments`)));
+      assert.ok(!gh.calls.some((call) => call.includes('/issues/55/')));
     });
   });
 
