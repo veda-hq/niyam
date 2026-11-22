@@ -223,6 +223,18 @@ describe('board-audit', () => {
       assert.ok(!sys.calls.some((call) => call.command === '/usr/bin/security'), 'never reads the keychain');
     });
 
+    it('on a platform with no token store, says GH_TOKEN is needed there, not niyam machine, and reads nothing', async () => {
+      const { sys } = setUp();
+      sys.env = {};
+      sys.platform = 'linux';
+      assert.deepEqual(await audit(sys), {
+        code: 1,
+        out: [],
+        err: ["niyam board-audit: board-audit needs GH_TOKEN here, as an agent session has it: niyam supports macOS only, where the keychain holds the agent's token; this machine runs linux"],
+      });
+      assert.deepEqual(sys.requests, []);
+    });
+
     it('outside a clone, reads as the one agent niyam machine set up on this Mac', async () => {
       const { sys } = setUp();
       sys.env = {};

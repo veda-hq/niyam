@@ -1,5 +1,6 @@
 import { API, NO_TOKEN, SETTINGS_PATH, agentHere, agentsSetUp, hasSettings, isNoToken, loadSettings, readToken, repoAt, sameLogin } from './agent.ts';
 import { AUTO_ADD, AUTO_ADD_FILTER, graphql } from './board.ts';
+import { tokenStore, unsupported } from './token-store.ts';
 import type { Output, Sys } from './types.ts';
 
 /** What the audit found: the Project, and where it and the repository disagree. */
@@ -187,6 +188,7 @@ export function auditToken(sys: Sys): string {
   // A locked session's placeholder is no token, and the lock is never worked around with the keychain's.
   if (isNoToken(given)) throw new Error(`board-audit has no token: GH_TOKEN is the lock's ${NO_TOKEN}, as in a session niyam has not given the agent identity, so nothing was read; run niyam doctor`);
   if (given) return given;
+  if (!tokenStore(sys)) throw new Error(`board-audit needs GH_TOKEN here, as an agent session has it: ${unsupported(sys)}`);
   const agent = auditAgent(sys);
   if ('problem' in agent) throw new Error(`board-audit needs GH_TOKEN, as an agent session has it, or the agent's token from this Mac's keychain: ${agent.problem}`);
   // The keychain item is under the login as `machine` spelled it, which the settings may spell in another case.
