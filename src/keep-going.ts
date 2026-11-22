@@ -40,8 +40,10 @@ import { deleteBranchCommand, pullUrl, sessionToken, slicesNamed } from './work.
 export const CAP = 5;
 /** How many pages of pull requests a branch name is read to: a reused name has a few. */
 const PAGES = 10;
-/** How many closed pull requests' branches the hook asks after at one stop; the rest wait for the next. */
+/** How many closed pull requests' branches left on origin one stop names; the rest show once those are deleted. */
 export const LEFT_MOST = 5;
+/** How many reads one stop spends on closed pull requests' branches: one for a deleted branch, two for one still there. */
+export const READS_MOST = 30;
 export const STORE = '.tmp/keep-going';
 export const PRINT_MODE_VAR = 'NIYAM_PRINT_MODE';
 export const STOP_COMMAND = 'niyam keep-going --stop "<why, in plain English>"';
@@ -404,22 +406,27 @@ export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSe
     if (!slicesNamed(typeof pull.body === 'string' ? pull.body : '').some((slice) => slices.includes(slice))) return [];
     return [{ number: pull.number as number, url: pullUrl(slug, pull.number as number, pull.html_url), ref }];
   });
-  // Each branch once, and at most LEFT_MOST of them: two reads each, under the hook's own timeout.
-  const branches = candidates.filter((one, at) => candidates.findIndex((other) => other.ref === one.ref) === at).slice(0, LEFT_MOST);
+  // Each branch once, newest first, until LEFT_MOST are found (the rest show once those are gone) or READS_MOST reads
+  // are spent. A deleted branch costs one read, so the branches already cleaned up never hide a later one.
+  const branches = candidates.filter((one, at) => candidates.findIndex((other) => other.ref === one.ref) === at);
   const left: LeftBranch[] = [];
+  let reads = 0;
   for (const one of branches) {
-    // A branch an open pull request still builds from is not left over: asked by its own head, so no page can hide one.
-    const open = await list(`state=open&head=${encodeURIComponent(`${slug.split('/')[0]}:${one.ref}`)}&per_page=100`);
-    // GitHub not answering stops the reads: the next would wait as long, and the hook fails open.
-    if (!open) break;
-    if (open.some((pull) => here(pull) && pull.head?.ref === one.ref)) continue;
+    if (left.length >= LEFT_MOST || reads >= READS_MOST) break;
+    reads++;
     const ref = await sys.http(`${GITHUB_API}/repos/${slug}/git/ref/heads/${one.ref.split('/').map(encodeURIComponent).join('/')}`, { token, timeoutMs: 15_000 }).catch(() => {
       // fail-open: a branch GitHub cannot be asked about is not held against the session.
       return undefined;
     });
+    // GitHub not answering stops the reads: the next would wait as long, and the hook fails open.
     if (ref === undefined) break;
     // 404: deleted already. Anything else but 200 says nothing.
-    if (ref.status === 200) left.push(one);
+    if (ref.status !== 200) continue;
+    reads++;
+    // A branch an open pull request still builds from is not left over: asked by its own head, so no page can hide one.
+    const open = await list(`state=open&head=${encodeURIComponent(`${slug.split('/')[0]}:${one.ref}`)}&per_page=100`);
+    if (!open) break;
+    if (!open.some((pull) => here(pull) && pull.head?.ref === one.ref)) left.push(one);
   }
   return left;
 }

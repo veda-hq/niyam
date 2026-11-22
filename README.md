@@ -1079,9 +1079,12 @@ owner (#557). So a merge, or a ready pull request on the desktop, does not
 let the session stop while one of the agents' pull requests for a slice its
 commits name was closed without merging and its branch is still on origin,
 building no open pull request. The hook reads the latest hundred closed
-pull requests, asks after at most five of their branches a stop (stopping
-at the first read GitHub does not answer), and sends the session back with
-each one's address and
+pull requests and checks their branches newest first. A branch deleted
+already costs one read, so it hides none after it. Each stop names at
+most five branches still there; the rest show at a later stop, once those
+five are deleted. A stop spends at most 30 reads, and stops reading at
+the first one GitHub does not answer. The session is sent back with each
+pull request's address and
 `git push origin --delete <branch>`; anything GitHub or the settings cannot
 say holds nothing. A pull request of the session's own branch closed
 unmerged gets the same command, with reopening as the other way. The
