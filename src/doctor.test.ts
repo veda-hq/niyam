@@ -582,6 +582,49 @@ describe('doctor', () => {
     });
   });
 
+  describe("merged pull requests' branches (#557)", () => {
+    const repo = (sys: FakeSys, on: unknown, status = 200): FakeSys =>
+      sys.route('GET', '/repos/example-org/example-app', { status, json: { owner: { login: 'example-org', type: 'Organization' }, delete_branch_on_merge: on } });
+
+    it('says GitHub deletes them', async () => {
+      const { code, out } = await check(repo(healthy(), true));
+      assert.equal(code, 0);
+      assert.ok(marked(out, '✓').includes('✓  merged pull requests’ branches are deleted'), out.join('\n'));
+    });
+
+    it("fails where GitHub keeps them, naming the owner and the settings page's full address", async () => {
+      const { code, out } = await check(repo(healthy(), false));
+      assert.equal(code, 1);
+      assert.deepEqual(marked(out, '✗'), [
+        '✗  example-org/example-app keeps a merged pull request’s branch: "Automatically delete head branches" is off → example-owner ticks it under General at https://github.com/example-org/example-app/settings',
+      ]);
+    });
+
+    it('says nothing where GitHub does not say, or outside an onboarded clone', async () => {
+      const unsaid = repo(healthy(), undefined);
+      const refused = repo(healthy(), false, 403);
+      const bare = repo(healthy(), false);
+      bare.files.delete(`${ROOT}/.github/niyam.json`);
+      for (const [sys, named] of [[unsaid], [refused], [bare, AGENT]] as const) assert.ok(!(await check(sys, named)).out.some((line) => line.includes('branch')), 'nothing about branches');
+    });
+
+    it('warns, never fails, when GitHub cannot be asked', async () => {
+      const sys = healthy();
+      const http = sys.http.bind(sys);
+      sys.http = (url, options) => (url.endsWith('/repos/example-org/example-app') ? Promise.reject(new Error('rate limited')) : http(url, options));
+      const { code, out } = await check(sys);
+      assert.equal(code, 0, out.join('\n'));
+      assert.ok(marked(out, '▲').includes('▲  merged branches: cannot ask GitHub (rate limited) → niyam doctor again'), out.join('\n'));
+    });
+
+    it('reads the repository the session works in, wherever doctor runs from', async () => {
+      const sys = repo(healthy(), false);
+      sys.env = { ...sys.env, CLAUDE_PROJECT_DIR: ROOT };
+      sys.cwd = '/elsewhere';
+      assert.ok(marked((await check(sys, AGENT)).out, '✗').some((line) => line.includes('Automatically delete head branches')));
+    });
+  });
+
   it('reports a thrown non-error from GitHub', async () => {
     const sys = healthy();
     sys.http = () => Promise.reject('down');
@@ -677,6 +720,15 @@ describe('doctor in a Claude cloud session', () => {
     if (login) sys.acceptToken(PROXY_TOKEN, login);
     return sys;
   }
+
+  it("checks that GitHub deletes merged pull requests' branches, through the proxy (#557)", async () => {
+    const sys = cloud();
+    sys.route('GET', '/repos/example-org/example-app', { status: 200, json: { owner: { login: 'example-org', type: 'Organization' }, delete_branch_on_merge: false } });
+    const { code, out } = await check(sys);
+    assert.equal(code, 1);
+    assert.ok(marked(out, '✗').some((line) => line.includes('https://github.com/example-org/example-app/settings')), out.join('\n'));
+    assert.ok(sys.requests.some((request) => request.url.endsWith('/repos/example-org/example-app') && request.token === PROXY_TOKEN));
+  });
 
   it('passes when the environment is set up, its checks grouped as on a Mac', async () => {
     const sys = cloud();

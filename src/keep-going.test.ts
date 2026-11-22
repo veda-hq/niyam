@@ -11,6 +11,8 @@ import { FakeSys, HOME, ROOT, capture, type Call } from './fake.test.ts';
 import { GITHUB_API } from './host.ts';
 import {
   CAP,
+  LEFT_MOST,
+  READS_MOST,
   STOP_COMMAND,
   STORE,
   backgroundTask,
@@ -37,10 +39,13 @@ const SETTINGS = keepGoingSettings({ keepGoing: { base: 'main' } });
 const CLIENT = keepGoingSettings({ keepGoing: { base: 'main', trunks: ['prod'], printMode: ['OLD_PRINT_MODE'], owner: 'Pat', tag: 'D-9 stop hook' } });
 
 function facts(over: Partial<Facts> = {}): Facts {
-  return { desktop: false, print: false, subagent: false, branch: 'feature', head: HEAD, ahead: 2, carried: false, note: null, remote: HEAD, pr: null, pushing: false, dirty: false, ...over };
+  return { desktop: false, print: false, subagent: false, branch: 'feature', head: HEAD, ahead: 2, carried: false, note: null, remote: HEAD, pr: null, left: [], pushing: false, dirty: false, ...over };
 }
 
-const open = (over: Partial<PullRequest> = {}): PullRequest => ({ number: 7, state: 'OPEN', isDraft: false, headRefOid: HEAD, ...over });
+const WEB = 'https://github.com/example-org/example-app';
+const open = (over: Partial<PullRequest> = {}): PullRequest => ({ number: 7, state: 'OPEN', isDraft: false, headRefOid: HEAD, url: `${WEB}/pull/${over.number ?? 7}`, ...over });
+/** A superseded pull request for the slice, closed, its branch left on origin. */
+const LEFT = { number: 4, url: `${WEB}/pull/4`, ref: 'old-try' };
 
 function reason(decision: ReturnType<typeof decide>): string {
   assert.equal(decision.stop, false);
@@ -65,7 +70,23 @@ describe('decide', () => {
     assert.match(reason(decide(facts({ desktop: true, pr: open(), dirty: true }), null, SETTINGS)), /PR 7 is open/);
     assert.match(reason(decide(facts({ desktop: true, pr: open({ isDraft: true }) }), null, SETTINGS)), /PR 7 is a draft: finish the work, push, mark it ready/);
     assert.match(reason(decide(facts({ desktop: true, pr: open(), remote: OLD }), null, SETTINGS)), /local commits are not on the remote: push them; run the push as a background task/);
-    assert.match(reason(decide(facts({ desktop: true, pr: open({ state: 'CLOSED' }) }), null, SETTINGS)), /PR 7 was closed without merging: reopen it, or record why the work stops/);
+    assert.match(
+      reason(decide(facts({ desktop: true, pr: open({ state: 'CLOSED' }) }), null, SETTINGS)),
+      /PR 7, https:\/\/github\.com\/example-org\/example-app\/pull\/7, was closed without merging: reopen it, or, if it is superseded, delete its branch yourself with `git push origin --delete feature` and record why the work stops/,
+    );
+  });
+
+  it("holds a session while a closed pull request's branch for its slice is left on origin, even merged or ready on the desktop (#557)", () => {
+    const told = 'PR 4, https://github.com/example-org/example-app/pull/4, for this slice was closed without merging and its branch old-try is still on origin: delete it yourself with `git push origin --delete old-try`, never asking the owner';
+    for (const over of [{ desktop: true, pr: open() }, { pr: open({ state: 'MERGED' }) }, { pr: open() }]) {
+      assert.ok(reason(decide(facts({ ...over, left: [LEFT] }), null, SETTINGS)).includes(told), JSON.stringify(over));
+    }
+    const merged = reason(decide(facts({ pr: open({ state: 'MERGED' }), left: [LEFT, { ...LEFT, number: 3, ref: "it's" }] }), null, SETTINGS));
+    assert.match(merged, /^PR 7 merged branch feature, but closed pull requests for its slice left branches on origin, and started work ends only once they are gone\. PR 4, .*; PR 3, .*`git push origin --delete 'it'\\''s'`, never asking the owner\. Do not end a turn/);
+    assert.doesNotMatch(merged, /older commit/);
+    // A stop note, a running push and GitHub not answering still let it go.
+    const note = { branch: 'feature', head: HEAD, reason: 'r', at: 'now', shown: true };
+    for (const over of [{ note }, { pushing: true }, { pr: 'unknown' as const }]) assert.equal(decide(facts({ ...over, left: [LEFT] }), null, SETTINGS).stop, true);
   });
 
   it('asks for a first push and a PR on a branch never pushed', () => {
@@ -333,6 +354,116 @@ describe('gather', () => {
     assert.deepEqual([got.ahead, got.carried], [3, false]);
     const unpushed = checkout({ 'rev-parse --verify --quiet @{u}': null, 'for-each-ref --contains HEAD --format=%(refname:short) refs/remotes/origin': 'origin/group' });
     assert.equal((await gather(unpushed, ROOT, SETTINGS, false, undefined)).carried, true);
+  });
+
+  describe("closed pull requests' branches left on origin (#557)", () => {
+    const REPO = '/repos/example-org/example-app';
+    const CLOSED = `${REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100`;
+    /** The open pull requests from branch old-try, asked by head so no page hides one. */
+    const OPEN = `${REPO}/pulls?state=open&head=example-org%3Aold-try&per_page=100`;
+    const closedPull = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+      number: 4,
+      body: 'Slice: #12',
+      merged_at: null,
+      html_url: `${WEB}/pull/4`,
+      user: { login: 'ExampleBot' },
+      head: { ref: 'old-try', repo: { full_name: 'example-org/example-app' } },
+      ...over,
+    });
+    /** A branch whose own commits name slice #12, in a repository whose settings name ExampleBot. */
+    function sliced(closed: unknown[], open: unknown[] = [], branches: Record<string, number> = { 'old-try': 200 }): FakeSys {
+      const sys = checkout({ 'log --format=%B origin/main..HEAD': 'Fix it\n\nSlice: #12' });
+      pulls(sys, [restPull()]);
+      sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 'example-owner', agent: 'ExampleBot' }));
+      sys.route('GET', CLOSED, { status: 200, json: closed });
+      sys.route('GET', OPEN, { status: 200, json: open });
+      for (const [ref, status] of Object.entries(branches)) sys.route('GET', `${REPO}/git/ref/heads/${ref}`, { status, json: {} });
+      return sys;
+    }
+
+    it("names an agent's closed pull request for the slice whose branch is still there", async () => {
+      const sys = sliced([closedPull()]);
+      assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, [LEFT]);
+      assert.ok(sys.requests.every((request) => request.timeoutMs === 15_000));
+    });
+
+    it('names none merged, deleted, from a fork, by someone else, for another slice, for this branch, or that an open one builds', async () => {
+      for (const [closed, open, branches] of [
+        [[closedPull({ merged_at: '2026-11-01T00:00:00Z' })], [], undefined],
+        [[closedPull()], [], { 'old-try': 404 }],
+        [[closedPull({ head: { ref: 'old-try', repo: { full_name: 'fork/example-app' } } })], [], undefined],
+        [[closedPull({ head: { ref: 'old-try', repo: null } })], [], undefined],
+        [[closedPull({ user: { login: 'example-owner' } })], [], undefined],
+        [[closedPull({ user: null })], [], undefined],
+        [[closedPull({ body: 'Slice: #13' })], [], undefined],
+        [[closedPull({ body: null })], [], undefined],
+        [[closedPull({ head: { ref: 'feature', repo: { full_name: 'example-org/example-app' } } })], [], undefined],
+        [[closedPull({ number: 'x' })], [], undefined],
+        [[closedPull()], [{ head: { ref: 'old-try', repo: { full_name: 'example-org/example-app' } } }], undefined],
+      ] as const) {
+        const sys = sliced([...closed], [...open], branches);
+        assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, [], JSON.stringify(closed));
+      }
+    });
+
+    it('names a branch once, though two closed pull requests had it, and a fork’s open one of that name keeps nothing', async () => {
+      const sys = sliced([closedPull(), closedPull({ number: 3 })], [{ head: { ref: 'old-try', repo: { full_name: 'fork/example-app' } } }]);
+      assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, [LEFT]);
+    });
+
+    it(`names at most ${LEFT_MOST} branches at one stop, within ${READS_MOST} reads, and stops asking once GitHub does not answer`, async () => {
+      const refs = Array.from({ length: LEFT_MOST + 2 }, (_, n) => `try-${n}`);
+      const many = sliced(refs.map((ref, n) => closedPull({ number: 20 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], {});
+      many.handlers.unshift((method, url) => (url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : url.includes('/git/ref/heads/') ? { status: 200, json: {} } : undefined));
+      const got = await gather(many, ROOT, SETTINGS, false, undefined);
+      assert.deepEqual(got.left.map((one) => one.ref), refs.slice(0, LEFT_MOST));
+      assert.equal(many.requests.filter((request) => request.url.includes('/git/ref/heads/')).length, LEFT_MOST);
+      // Branches deleted already cost a read each and hide none after them, up to READS_MOST reads.
+      const cleaned = Array.from({ length: READS_MOST - 2 }, (_, n) => `gone-${n}`);
+      const later = sliced([...cleaned, 'still-here', 'past-budget'].map((ref, n) => closedPull({ number: 100 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], {});
+      later.handlers.unshift((method, url) =>
+        url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : url.includes('/git/ref/heads/') ? { status: url.includes('gone-') ? 404 : 200, json: {} } : undefined,
+      );
+      assert.deepEqual((await gather(later, ROOT, SETTINGS, false, undefined)).left.map((one) => one.ref), ['still-here']);
+      assert.ok(!later.requests.some((request) => request.url.includes('past-budget')));
+      // A branch read GitHub refuses is no deleted branch: the scan stops there, naming none past it.
+      const refused = sliced(['try-0', 'try-1'].map((ref, n) => closedPull({ number: 20 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], { 'try-0': 500, 'try-1': 200 });
+      refused.handlers.unshift((method, url) => (url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : undefined));
+      assert.deepEqual((await gather(refused, ROOT, SETTINGS, false, undefined)).left, []);
+      assert.ok(!refused.requests.some((request) => request.url.includes('try-1')));
+      for (const failing of ['pulls?state=open&head=', '/git/ref/heads/']) {
+        const down = sliced(refs.map((ref, n) => closedPull({ number: 20 + n, head: { ref, repo: { full_name: 'example-org/example-app' } } })), [], {});
+        down.handlers.unshift((method, url) => (url.includes('pulls?state=open&head=') ? { status: 200, json: [] } : url.includes('/git/ref/heads/') ? { status: 200, json: {} } : undefined));
+        const http = down.http.bind(down);
+        let asked = 0;
+        down.http = (url, options) => (url.includes(failing) ? (asked++, Promise.reject(new Error('timed out'))) : http(url, options));
+        assert.deepEqual((await gather(down, ROOT, SETTINGS, false, undefined)).left, []);
+        assert.equal(asked, 1, failing);
+      }
+    });
+
+    it('fails open: no slice, no settings, GitHub refusing or offline, or the pull request unknown', async () => {
+      const noSlice = sliced([closedPull()]);
+      noSlice.execOverride = ((base) => (call: Call) => (call.args.join(' ') === 'log --format=%B origin/main..HEAD' ? { code: 0, stdout: 'no trailer\n', stderr: '' } : base(call)))(noSlice.execOverride);
+      const noSettings = sliced([closedPull()]);
+      noSettings.files.delete(`${ROOT}/.github/niyam.json`);
+      const closedRefused = sliced([closedPull()]);
+      closedRefused.route('GET', CLOSED, { status: 403, json: { message: 'no' } });
+      const openRefused = sliced([closedPull()]);
+      openRefused.route('GET', OPEN, { status: 500, json: null });
+      const branchRefused = sliced([closedPull()], [], { 'old-try': 500 });
+      const offline = sliced([closedPull()]);
+      const http = offline.http.bind(offline);
+      offline.http = (url, options) => (url.includes('state=closed') ? Promise.reject(new Error('offline')) : http(url, options));
+      for (const sys of [noSlice, noSettings, closedRefused, openRefused, branchRefused, offline]) {
+        assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, []);
+      }
+      const unknown = sliced([closedPull()]);
+      unknown.handlers.unshift((method, url) => (url.includes('pulls?head=') ? { status: 403, json: null } : undefined));
+      const got = await gather(unknown, ROOT, SETTINGS, false, undefined);
+      assert.deepEqual([got.pr, got.left], ['unknown', []]);
+      assert.ok(!unknown.requests.some((request) => request.url.includes('state=closed')));
+    });
   });
 
   it('skips GitHub at a stop note that holds, or past a push in flight', async () => {

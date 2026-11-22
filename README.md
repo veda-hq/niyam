@@ -291,7 +291,9 @@ niyam (`~/.config/process-rules/`, or a keychain entry under the service
 what of the owner's an agent session could reach, any `owner-step` folder
 left behind (`▲`, saying whether it still holds a token; see Owner steps), and, in a repository with
 the board on, the organisation's issue types (see Issue types), and, in every
-onboarded repository, the shared Guard's caller (`✗` when it is missing or not
+onboarded repository, that GitHub deletes a merged pull request's branch
+(`delete_branch_on_merge`: `✗` when off, naming the repository's settings
+page for the owner, since turning it on takes an admin; #557) and the shared Guard's caller (`✗` when it is missing or not
 as `onboard` writes it at `niyam.yml`'s release, or, with identity alone and so
 no `niyam.yml`, at any release; see The shared Guard). It shows them grouped as
 This Mac, GitHub and This repo, one line each: `✓` fine, `▲` worth fixing,
@@ -642,10 +644,21 @@ slice may be built:
 - each of its State sub-issues closed as not planned after the approval
   carries the owner's approval: a 👍 on the agent's proposal for it, or a
   `Decision:` comment;
-- no other open pull request names it;
+- no other open pull request names it. The refusal gives that pull
+  request's full address and, for a branch in the repository, the command
+  that deletes its branch once it is closed as superseded,
+  `git push origin --delete <branch>`: the agent does that itself (#557);
 - each State it names with a line `State: #N` is a State sub-issue of the
   slice, and when the slice is closed already, so the pull request is a fix,
   it names at least one open State: the one the fix is filed as.
+
+A refusal that sends the agent to the owner about an issue or a comment,
+here, in Guard, in `propose` and in the needs-owner job, names its full
+`https://github.com/…` address, once, where it first names it: the
+proposal comment's own `#issuecomment-` link where there is one, else the
+issue's, and the Approvals issue's. The agent passes that link on, never a
+bare number (#557). Guard's refusal for a pull request that names no slice
+has no issue to link yet: it says to add the `Slice:` line first.
 
 **One comment answers a batch.** Settings that name the repository's standing
 Approvals issue (`"approvals": N`) let the owner answer many asks at once:
@@ -1059,7 +1072,24 @@ owner can unblock the work or it is proven unneeded, and whose reason it
 shows once. At the sixth stop at one commit it writes that note itself. A new
 commit resets the count and voids the note. The pull request is read over
 REST, as the session's agent; a cloud session is held the same way. Its
-records are in `.tmp/keep-going/`. The settings:
+records are in `.tmp/keep-going/`.
+
+An agent deletes its own closed pull requests' branches, never asking the
+owner (#557). So a merge, or a ready pull request on the desktop, does not
+let the session stop while one of the agents' pull requests for a slice its
+commits name was closed without merging and its branch is still on origin,
+building no open pull request. The hook reads the latest hundred closed
+pull requests and checks their branches newest first. A branch deleted
+already costs one read, so it hides none after it. Each stop names at
+most five branches still there; the rest show at a later stop, once those
+five are deleted. A stop spends at most 30 reads, and stops reading at
+the first one GitHub does not answer, or answers with anything but found
+or not found (404). The session is sent back with each
+pull request's address and
+`git push origin --delete <branch>`; anything GitHub or the settings cannot
+say holds nothing. A pull request of the session's own branch closed
+unmerged gets the same command, with reopening as the other way. The
+settings:
 
 ```json
 { "keepGoing": { "trunks": [], "printMode": [], "owner": "the owner", "tag": "niyam keep-going" } }
