@@ -533,12 +533,22 @@ async function tagOnMain(gh, repo, tag) {
  */
 async function approvedAt(gh, repo, slice, owners, approvals, agents) {
   const parent = await gh.get(`/repos/${repo}/issues/${slice}/parent`);
-  if (parent.status !== 200) return { problem: `slice #${slice} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})` };
+  const who = owners.join(' or ');
+  // Each problem carries its own remedy: a new proposal settles none of them but the last (#534).
+  if (parent.status !== 200) {
+    return {
+      problem: `slice #${slice} is not a sub-issue of a Work item GitHub can read (HTTP ${parent.status})`,
+      remedy: `add slice #${slice}, ${issueUrl(repo, slice)}, as a sub-issue of its Work item, and have ${who} approve it there`,
+    };
+  }
   const item = parent.json.number;
   const events = await every(gh, `/repos/${repo}/issues/${item}/timeline`);
   const approval = events.filter((event) => (event.event === 'labeled' || event.event === 'unlabeled') && event.label?.name === 'approved').at(-1);
   if (approval?.event !== 'labeled' || !sameLogin(owners, approval.actor?.login)) {
-    return { problem: `Work item #${item}, ${issueUrl(repo, item)}, is not approved by ${owners.join(' or ')}, so slice #${slice}'s **Guards:** names nothing yet` };
+    return {
+      problem: `Work item #${item}, ${issueUrl(repo, item)}, is not approved by ${who}, so slice #${slice}'s **Guards:** names nothing yet`,
+      remedy: `have ${who} put the \`approved\` label on Work item #${item}, ${issueUrl(repo, item)}`,
+    };
   }
   const joined = (await every(gh, `/repos/${repo}/issues/${slice}/timeline`)).filter((event) => event.event === 'parent_issue_added').map((event) => event.created_at).sort().at(-1);
   // A slice already there when the Work item was approved counts from that approval, and any answer since moves it.
@@ -546,7 +556,6 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents) {
   const from = there ? approval.created_at : joined;
   const since = (comment) => sameLogin(owners, comment.user?.login) && comment.created_at > from && comment.updated_at <= comment.created_at;
   const decision = (comment, mention) => since(comment) && /^\s*Decision:/i.test(comment.body ?? '') && (!mention || new RegExp(`#${slice}\\b`).test(comment.body));
-  const who = owners.join(' or ');
   const settled = `${who}'s Decision: settled slice #${slice}`;
   const batch = approvals === undefined ? [] : await every(gh, `/repos/${repo}/issues/${approvals}/comments`, 3000, true);
   const comments = await every(gh, `/repos/${repo}/issues/${slice}/comments`);
@@ -576,9 +585,17 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents) {
     const where = approvals === undefined ? '' : `, on the slice, on Work item #${item} or in a batch answer on the Approvals issue, #${approvals}, ${issueUrl(repo, approvals)}`;
     // The proposal the owner would 👍, by its own address, so the agent passes on that link.
     const newest = proposals.at(-1)?.html_url;
-    const thumbs = agents.length > 0 ? `, nor reacted 👍 to an agent's proposal for it${typeof newest === 'string' && newest.startsWith('https://') ? `, ${newest}` : ''}` : '';
+    const link = typeof newest === 'string' && newest.startsWith('https://') ? `, ${newest}` : '';
+    const thumbs = agents.length > 0 ? `, nor reacted 👍 to an agent's proposal for it${link}` : '';
+    const answer =
+      agents.length === 0
+        ? `write a \`Decision:\` on slice #${slice}, ${issueUrl(repo, slice)}`
+        : proposals.length > 0
+          ? `react 👍 to the agent's proposal for slice #${slice}${link || `, on ${issueUrl(repo, slice)}`}, or write a \`Decision:\` there`
+          : `react 👍 to a \`Proposal:\` for slice #${slice} that the agent posts on ${issueUrl(repo, slice)}, or write a \`Decision:\` there`;
     return {
       problem: `slice #${slice}, ${issueUrl(repo, slice)}, joined Work item #${item}, ${issueUrl(repo, item)}, after its approval, and ${who} has written no unedited Decision: settling it since${where}${thumbs}`,
+      remedy: `have ${who} ${answer}`,
     };
   }
   return { ...last, item };
@@ -776,14 +793,14 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
       ? `post a new \`Proposal:\` comment on ${it}${at}, whose first #N is ${slice === undefined ? 'the slice' : `#${slice}`}, and have ${who} react 👍 to it or write a \`Decision:\` there. Guard reads the section as it stood at ${who}'s latest answer, so a 👍 on the new proposal is enough`
       : `have ${who} write a \`Decision:\` on ${it}${at}. Guard reads the section as it stood at ${who}'s latest answer, so a new Decision is enough`;
   const how = (path) => `name \`${path}\` in ${slice === undefined ? "the slice's" : `slice #${slice}'s`} **Guards:** section, then ${again}; then edit or push this pull request so Guard runs again`;
-  // Where the slice is not settled at all, a new proposal is no remedy: what the problem names is.
-  const settle = (path, what) => `name \`${path}\` in ${slice === undefined ? "the slice's" : `slice #${slice}'s`} **Guards:** section, and have ${who} ${what}; then edit or push this pull request so Guard runs again`;
+  // Where the slice is not settled at all, a new proposal is no remedy: the problem's own remedy is.
+  const settle = (path, what) => `name \`${path}\` in ${slice === undefined ? "the slice's" : `slice #${slice}'s`} **Guards:** section, and ${what}; then edit or push this pull request so Guard runs again`;
   if (slice === undefined) {
-    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${settle(path, 'approve that slice')}.` }))];
+    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${settle(path, `have ${who} approve that slice`)}.` }))];
   }
   const approval = await approvedAt(gh, repo, slice, owners, approvals, agents);
   if (approval.problem) {
-    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${settle(path, 'answer as this says')}.` }))];
+    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${settle(path, approval.remedy)}.` }))];
   }
   const [owner, name] = repo.split('/');
   const answer = await gh.post('/graphql', { query: ISSUE_QUERY, variables: { owner, name, number: slice } });

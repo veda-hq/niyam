@@ -1924,8 +1924,8 @@ posts a new `Proposal:` comment for it and the owner 👍s it, or the owner
 writes a new `Decision:`. `niyam propose` posts nothing for a slice already
 settled, so the agent writes that comment itself. An edit to the slice after
 the latest answer counts for nothing. So does a 👍 on a proposal edited after
-it. Any later `Decision:` re-settles the slice, even one about something
-else.
+it. A later unedited owner `Decision:` on the slice, or on its Work item
+naming it, re-settles the slice, even one about something else.
 
 If GitHub cannot find the Approvals issue, Guard counts nothing from it and
 goes on. Any other failure to read it, or any proposal's reactions, fails

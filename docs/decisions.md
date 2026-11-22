@@ -2650,5 +2650,6 @@
   - The refusal says what works: a new `Proposal:` comment on the slice,
     which the owner 👍s, or a new `Decision:`. `niyam propose` posts
     nothing for a settled slice, so the refusal does not name it.
-  - Cost, accepted: any later owner `Decision:` on the slice re-settles its
-    body as it then stands, even one about something else.
+  - Cost, accepted: any later unedited owner `Decision:` on the slice, or
+    on its Work item naming it, re-settles its body as it then stands,
+    even one about something else.

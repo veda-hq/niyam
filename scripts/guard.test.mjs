@@ -462,7 +462,7 @@ describe('judging a pull request', () => {
       const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/9/timeline`]: events } }), REPO, 1, OWNERS);
       assert.match(refusal.message, /Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, is not approved by Owner/);
       // A new proposal settles nothing here, so the remedy is what the problem names (#534).
-      assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and have Owner answer as this says; then edit/);
+      assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and have Owner put the `approved` label on Work item #9, https:\/\/github\.com\/o\/r\/issues\/9; then edit/);
       assert.doesNotMatch(refusal.message, /new `Proposal:`/);
     }
   });
@@ -470,6 +470,7 @@ describe('judging a pull request', () => {
   test('a slice under no Work item is refused', async () => {
     const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 404, json: { message: 'No parent issue found' } } } }), REPO, 1, OWNERS);
     assert.match(refusal.message, /slice #10 is not a sub-issue of a Work item GitHub can read \(HTTP 404\)/);
+    assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and add slice #10, https:\/\/github\.com\/o\/r\/issues\/10, as a sub-issue of its Work item, and have Owner approve it there; then edit/);
   });
 
   test('a slice added after approval counts from the Decision that settled it', async () => {
@@ -616,7 +617,8 @@ describe('judging a pull request', () => {
       const [refusal, ...rest] = await run(over, agents);
       // With no agents named no 👍 can count, so the refusal does not offer one.
       assert.match(refusal.message, agents.length > 0 ? /has written no unedited Decision: settling it since, nor reacted 👍 to an agent's proposal for it\./ : /has written no unedited Decision: settling it since\./);
-      assert.match(refusal.message, /and have Owner answer as this says; then edit/);
+      // The remedy is the answer still missing, never a new proposal (#534).
+      assert.match(refusal.message, agents.length > 0 ? /section, and have Owner react 👍 to (the agent's proposal for slice #10, on|a `Proposal:` for slice #10 that the agent posts on) https:\/\/github\.com\/o\/r\/issues\/10, or write a `Decision:` there; then edit/ : /section, and have Owner write a `Decision:` on slice #10, https:\/\/github\.com\/o\/r\/issues\/10; then edit/);
       assert.deepEqual(rest, []);
     }
 
@@ -624,6 +626,7 @@ describe('judging a pull request', () => {
     const at = 'https://github.com/o/r/issues/10#issuecomment-1';
     const [linked] = await run({ ...onSlice(proposal({ html_url: at })), ...thumbs('2026-01-06T00:00:00Z', 'AthyaBot') });
     assert.match(linked.message, /nor reacted 👍 to an agent's proposal for it, https:\/\/github\.com\/o\/r\/issues\/10#issuecomment-1\./);
+    assert.match(linked.message, /and have Owner react 👍 to the agent's proposal for slice #10, https:\/\/github\.com\/o\/r\/issues\/10#issuecomment-1, or write a `Decision:` there; then edit/);
     const [bare] = await run({ ...onSlice(proposal({ html_url: 'not a link' })), ...thumbs('2026-01-06T00:00:00Z', 'AthyaBot') });
     assert.match(bare.message, /nor reacted 👍 to an agent's proposal for it\./);
 
