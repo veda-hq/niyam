@@ -199,6 +199,30 @@ describe('board-audit', () => {
       assert.ok(readsAs(sys, AGENT_TOKEN));
     });
 
+    it("reads the keychain under the login as niyam machine spelled it, whatever case the settings use", async () => {
+      const { sys } = setUp({ agent: 'examplebot' });
+      sys.env = {};
+      setUpAgent(sys, 'ExampleBot');
+      sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      const { code, err } = await audit(sys);
+      assert.deepEqual(err, []);
+      assert.equal(code, 0);
+      assert.ok(readsAs(sys, AGENT_TOKEN));
+    });
+
+    it("takes a locked session's placeholder as no token: reads nothing, and never the keychain's instead", async () => {
+      const { sys } = setUp();
+      sys.env = { GH_TOKEN: 'niyam-no-agent-token' };
+      sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      assert.deepEqual(await audit(sys), {
+        code: 1,
+        out: [],
+        err: ["niyam board-audit: board-audit has no token: GH_TOKEN is the lock's niyam-no-agent-token, as in a session niyam has not given the agent identity, so nothing was read; run niyam doctor"],
+      });
+      assert.deepEqual(sys.requests, []);
+      assert.ok(!sys.calls.some((call) => call.command === '/usr/bin/security'), 'never reads the keychain');
+    });
+
     it('outside a clone, reads as the one agent niyam machine set up on this Mac', async () => {
       const { sys } = setUp();
       sys.env = {};

@@ -1,4 +1,4 @@
-import { API, SETTINGS_PATH, agentHere, agentsSetUp, hasSettings, loadSettings, readToken, repoAt } from './agent.ts';
+import { API, NO_TOKEN, SETTINGS_PATH, agentHere, agentsSetUp, hasSettings, isNoToken, loadSettings, readToken, repoAt, sameLogin } from './agent.ts';
 import { AUTO_ADD, AUTO_ADD_FILTER, graphql } from './board.ts';
 import type { Output, Sys } from './types.ts';
 
@@ -183,18 +183,25 @@ export function auditLines(audit: Audit, slug: string): { lines: string[]; wrong
  * owner's own token, which `machine` signs out of `gh` (veda-hq/niyam#548).
  */
 export function auditToken(sys: Sys): string {
-  if (sys.env.GH_TOKEN) return sys.env.GH_TOKEN;
+  const given = sys.env.GH_TOKEN;
+  // A locked session's placeholder is no token, and the lock is never worked around with the keychain's.
+  if (isNoToken(given)) throw new Error(`board-audit has no token: GH_TOKEN is the lock's ${NO_TOKEN}, as in a session niyam has not given the agent identity, so nothing was read; run niyam doctor`);
+  if (given) return given;
   const agent = auditAgent(sys);
   if ('problem' in agent) throw new Error(`board-audit needs GH_TOKEN, as an agent session has it, or the agent's token from this Mac's keychain: ${agent.problem}`);
-  const token = readToken(sys, agent.agent);
-  if (!token) throw new Error(`board-audit needs GH_TOKEN, as an agent session has it, or ${agent.agent}'s token from this Mac's keychain, which holds none; run niyam machine ${agent.agent}`);
+  // The keychain item is under the login as `machine` spelled it, which the settings may spell in another case.
+  const login = agentsSetUp(sys).find((one) => sameLogin(one, agent.agent)) ?? agent.agent;
+  const token = readToken(sys, login);
+  if (!token) throw new Error(`board-audit needs GH_TOKEN, as an agent session has it, or ${login}'s token from this Mac's keychain, which holds none; run niyam machine ${login}`);
   return token;
 }
 
 /**
  * The agent whose token the audit reads with outside an agent session: in a
- * clone, the one its settings name that sessions here work as (`agentHere`);
- * elsewhere, the one `machine` set up on this Mac. Never a guess.
+ * clone with settings, the one they name that sessions here work as
+ * (`agentHere`); elsewhere, the one `machine` set up on this Mac. A clone
+ * without settings counts as elsewhere: the audit takes any repository by
+ * name, so it needs no client clone. Never a guess.
  */
 function auditAgent(sys: Sys): { agent: string } | { problem: string } {
   const top = sys.exec('git', ['rev-parse', '--show-toplevel'], { cwd: sys.cwd });

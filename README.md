@@ -746,7 +746,8 @@ as in the owner's terminal, it reads as the agent, with the token `machine`
 keeps in the keychain: the agent the clone's settings name, or outside a
 clone the one `machine` set up on this Mac. So it needs no `gh` signed in,
 and never the owner's own token. With no such token, or several agents and
-none named, it says so and reads nothing. It exits 0 when the board matches,
+none named, it says so and reads nothing; so it does in a locked session,
+whose `GH_TOKEN` is the lock's placeholder. It exits 0 when the board matches,
 3 when something is to fix, and 1 when it could not check. A Claude cloud
 session's GitHub proxy refuses GraphQL and an organisation's Projects
 (veda-hq/niyam#399), so there it says it cannot run and checks nothing.
