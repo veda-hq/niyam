@@ -652,11 +652,13 @@ slice may be built:
   slice, and when the slice is closed already, so the pull request is a fix,
   it names at least one open State: the one the fix is filed as.
 
-Every refusal that sends the agent to the owner, here, in Guard, in
-`propose` and in the needs-owner job, names the full `https://github.com/…`
-address to act at: the proposal comment's own `#issuecomment-` link where
-there is one, else the issue's, and the Approvals issue's. The agent passes
-that link on, never a bare number (#557).
+A refusal that sends the agent to the owner about an issue or a comment,
+here, in Guard, in `propose` and in the needs-owner job, names its full
+`https://github.com/…` address, once, where it first names it: the
+proposal comment's own `#issuecomment-` link where there is one, else the
+issue's, and the Approvals issue's. The agent passes that link on, never a
+bare number (#557). Guard's refusal for a pull request that names no slice
+has no issue to link yet: it says to add the `Slice:` line first.
 
 **One comment answers a batch.** Settings that name the repository's standing
 Approvals issue (`"approvals": N`) let the owner answer many asks at once:

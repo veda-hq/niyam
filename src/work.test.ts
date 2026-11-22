@@ -717,6 +717,10 @@ describe('sliceProblems', () => {
       assert.deepEqual(await problems(graph().issue, [given]), [
         "#12 already has pull request #5, https://github.com/example-org/example-app/pull/5?given; one slice, one pull request. If #5 is superseded, close it and delete its branch: git push origin --delete 'it'\\''s mine'",
       ]);
+      // A branch git would read as an option or a forced push is named in full.
+      for (const ref of ['-x', '+x']) {
+        assert.deepEqual(await problems(graph().issue, [pull(5, 'Slice: #12', ref)]), [second(5, `refs/heads/${ref}`)]);
+      }
     });
 
     it('reads every page of open pull requests', async () => {

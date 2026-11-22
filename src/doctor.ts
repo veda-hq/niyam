@@ -5,6 +5,7 @@ import {
   agentFrom,
   agentIn,
   anyLogin,
+  githubSlug,
   either,
   hasSettings,
   loadSettings,
@@ -20,7 +21,7 @@ import {
   tokenInfo,
 } from './agent.ts';
 import { LOCKED, clientHooks, hooksHittingLock } from './as-agent.ts';
-import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
+import { FROM_SETUP, SIGNING_KEY_VAR, cloudLogin, cloudToken, fileFromSetup, ranFromSetup, repoReleases } from './cloud.ts';
 import { GITHUB_NOREPLY, GITHUB_WEB } from './host.ts';
 import { featuresIn, readRepo } from './features.ts';
 import { callerAt, callerIsOnboards, pushBranch } from './guard-caller.ts';
@@ -234,13 +235,14 @@ async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Fi
  * and the settings page by its full address. GitHub not saying says nothing.
  */
 async function branchFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
-  let slug: string;
+  let slug: string | undefined;
   let owner: string;
   try {
-    const found = repoAt(sys);
-    if (!token || !hasSettings(sys, found.root)) return [];
-    slug = found.slug;
-    owner = either(loadSettings(sys, found.root).owners);
+    // The repository the session works in, as the caller check reads it, wherever doctor runs from.
+    const root = repoRoot(sys);
+    slug = githubSlug(sys.exec('git', ['remote', 'get-url', 'origin'], { cwd: root }).stdout.trim());
+    if (!token || !slug || !hasSettings(sys, root)) return [];
+    owner = either(loadSettings(sys, root).owners);
   } catch {
     // fail-open: outside a client's clone, or settings doctor cannot read, there is no repository to check; onboard says what is wrong with them.
     return [];
@@ -510,6 +512,8 @@ async function cloudDoctor(sys: Sys, io: Output, named?: string): Promise<number
   );
   const agent = given ?? ('login' in asked ? asked.login : undefined);
   if (agent !== undefined) github.push(cloudCommits(sys, agent));
+  // The repository's own setting reads through the proxy as on a Mac (#557).
+  github.push(...(await branchFindings(sys, cloudToken(sys))));
 
   const about ='login' in asked ? asked.login : agents !== undefined ? either(agents) : 'this cloud session';
   return report(sys, io, about, [

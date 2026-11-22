@@ -80,7 +80,7 @@ describe('decide', () => {
       assert.ok(reason(decide(facts({ ...over, left: [LEFT] }), null, SETTINGS)).includes(told), JSON.stringify(over));
     }
     const merged = reason(decide(facts({ pr: open({ state: 'MERGED' }), left: [LEFT, { ...LEFT, number: 3, ref: "it's" }] }), null, SETTINGS));
-    assert.match(merged, /^PR 7 merged branch feature, and started work ends with no closed branch left behind\. PR 4, .*; PR 3, .*`git push origin --delete 'it'\\''s'`, never asking the owner\. Do not end a turn/);
+    assert.match(merged, /^PR 7 merged branch feature, but closed pull requests for its slice left branches on origin, and started work ends only once they are gone\. PR 4, .*; PR 3, .*`git push origin --delete 'it'\\''s'`, never asking the owner\. Do not end a turn/);
     assert.doesNotMatch(merged, /older commit/);
     // A stop note, a running push and GitHub not answering still let it go.
     const note = { branch: 'feature', head: HEAD, reason: 'r', at: 'now', shown: true };
@@ -357,7 +357,8 @@ describe('gather', () => {
   describe("closed pull requests' branches left on origin (#557)", () => {
     const REPO = '/repos/example-org/example-app';
     const CLOSED = `${REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100`;
-    const OPEN = `${REPO}/pulls?state=open&per_page=100`;
+    /** The open pull requests from branch old-try, asked by head so no page hides one. */
+    const OPEN = `${REPO}/pulls?state=open&head=example-org%3Aold-try&per_page=100`;
     const closedPull = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
       number: 4,
       body: 'Slice: #12',

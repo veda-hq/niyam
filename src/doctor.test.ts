@@ -612,8 +612,16 @@ describe('doctor', () => {
       const sys = healthy();
       const http = sys.http.bind(sys);
       sys.http = (url, options) => (url.endsWith('/repos/example-org/example-app') ? Promise.reject(new Error('rate limited')) : http(url, options));
-      const { out } = await check(sys);
+      const { code, out } = await check(sys);
+      assert.equal(code, 0, out.join('\n'));
       assert.ok(marked(out, '▲').includes('▲  merged branches: cannot ask GitHub (rate limited) → niyam doctor again'), out.join('\n'));
+    });
+
+    it('reads the repository the session works in, wherever doctor runs from', async () => {
+      const sys = repo(healthy(), false);
+      sys.env = { ...sys.env, CLAUDE_PROJECT_DIR: ROOT };
+      sys.cwd = '/elsewhere';
+      assert.ok(marked((await check(sys, AGENT)).out, '✗').some((line) => line.includes('Automatically delete head branches')));
     });
   });
 
@@ -712,6 +720,15 @@ describe('doctor in a Claude cloud session', () => {
     if (login) sys.acceptToken(PROXY_TOKEN, login);
     return sys;
   }
+
+  it("checks that GitHub deletes merged pull requests' branches, through the proxy (#557)", async () => {
+    const sys = cloud();
+    sys.route('GET', '/repos/example-org/example-app', { status: 200, json: { owner: { login: 'example-org', type: 'Organization' }, delete_branch_on_merge: false } });
+    const { code, out } = await check(sys);
+    assert.equal(code, 1);
+    assert.ok(marked(out, '✗').some((line) => line.includes('https://github.com/example-org/example-app/settings')), out.join('\n'));
+    assert.ok(sys.requests.some((request) => request.url.endsWith('/repos/example-org/example-app') && request.token === PROXY_TOKEN));
+  });
 
   it('passes when the environment is set up, its checks grouped as on a Mac', async () => {
     const sys = cloud();

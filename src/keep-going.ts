@@ -193,7 +193,7 @@ export function decide(facts: Facts, previous: Counter | null, settings: KeepGoi
     ? ['a commit, push or background task is running, and in print mode it dies with this turn: wait for it in the foreground']
     : [...leftOver, ...(merged ? [] : stillToDo(facts, pr, pushed))];
   const what = merged
-    ? `PR ${(pr as PullRequest).number} merged branch ${facts.branch}, and started work ends with no closed branch left behind`
+    ? `PR ${(pr as PullRequest).number} merged branch ${facts.branch}, but closed pull requests for its slice left branches on origin, and started work ends only once they are gone`
     : `Branch ${facts.branch} has ${facts.ahead} commit(s) origin/${settings.base} lacks, and started work runs to merge`;
   return {
     stop: false,
@@ -403,13 +403,12 @@ export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSe
     return [{ number: pull.number as number, url: pullUrl(slug, pull.number as number, pull.html_url), ref }];
   });
   if (candidates.length === 0) return [];
-  // A branch an open pull request still builds from is not left over.
-  const open = await list('state=open&per_page=100');
-  if (!open) return [];
-  const live = new Set(open.flatMap((pull) => (here(pull) && typeof pull.head?.ref === 'string' ? [pull.head.ref] : [])));
   const left: LeftBranch[] = [];
   for (const one of candidates) {
-    if (live.has(one.ref) || left.some((other) => other.ref === one.ref)) continue;
+    if (left.some((other) => other.ref === one.ref)) continue;
+    // A branch an open pull request still builds from is not left over: asked by its own head, so no page can hide one.
+    const open = await list(`state=open&head=${encodeURIComponent(`${slug.split('/')[0]}:${one.ref}`)}&per_page=100`);
+    if (!open || open.some((pull) => here(pull) && pull.head?.ref === one.ref)) continue;
     const ref = await sys.http(`${GITHUB_API}/repos/${slug}/git/ref/heads/${one.ref.split('/').map(encodeURIComponent).join('/')}`, { token, timeoutMs: 15_000 }).catch(() => {
       // fail-open: a branch GitHub cannot be asked about is not held against the session.
       return undefined;

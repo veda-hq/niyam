@@ -371,9 +371,14 @@ export function pullUrl(slug: string, number: number, given?: unknown): string {
   return typeof given === 'string' && given.startsWith('https://') ? given : `${GITHUB_WEB}/${slug}/pull/${number}`;
 }
 
-/** The command that deletes branch `ref` on origin, quoted where the shell would read it otherwise. */
+/**
+ * The command that deletes branch `ref` on origin, quoted where the shell
+ * would read it otherwise. A branch starting `-` or `+` is named in full,
+ * `refs/heads/…`, so git reads it neither as an option nor as a forced push.
+ */
 export function deleteBranchCommand(ref: string): string {
-  return `git push origin --delete ${/^[\w./+-]+$/.test(ref) ? ref : `'${ref.replaceAll("'", "'\\''")}'`}`;
+  const target = /^[-+]/.test(ref) ? `refs/heads/${ref}` : ref;
+  return `git push origin --delete ${/^[\w./+-]+$/.test(target) ? target : `'${target.replaceAll("'", "'\\''")}'`}`;
 }
 
 /**
