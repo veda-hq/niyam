@@ -34,7 +34,8 @@ before the Work item is approved. niyam's own onboard pull request after the rel
 `Slice: #N` and a State under it.
 
 #397 named the workflow alone, so Guard refused #414. The owner had to amend the slice's
-**Guards:** and put `approved` back on #399.
+**Guards:** and put `approved` back on #399. Since #534, a new `Proposal:` for the slice and
+the owner's 👍 on it is enough.
 
 ## Renames
 

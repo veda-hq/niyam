@@ -1898,15 +1898,16 @@ pull request's, and the Guard it calls runs from that release: a fix to
 pull requests once it is released. It reads the pull request's changed files
 from GitHub's API as data and never checks out its code. A change to a guard
 file passes only when the pull request's slice names it in a `**Guards:**`
-section, one already in the slice when the owner put `approved` on its Work
-item (for a slice added later, when the owner's `Decision:` settled it):
+section, read as the slice stood at the owner's latest answer:
 
 ```markdown
 **Guards:** `.github/workflows/ci.yml`, `scripts/*.mjs`, `.githooks/`
 ```
 
-For a slice added later, the first unedited answer from an owner since the
-slice joined counts, wherever it is:
+Guard counts answers since the later of the slice joining its Work item and
+the Work item's last `approved` label (#534). For a slice already there, the
+label is an answer itself. The latest unedited answer from an owner counts,
+wherever it is:
 - a `Decision:` on the slice;
 - a `Decision:` on its Work item naming it;
 - a batch answer on the Approvals issue the default branch's settings name
@@ -1918,8 +1919,17 @@ slice joined counts, wherever it is:
   the work rules read it (#515). A proposal GitHub no longer has counts
   nothing.
 
+So to approve a slice again after its **Guards:** section changes, the agent
+posts a new `Proposal:` comment for it and the owner 👍s it, or the owner
+writes a new `Decision:`. `niyam propose` posts nothing for a slice already
+settled, so the agent writes that comment itself. An edit to the slice after
+the latest answer counts for nothing. So does a 👍 on a proposal edited after
+it. Any later `Decision:` re-settles the slice, even one about something
+else.
+
 If GitHub cannot find the Approvals issue, Guard counts nothing from it and
-goes on. Any other failure to read it fails closed.
+goes on. Any other failure to read it, or any proposal's reactions, fails
+closed.
 
 **Mergify's merge queue (#507).** Mergify tests a queued pull request in a draft of its own:
 - opened as `mergify[bot]` on a `mergify/merge-queue/` branch of the repository;
