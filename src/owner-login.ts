@@ -1,4 +1,4 @@
-import { API, sameLogin } from './agent.ts';
+import { API, publicRead, rateLimited, sameLogin } from './agent.ts';
 import type { Feature } from './features.ts';
 import type { Sys } from './types.ts';
 import { GITHUB_HOST } from './host.ts';
@@ -21,12 +21,18 @@ export function ownerScopes(features: readonly Feature[], organisation: boolean)
   return organisation ? ['project', 'admin:org'] : ['project'];
 }
 
-/** Whether GitHub names the account an organisation; throws when GitHub will not say. */
-export async function isOrganisation(sys: Sys, login: string): Promise<boolean> {
-  const { status, json } = await sys.http(`${API}/users/${login}`);
-  const type = (json as { type?: unknown } | null)?.type;
-  if (status !== 200 || typeof type !== 'string') throw new Error(`cannot tell whether ${login} is an organisation (HTTP ${status})`);
-  return type === 'Organization';
+/**
+ * Whether GitHub names the account an organisation; throws when GitHub will
+ * not say, naming its rate limit when that is why. Asked with `token`, which
+ * every caller passes or says it has none of: with none, the read shares the
+ * 60 an hour every request from this address has (#546).
+ */
+export async function isOrganisation(sys: Sys, login: string, token: string | undefined): Promise<boolean> {
+  const { answer, token: used } = await publicRead(sys, `${API}/users/${login}`, token);
+  const type = (answer.json as { type?: unknown } | null)?.type;
+  if (answer.status === 200 && typeof type === 'string') return type === 'Organization';
+  const limited = rateLimited(answer, used);
+  throw new Error(`cannot tell whether ${login} is an organisation${limited ? `: ${limited}` : ` (HTTP ${answer.status})`}`);
 }
 
 /** gh's lines from a sign-in that tell the owner nothing they need: its sign-in tips and the setup it did in the temporary folder. */

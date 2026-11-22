@@ -111,8 +111,45 @@ describe('isOrganisation', () => {
     const sys = new FakeSys();
     sys.route('GET', '/users/example-org', { status: 200, json: { login: 'example-org', type: 'Organization' } });
     sys.route('GET', '/users/someone', { status: 200, json: { login: 'someone', type: 'User' } });
-    assert.equal(await isOrganisation(sys, 'example-org'), true);
-    assert.equal(await isOrganisation(sys, 'someone'), false);
-    await assert.rejects(isOrganisation(sys, 'nobody'), /cannot tell whether nobody is an organisation \(HTTP 404\)/);
+    assert.equal(await isOrganisation(sys, 'example-org', undefined), true);
+    assert.equal(await isOrganisation(sys, 'someone', undefined), false);
+    await assert.rejects(isOrganisation(sys, 'nobody', undefined), /cannot tell whether nobody is an organisation \(HTTP 404\)/);
+  });
+
+  it('asks with the token it is given, so the read counts against the token and not this address (#546)', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', '/users/example-org', { status: 200, json: { login: 'example-org', type: 'Organization' } });
+    assert.equal(await isOrganisation(sys, 'example-org', 'ghp_agent'), true);
+    assert.deepEqual(sys.requests.map((request) => request.token), ['ghp_agent']);
+  });
+
+  it('asks again with no token when GitHub refuses the token', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', '/users/example-org', () =>
+      sys.requests.at(-1)?.token ? { status: 401, json: { message: 'Bad credentials' } } : { status: 200, json: { login: 'example-org', type: 'Organization' } },
+    );
+    assert.equal(await isOrganisation(sys, 'example-org', 'ghp_expired'), true);
+    assert.deepEqual(sys.requests.map((request) => request.token), ['ghp_expired', undefined]);
+  });
+
+  it('names the rate limit and when it resets, not a bare status, when GitHub refuses for it', async () => {
+    const sys = new FakeSys();
+    // The answer the owner's Mac had on 2026-11-22: no requests left of 60, resetting at 08:55:21Z.
+    const limited = { 'x-ratelimit-limit': '60', 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1795337721' };
+    sys.route('GET', '/users/veda-hq', { status: 403, json: { message: 'API rate limit exceeded' }, headers: limited });
+    await assert.rejects(
+      isOrganisation(sys, 'veda-hq', undefined),
+      { message: "cannot tell whether veda-hq is an organisation: GitHub's limit for requests with no token, 60 an hour from this address, has run out until 08:55 UTC (HTTP 403)" },
+    );
+    sys.route('GET', '/users/veda-hq', { status: 429, json: null, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1795337721' } });
+    await assert.rejects(isOrganisation(sys, 'veda-hq', 'ghp_agent'), {
+      message: "cannot tell whether veda-hq is an organisation: GitHub's rate limit for the token has run out until 08:55 UTC (HTTP 429)",
+    });
+  });
+
+  it('keeps the bare status for a 403 that is not the rate limit', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', '/users/veda-hq', { status: 403, json: null, headers: { 'x-ratelimit-remaining': '12' } });
+    await assert.rejects(isOrganisation(sys, 'veda-hq', undefined), { message: 'cannot tell whether veda-hq is an organisation (HTTP 403)' });
   });
 });

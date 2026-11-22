@@ -1,5 +1,5 @@
 import { KEYCHAIN, type TokenStore, tokenStore } from './token-store.ts';
-import type { Sys } from './types.ts';
+import type { HttpResult, Sys } from './types.ts';
 import { GITHUB_API, GITHUB_HOST_RE, GITHUB_NOREPLY, GITHUB_SSH, GITHUB_SSH_443, GITHUB_WEB } from './host.ts';
 import { AGENT_VAR, CLI, CONFIG_DIR } from './names.ts';
 
@@ -474,16 +474,55 @@ export function readToken(sys: Sys, agent: string): string | undefined {
 }
 
 /**
+ * What GitHub's refusal says when it is its rate limit, a 403 or 429 with
+ * `x-ratelimit-remaining: 0`, whose limit ran out, with no token the 60 an
+ * hour every request from this address shares (#546), and when it resets,
+ * from `x-ratelimit-reset` in UTC epoch seconds. Undefined for any other
+ * answer. GitHub's REST docs, "Rate limits for the REST API", section
+ * "Exceeding the rate limit" (read 2026-11-22; the link is on #546's PR).
+ */
+export function rateLimited(answer: HttpResult, token: string | undefined): string | undefined {
+  const headers = answer.headers ?? {};
+  if ((answer.status !== 403 && answer.status !== 429) || headers['x-ratelimit-remaining'] !== '0') return undefined;
+  const reset = Number(headers['x-ratelimit-reset']);
+  const until = Number.isInteger(reset) && reset > 0 ? ` until ${new Date(reset * 1000).toISOString().slice(11, 16)} UTC` : '';
+  const whose = token ? "GitHub's rate limit for the token" : "GitHub's limit for requests with no token, 60 an hour from this address,";
+  return `${whose} has run out${until} (HTTP ${answer.status})`;
+}
+
+/**
+ * A read of GitHub's public API asked with `token`, so it counts against the
+ * token's limit rather than the one this address shares with no token (#546),
+ * and asked again with none only when GitHub refuses the token (401): a
+ * public read is answered without one. A `timeoutMs` bounds both asks
+ * together, the second getting what the first left, and none left gives the
+ * 401. Gives the token the answer came with.
+ */
+export async function publicRead(sys: Sys, url: string, token: string | undefined, options: { timeoutMs?: number } = {}): Promise<{ answer: HttpResult; token: string | undefined }> {
+  if (!token) return { answer: await sys.http(url, options), token: undefined };
+  const started = sys.now().getTime();
+  const answer = await sys.http(url, { ...options, token });
+  if (answer.status !== 401) return { answer, token };
+  if (options.timeoutMs === undefined) return { answer: await sys.http(url, options), token: undefined };
+  const left = options.timeoutMs - (sys.now().getTime() - started);
+  return left > 0 ? { answer: await sys.http(url, { ...options, timeoutMs: left }), token: undefined } : { answer, token };
+}
+
+/**
  * An account's numeric id and its login as GitHub spells it, from the public
  * API. Logins are case-insensitive; the stored token's item, the session file and
  * commits all use GitHub's spelling, whatever case the login was typed in.
  * A refusal or a passing failure (403, 429, 5xx) is asked again after each of
- * ACCOUNT_WAITS_MS; only a 404 says the account does not exist.
+ * ACCOUNT_WAITS_MS; only a 404 says the account does not exist, and a rate
+ * limit run out, which no wait of seconds fixes, is said at once.
  */
 export async function account(sys: Sys, login: string, token?: string): Promise<{ id: number; login: string }> {
   for (let tries = 0; ; tries++) {
-    const { status, json } = await sys.http(`${API}/users/${login}`, token ? { token } : {});
+    const { answer, token: used } = await publicRead(sys, `${API}/users/${login}`, token);
+    const { status, json } = answer;
     if (status === 404) throw new Error(`GitHub has no account "${login}" (HTTP 404)`);
+    const limited = rateLimited(answer, used);
+    if (limited) throw new Error(`GitHub did not answer who account "${login}" is: ${limited}`);
     const wait = ACCOUNT_WAITS_MS[tries];
     if ((status === 403 || status === 429 || status >= 500) && wait !== undefined) {
       await sys.sleep(wait);

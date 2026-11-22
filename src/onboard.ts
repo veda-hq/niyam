@@ -1316,6 +1316,26 @@ export function claudeSettings(
   return { text, changes, labels, ...said };
 }
 
+/** The agents the checkout's settings name; none when it has none, or settings onboard refuses later with the reason. */
+function settingsAgents(sys: Sys, root: string): readonly string[] {
+  if (!sys.exists(`${root}/${SETTINGS_PATH}`)) return [];
+  try {
+    return loadSettings(sys, root).agents;
+  } catch {
+    // fail-open: the settings branch reads them again and refuses them with the reason; here they only suggest a token.
+    return [];
+  }
+}
+
+/** The token this Mac stores for the first of `agents` it has one for, or undefined. */
+function storedToken(sys: Sys, agents: readonly string[]): string | undefined {
+  for (const agent of agents) {
+    const token = readToken(sys, agent);
+    if (token) return token;
+  }
+  return undefined;
+}
+
 /** Who the run's sign-in is, the owner's likely login; undefined when it failed. */
 async function signedInLogin(signIn: () => Promise<OwnerToken | { problem: string }>): Promise<string | undefined> {
   const signed = await signIn().catch(() => undefined);
@@ -1455,9 +1475,18 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   const bar = paint.dim('│');
   const say = (line: string): void => io.out(`${bar}  ${line}`);
   const version = packageVersion();
+  // The token onboard's public reads ask GitHub with, so they count against its limit and not the 60 an hour this
+  // Mac's address shares with no token (#546), until the run knows its agent: the agent named, else the settings',
+  // and only with neither any agent machine set up here. Never the owner's sign-in, whose scopes depend on whether an
+  // organisation owns the repository.
+  // The token's item is under the login as the session file spells it, whatever case it was typed or written in.
+  const setUp = agentsSetUp(sys);
+  const known = named[1] ? [named[1]] : settingsAgents(sys, root);
+  const spelled = known.flatMap((login) => [login, ...setUp.filter((one) => one !== login && sameLogin(one, login))]);
+  let readAs = storedToken(sys, known.length > 0 ? spelled : setUp);
   // Whether an organisation owns the repository, asked of GitHub once in this run.
   let organisation: Promise<boolean> | undefined;
-  const byOrganisation = (): Promise<boolean> => (organisation ??= isOrganisation(sys, slug.split('/')[0] as string));
+  const byOrganisation = (): Promise<boolean> => (organisation ??= isOrganisation(sys, slug.split('/')[0] as string, readAs));
   const personal = `${slug} is owned by a personal account, and GitHub has issue types for organisations only`;
   // The repository's files are changed only through the agent's pull request at the end: until then each
   // change is held here, and read back from here, so the owner's checkout is never modified.
@@ -1489,7 +1518,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   const aheadHere = newerPinHere(fileAt, version);
   if (aheadHere !== undefined) return refuseOlder(io, slug, aheadHere, version);
   // The workflow and cloud-setup.sh pin this release: a tag off main is not one (P-61).
-  const onMain = await tagOnMain(sys, version);
+  const onMain = await tagOnMain(sys, version, readAs);
   if ('problem' in onMain) {
     io.err(`onboard: ${onMain.problem}; nothing changed`);
     return 1;
@@ -1571,8 +1600,9 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
       notes.push(`- onboard signed in before showing its plan: ${SETTINGS_PATH} names several owners, and only the sign-in tells which one ran it.`);
     }
     // GitHub's spelling, which the keychain, the session file and commits use.
-    owner = (await account(sys, chosenOwner)).login;
-    agent = (await account(sys, here.agent)).login;
+    owner = (await account(sys, chosenOwner, readAs)).login;
+    agent = (await account(sys, here.agent, readAs)).login;
+    readAs = readToken(sys, agent) ?? readAs;
     // Before any change, so a refused --add leaves the settings as they were.
     if (add && !features.includes(add) && NEEDS_ISSUE_TYPES.includes(add) && !(await byOrganisation())) {
       io.err(`onboard: ${personal}, so ${add} cannot run here`);
@@ -1643,8 +1673,9 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     for (const login of [namedOwner, namedAgent]) {
       if (!isLogin(login)) throw new Error(`"${login}" is not a GitHub login`);
     }
-    owner = (await account(sys, namedOwner)).login;
-    agent = (await account(sys, namedAgent)).login;
+    owner = (await account(sys, namedOwner, readAs)).login;
+    agent = (await account(sys, namedAgent, readAs)).login;
+    readAs = readToken(sys, agent) ?? readAs;
     if (sameLogin(owner, agent)) {
       io.err('onboard: the owner and the agent must be different accounts');
       return 1;
@@ -1698,7 +1729,7 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     io.err(`onboard: this Mac is not set up for ${agent} (${why}); run niyam machine ${agent}, then onboard again`);
     return 1;
   }
-  const { id } = await account(sys, agent);
+  const { id } = await account(sys, agent, token);
 
   let reach = await access(sys, slug, token);
   if (reach.kind === 'refused') {

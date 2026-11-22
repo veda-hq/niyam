@@ -30,6 +30,7 @@ import {
   lockScript,
   noreplyEmail,
   pathsFor,
+  rateLimited,
   repoAt,
   sameLogin,
   sessionEnv,
@@ -473,10 +474,35 @@ describe('GitHub reads', () => {
     await assert.rejects(account(refused, 'ExampleBot', 'bad'), /did not answer who account "ExampleBot" is \(HTTP 401\)/);
     const garbled = new FakeSys().route('GET', '/users/ExampleBot', { status: 200, json: { login: AGENT } });
     await assert.rejects(account(garbled, 'ExampleBot'), /did not answer who account "ExampleBot" is \(HTTP 200\)/);
-    for (const sys of [missing, refused, garbled]) {
+    for (const sys of [missing, garbled]) {
       assert.equal(sys.requests.length, 1);
       assert.deepEqual(sys.slept, []);
     }
+    // A token GitHub refuses is dropped for one more ask with none, the read being public (#546).
+    assert.deepEqual(refused.requests.map((request) => request.token), ['bad', undefined]);
+    assert.deepEqual(refused.slept, []);
+  });
+
+  it('says at once that a rate limit ran out, with its reset, rather than waiting seconds for it (#546)', async () => {
+    const limited = new FakeSys().route('GET', '/users/ExampleBot', {
+      status: 403,
+      json: { message: 'API rate limit exceeded' },
+      headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1795337721' },
+    });
+    await assert.rejects(account(limited, 'ExampleBot'), {
+      message: `GitHub did not answer who account "ExampleBot" is: GitHub's limit for requests with no token, 60 an hour from this address, has run out until 08:55 UTC (HTTP 403)`,
+    });
+    assert.equal(limited.requests.length, 1);
+    assert.deepEqual(limited.slept, []);
+  });
+
+  it('names a rate limit only for a 403 or 429 with none left, and its reset only when GitHub gives one', () => {
+    const none = { 'x-ratelimit-remaining': '0' };
+    assert.equal(rateLimited({ status: 403, json: null, headers: none }, undefined), "GitHub's limit for requests with no token, 60 an hour from this address, has run out (HTTP 403)");
+    assert.equal(rateLimited({ status: 429, json: null, headers: { ...none, 'x-ratelimit-reset': 'soon' } }, 'tok'), "GitHub's rate limit for the token has run out (HTTP 429)");
+    assert.equal(rateLimited({ status: 403, json: null, headers: { 'x-ratelimit-remaining': '1' } }, undefined), undefined);
+    assert.equal(rateLimited({ status: 403, json: null }, undefined), undefined);
+    assert.equal(rateLimited({ status: 500, json: null, headers: none }, undefined), undefined);
   });
 
   it("reads a token's login, scopes and end", async () => {

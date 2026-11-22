@@ -1749,9 +1749,9 @@ the app's client id and private key are the `npm` environment's
 package is on npm as `@veda-hq/niyam`, with provenance, for a repository that
 pins it as an exact version; it publishes from the `npm` environment, which
 only `main` may deploy to. A tag on any other commit is not a release:
-`niyam upgrade` and `niyam onboard` ask GitHub's compare API, with no token,
-whether the tag's commit is on `main`, and refuse one that is not, naming the
-tag and the commit. Install the attached package on each machine with pnpm,
+`niyam upgrade` and `niyam onboard` ask GitHub's compare API whether the
+tag's commit is on `main`, and refuse one that is not, naming the tag and the
+commit. `upgrade` asks with no token; `onboard` asks with the agent's. Install the attached package on each machine with pnpm,
 once; nothing is built on install:
 
 ```bash
@@ -1791,8 +1791,20 @@ CLI running, refuses and says to run `niyam upgrade` first.
 
 `onboard` pins the client's workflow to one version, the release of the CLI
 that ran it, and writes `.github/niyam/cloud-setup.sh` at the same one. First
-it asks GitHub's compare API, with no token, whether that release's tag is on
-`main`; when it is not, or GitHub cannot say, it refuses and changes nothing.
+it asks GitHub's compare API whether that release's tag is on `main`; when it
+is not, or GitHub cannot say, it refuses and changes nothing.
+
+onboard reads GitHub's public API (the release tag, who the owner and the
+agent are, whether an organisation owns the repository) with the agent's
+stored token (#546). Those reads then count against the token's 5,000 an hour.
+With no token they would share the 60 an hour every request from the Mac's
+address gets. Until the run knows its agent, it uses the agent named on the
+command line, else the agent the settings name, else any agent `machine` set
+up on the Mac. It never uses the owner's sign-in for these reads. When GitHub
+refuses the token (HTTP 401, and only then), the read is asked again with
+none, within the time the first ask had. When GitHub refuses a read for its
+rate limit (403 or 429 with `x-ratelimit-remaining: 0`), onboard names the
+limit, and when it resets if GitHub sends a valid `x-ratelimit-reset`.
 Each job writes the pin twice, `checks.yml@vX.Y.Z` and, two lines
 below it under `with:`, `niyam-ref: vX.Y.Z`, the one input `checks.yml`
 declares; GitHub refuses a caller that passes an input the called workflow
