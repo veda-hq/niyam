@@ -2630,3 +2630,26 @@
     agent to the owner names the full `https://github.com/…` address to
     act at: the proposal comment's own where there is one, else the
     issue's.
+- **2026-11-22 — Decision: Guard reads a slice as of the owner's latest
+  answer (slice #534 of #468).** Alok asked for the fix after
+  veda-hq/veda#383, then approved #534's proposal with a 👍. This supersedes
+  the "earliest answer" lines of #501 and #515 above.
+  - On veda-hq/veda#376 his 👍 settled the slice. An agent then added a
+    **Guards:** section and proposed again, and he 👍'd that. Guard still
+    read the first 👍 and refused veda-hq/veda#383 until he re-added
+    `approved` on veda-hq/veda#43. athya_mono#3814 and #3845 hit the same
+    thing. Guard's own remedy, "approve the slice again", did nothing.
+  - Guard now reads **Guards:** as the slice stood at the owner's latest
+    answer since the later of the slice joining its Work item and the Work
+    item's last `approved` label. For a slice already there, the label is
+    an answer too, so later answers move it as well.
+  - An agent's edit after that answer still counts for nothing, nor does a
+    👍 on a proposal edited after it. Every proposal's reactions are read,
+    since an old proposal's 👍 can be the latest, and a failed read fails
+    closed.
+  - The refusal says what works: a new `Proposal:` comment on the slice,
+    which the owner 👍s, or a new `Decision:`. `niyam propose` posts
+    nothing for a settled slice, so the refusal does not name it.
+  - Cost, accepted: any later unedited owner `Decision:` on the slice, or
+    on its Work item naming it, re-settles its body as it then stands,
+    even one about something else.

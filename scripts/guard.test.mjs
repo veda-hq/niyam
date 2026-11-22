@@ -497,9 +497,10 @@ describe('judging a pull request', () => {
     assert.equal(rest.length, 0);
     assert.equal(refusal.file, '.githooks/pre-push');
     assert.match(refusal.message, /changes a guard file, \.githooks\/pre-push/);
-    assert.match(refusal.message, /slice #10's \*\*Guards:\*\* section, as it stood when Work item #9 got the approved label/);
+    assert.match(refusal.message, /slice #10's \*\*Guards:\*\* section, as it stood when Work item #9 got the approved label \(2026-01-02T00:00:00Z\), Owner's latest answer, does not name it/);
     // The slice by its full address, where the owner approves it again, so the agent can pass the link on (#557).
-    assert.match(refusal.message, /name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and have Owner approve the slice again at https:\/\/github\.com\/o\/r\/issues\/10;/);
+    // With no agents named no 👍 counts, so a new Decision is how the owner approves it again (#534).
+    assert.match(refusal.message, /name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, then have Owner write a `Decision:` on slice #10, https:\/\/github\.com\/o\/r\/issues\/10\. Guard reads the section as it stood at Owner's latest answer, so a new Decision is enough;/);
     assert.match(refusal.message, /edit or push this pull request/);
   });
   test('a Guards: line written after the approval does not count', async () => {
@@ -528,7 +529,7 @@ describe('judging a pull request', () => {
   test('a pull request that names no slice is refused', async () => {
     const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], pull: { body: null } }), REPO, 1, OWNERS);
     // With no slice there is no address to give yet.
-    assert.match(refusal.message, /names no slice\. Add a "Slice: #N" line to its body, name `\.githooks\/pre-push` in the slice's \*\*Guards:\*\* section, and have Owner approve the slice again; then edit/);
+    assert.match(refusal.message, /names no slice\. Add a "Slice: #N" line to its body, name `\.githooks\/pre-push` in the slice's \*\*Guards:\*\* section, and have Owner approve that slice; then edit/);
   });
 
   test('a Work item not approved, or approved by someone else, is refused', async () => {
@@ -538,12 +539,20 @@ describe('judging a pull request', () => {
     ]]) {
       const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/9/timeline`]: events } }), REPO, 1, OWNERS);
       assert.match(refusal.message, /Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, is not approved by Owner/);
+      // A new proposal settles nothing here, so the remedy is what the problem names (#534).
+      assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and have Owner put the `approved` label on Work item #9, https:\/\/github\.com\/o\/r\/issues\/9; then edit/);
+      assert.doesNotMatch(refusal.message, /new `Proposal:`/);
     }
   });
 
   test('a slice under no Work item is refused', async () => {
     const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 404, json: { message: 'No parent issue found' } } } }), REPO, 1, OWNERS);
     assert.match(refusal.message, /slice #10 is not a sub-issue of a Work item GitHub can read \(HTTP 404\)/);
+    assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and add slice #10, https:\/\/github\.com\/o\/r\/issues\/10, as a sub-issue of its Work item, and have Owner approve it there; then edit/);
+    // A parent GitHub does not answer for is no missing parent: the remedy is a re-run, not a new link.
+    const [unread] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 502, json: { message: 'Bad gateway' } } } }), REPO, 1, OWNERS);
+    assert.match(unread.message, /\(HTTP 502\)\. To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and run Guard again once GitHub answers for slice #10's Work item; then edit/);
+    assert.doesNotMatch(unread.message, /as a sub-issue/);
   });
 
   test('a slice added after approval counts from the Decision that settled it', async () => {
@@ -566,16 +575,19 @@ describe('judging a pull request', () => {
     const later = { [`/repos/${REPO}/issues/10/comments`]: [decision('2026-01-06T00:00:00Z')] };
     assert.deepEqual(await judge(github({ files, over: { ...joined, ...graphql, ...later } }), REPO, 1, OWNERS), []);
 
-    // One on the Work item naming the slice before it: the Guards: line came after it.
+    // One on the Work item naming the slice before it, alone: the Guards: line came after it.
     const onItem = {
       [`/repos/${REPO}/issues/9/timeline`]: [
         { event: 'labeled', label: { name: 'approved' }, actor: { login: 'Owner' }, created_at: APPROVED },
         { event: 'commented', ...decision('2026-01-04T00:00:00Z') },
-        { event: 'commented', ...decision('2026-01-04T01:00:00Z', { body: 'Decision: about #11' }) },
+        { event: 'commented', ...decision('2026-01-07T00:00:00Z', { body: 'Decision: about #11' }) },
       ],
     };
-    [refusal] = await judge(github({ files, over: { ...joined, ...graphql, ...later, ...onItem } }), REPO, 1, OWNERS);
-    assert.match(refusal.message, /as it stood when Owner's Decision: settled slice #10 \(2026-01-04T00:00:00Z\)/);
+    [refusal] = await judge(github({ files, over: { ...joined, ...graphql, ...onItem } }), REPO, 1, OWNERS);
+    assert.match(refusal.message, /as it stood when Owner's Decision: settled slice #10 \(2026-01-04T00:00:00Z\), Owner's latest answer/);
+
+    // The latest answer counts (#534): the Decision on the slice after the Guards: line passes, the earlier one aside.
+    assert.deepEqual(await judge(github({ files, over: { ...joined, ...graphql, ...later, ...onItem } }), REPO, 1, OWNERS), []);
 
     // An edited one, or another login's, does not count.
     const edited = { [`/repos/${REPO}/issues/10/comments`]: [decision('2026-01-06T00:00:00Z', { updated_at: '2026-01-07T00:00:00Z' }), decision('2026-01-06T00:00:00Z', { user: { login: 'AthyaBot' } })] };
@@ -618,10 +630,14 @@ describe('judging a pull request', () => {
       assert.deepEqual(rest, []);
     }
 
-    // The earliest of the three places counts: a batch answer before the Guards: line, a Decision on the slice after it.
+    // The latest of the three places counts (#534): a batch answer before the Guards: line alone is refused, and a
+    // Decision on the slice after it passes.
     const later = { [`/repos/${REPO}/issues/10/comments`]: [answer('Decision: yes', '2026-01-06T00:00:00Z')] };
-    let [refusal] = (await run({ ...later, ...batch(answer('Decision: approve #10', '2026-01-04T00:00:00Z')) })).refusals;
+    let [refusal] = (await run(batch(answer('Decision: approve #10', '2026-01-04T00:00:00Z')))).refusals;
     assert.match(refusal.message, /as it stood when Owner's batch answer on the Approvals issue, #7, settled slice #10 \(2026-01-04T00:00:00Z\)/);
+    assert.deepEqual((await run({ ...later, ...batch(answer('Decision: approve #10', '2026-01-04T00:00:00Z')) })).refusals, []);
+    // A batch answer after that Decision is the latest one, and passes as well.
+    assert.deepEqual((await run({ ...later, ...batch(answer('Decision: approve #10', '2026-01-08T00:00:00Z')) })).refusals, []);
 
     // An Approvals issue GitHub cannot find answers nothing, and the slice still passes on its own Decision.
     assert.deepEqual((await run(later)).refusals, []);
@@ -636,10 +652,15 @@ describe('judging a pull request', () => {
     assert.match(none.refusals[0].message, /has written no unedited Decision: settling it since\./);
     assert.ok(!none.calls.some((call) => call.includes('/issues/7/')));
 
-    // A slice there before the approval reads no Approvals issue either.
-    const gh = github({ files, over: batch(answer('Decision: approve #10')) });
-    await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 7);
-    assert.ok(!gh.calls.some((call) => call.includes('/issues/7/')));
+    // A slice there before the approval counts from it, and a batch answer since then moves it (#534): one after the
+    // Guards: line passes, one before the label counts for nothing.
+    const there = { '/graphql': { data: { repository: { issue: { ...issue, createdAt: '2026-01-01T00:00:00Z', userContentEdits: { totalCount: 2, nodes: [issue.userContentEdits.nodes[0], { editedAt: '2026-01-01T00:00:00Z', diff: 'none' }] } } } } } };
+    const before = (over) => judge(github({ files, over: { ...there, ...over } }), REPO, 1, OWNERS, [], 'main', undefined, 7);
+    [refusal] = await before({});
+    assert.match(refusal.message, /as it stood when Work item #9 got the approved label \(2026-01-02T00:00:00Z\)/);
+    assert.deepEqual(await before(batch(answer('Decision: approve #10'))), []);
+    [refusal] = await before(batch(answer('Decision: approve #10', '2026-01-01T12:00:00Z')));
+    assert.match(refusal.message, /as it stood when Work item #9 got the approved label/);
   });
 
   test("a slice added after approval counts from the owner's 👍 on the agent's proposal (#515)", async () => {
@@ -678,6 +699,8 @@ describe('judging a pull request', () => {
       const [refusal, ...rest] = await run(over, agents);
       // With no agents named no 👍 can count, so the refusal does not offer one.
       assert.match(refusal.message, agents.length > 0 ? /has written no unedited Decision: settling it since, nor reacted 👍 to an agent's proposal for it\./ : /has written no unedited Decision: settling it since\./);
+      // The remedy is the answer still missing, never a new proposal (#534).
+      assert.match(refusal.message, agents.length > 0 ? /section, and have Owner react 👍 to (the agent's proposal for slice #10, on|a `Proposal:` for slice #10 that the agent posts on) https:\/\/github\.com\/o\/r\/issues\/10, or write a `Decision:` there; then edit/ : /section, and have Owner write a `Decision:` on slice #10, https:\/\/github\.com\/o\/r\/issues\/10; then edit/);
       assert.deepEqual(rest, []);
     }
 
@@ -685,21 +708,62 @@ describe('judging a pull request', () => {
     const at = 'https://github.com/o/r/issues/10#issuecomment-1';
     const [linked] = await run({ ...onSlice(proposal({ html_url: at })), ...thumbs('2026-01-06T00:00:00Z', 'AthyaBot') });
     assert.match(linked.message, /nor reacted 👍 to an agent's proposal for it, https:\/\/github\.com\/o\/r\/issues\/10#issuecomment-1\./);
+    assert.match(linked.message, /and have Owner react 👍 to the agent's proposal for slice #10, https:\/\/github\.com\/o\/r\/issues\/10#issuecomment-1, or write a `Decision:` there; then edit/);
     const [bare] = await run({ ...onSlice(proposal({ html_url: 'not a link' })), ...thumbs('2026-01-06T00:00:00Z', 'AthyaBot') });
     assert.match(bare.message, /nor reacted 👍 to an agent's proposal for it\./);
 
-    // The earliest answer counts: a 👍 before the Guards: line, a Decision after it.
-    const early = onSlice(proposal({ created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' }), comment('Decision: yes', '2026-01-06T00:00:00Z', { id: 2, user: { login: 'Owner' } }));
-    let [refusal] = await run({ ...early, ...thumbs('2026-01-04T00:00:00Z') });
-    assert.match(refusal.message, /as it stood when Owner's 👍 on athyabot's proposal settled slice #10 \(2026-01-04T00:00:00Z\)/);
+    // The latest answer counts (#534): a 👍 before the Guards: line alone is refused, naming it, and the refusal says a
+    // 👍 on a new proposal approves the slice again; a Decision after the line passes.
+    const early = proposal({ created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' });
+    let [refusal] = await run({ ...onSlice(early), ...thumbs('2026-01-04T00:00:00Z') });
+    assert.match(refusal.message, /as it stood when Owner's 👍 on athyabot's proposal settled slice #10 \(2026-01-04T00:00:00Z\), Owner's latest answer, does not name it/);
+    assert.match(
+      refusal.message,
+      /then post a new `Proposal:` comment on slice #10, https:\/\/github\.com\/o\/r\/issues\/10, whose first #N is #10, and have Owner react 👍 to it or write a `Decision:` there\. Guard reads the section as it stood at Owner's latest answer, so a 👍 on the new proposal is enough; then edit or push/,
+    );
+    assert.deepEqual(await run({ ...onSlice(early, comment('Decision: yes', '2026-01-06T00:00:00Z', { id: 2, user: { login: 'Owner' } })), ...thumbs('2026-01-04T00:00:00Z') }), []);
 
-    // A proposal made after the earliest other answer cannot come first, so its reactions are not read: their failure
-    // refuses nothing an earlier Decision settled.
-    const decided = onSlice(comment('Decision: yes', '2026-01-05T06:00:00Z', { id: 2, user: { login: 'Owner' } }), proposal());
-    assert.deepEqual(await run({ ...decided, [`/repos/${REPO}/issues/comments/1/reactions`]: { status: 502, json: { message: 'Bad gateway' } } }), []);
+    // A Decision before the Guards: line and a 👍 on a proposal after it: the 👍 is the latest, and passes.
+    const decided = onSlice(comment('Decision: yes', '2026-01-04T00:00:00Z', { id: 2, user: { login: 'Owner' } }), proposal());
+    assert.deepEqual(await run({ ...decided, ...thumbs('2026-01-06T00:00:00Z') }), []);
+    // A 👍 on any proposal can be the latest answer, so an earlier Decision does not spare a failed read of its reactions.
+    await assert.rejects(run({ ...decided, [`/repos/${REPO}/issues/comments/1/reactions`]: { status: 502, json: { message: 'Bad gateway' } } }), /HTTP 502: Bad gateway/);
 
     // Reactions GitHub will not give fail closed.
     await assert.rejects(run({ ...onSlice(proposal()), [`/repos/${REPO}/issues/comments/1/reactions`]: { status: 502, json: { message: 'Bad gateway' } } }), /GitHub did not answer \/repos\/o\/r\/issues\/comments\/1\/reactions \(HTTP 502: Bad gateway\)/);
+  });
+
+  test("the owner's 👍 on a later proposal settles the slice as it then stood, and no edit after it counts (#534)", async () => {
+    // veda-hq/veda#376: a 👍 settled the slice, an agent then added a **Guards:** section and proposed again, and the
+    // owner 👍'd that. Guard read the first 👍 and refused veda-hq/veda#383.
+    const joined = { [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }] };
+    const revisions = (...nodes) => ({ '/graphql': { data: { repository: { issue: { body: nodes[0].diff, createdAt: '2026-01-03T00:00:00Z', lastEditedAt: nodes[0].editedAt, userContentEdits: { totalCount: nodes.length, nodes } } } } } });
+    const guards = { editedAt: '2026-01-05T00:00:00Z', diff: '**Guards:** `.githooks/`' };
+    const first = { editedAt: '2026-01-03T00:00:00Z', diff: 'no guards' };
+    const proposal = (id, at) => ({ id, user: { login: 'AthyaBot' }, body: 'Proposal: add #10 (x) to work item #9.\n\nPage: https://example.com', created_at: at, updated_at: at, html_url: `https://github.com/o/r/issues/10#issuecomment-${id}` });
+    const thumbs = (id, at) => ({ [`/repos/${REPO}/issues/comments/${id}/reactions`]: [{ user: { login: 'Owner' }, content: '+1', created_at: at }] });
+    const proposals = { [`/repos/${REPO}/issues/10/comments`]: [proposal(1, '2026-01-03T12:00:00Z'), proposal(2, '2026-01-05T12:00:00Z')] };
+    const run = (files, over) => judge(github({ files: files.map((file) => modified(file)), over: { ...joined, ...proposals, ...thumbs(1, '2026-01-04T00:00:00Z'), ...over } }), REPO, 1, OWNERS, [], 'main', undefined, undefined, ['AthyaBot']);
+
+    // Before the second 👍, the first one sets when Guards: counts, and the section was not there yet.
+    let [refusal] = await run(['.githooks/pre-push'], revisions(guards, first));
+    assert.match(refusal.message, /as it stood when Owner's 👍 on AthyaBot's proposal settled slice #10 \(2026-01-04T00:00:00Z\), Owner's latest answer, does not name it/);
+
+    // The owner's 👍 on the second proposal settles the slice as it stood then: the Guards: section names the file.
+    assert.deepEqual(await run(['.githooks/pre-push'], { ...revisions(guards, first), ...thumbs(2, '2026-01-06T00:00:00Z') }), []);
+
+    // An agent's edit after that 👍 counts for nothing: a file only it names is refused, read as of the second 👍.
+    const after = { editedAt: '2026-01-07T00:00:00Z', diff: '**Guards:** `.githooks/`, `.husky/`' };
+    const edited = { ...revisions(after, guards, first), ...thumbs(2, '2026-01-06T00:00:00Z') };
+    assert.deepEqual(await run(['.githooks/pre-push'], edited), []);
+    [refusal] = await run(['.husky/pre-commit'], edited);
+    assert.equal(refusal.file, '.husky/pre-commit');
+    assert.match(refusal.message, /as it stood when Owner's 👍 on AthyaBot's proposal settled slice #10 \(2026-01-06T00:00:00Z\), Owner's latest answer, does not name it/);
+
+    // So does an edit to the second proposal after its 👍: that 👍 no longer counts, and the first one sets it again.
+    const moved = { ...proposals, [`/repos/${REPO}/issues/10/comments`]: [proposal(1, '2026-01-03T12:00:00Z'), { ...proposal(2, '2026-01-05T12:00:00Z'), updated_at: '2026-01-06T12:00:00Z' }] };
+    [refusal] = await run(['.githooks/pre-push'], { ...revisions(guards, first), ...thumbs(2, '2026-01-06T00:00:00Z'), ...moved });
+    assert.match(refusal.message, /\(2026-01-04T00:00:00Z\), Owner's latest answer/);
   });
 
   describe("Mergify's merge-queue draft (#507)", () => {

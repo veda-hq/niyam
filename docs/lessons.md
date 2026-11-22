@@ -26,7 +26,8 @@ A 404 (the account really is missing) or a 401 is not a flake and must not be re
 Guard exempts an onboard pull request only when every line it changes moves a version, or the
 release tarball's sha256. When a slice makes onboard write anything else into a client's files,
 such as new lines in `.github/workflows/niyam.yml`, the exemption is gone for the whole pull
-request. Then every guard file in it must be in the slice's **Guards:**, as it stood at approval.
+request. Then every guard file in it must be in the slice's **Guards:**, as it stood at the
+owner's latest answer.
 That includes `.github/niyam/cloud-setup.sh`, whose version and sha256 move on every onboard.
 
 So such a slice names both `.github/workflows/niyam.yml` and `.github/niyam/cloud-setup.sh`
@@ -34,7 +35,9 @@ before the Work item is approved. niyam's own onboard pull request after the rel
 `Slice: #N` and a State under it.
 
 #397 named the workflow alone, so Guard refused #414. The owner had to amend the slice's
-**Guards:** and put `approved` back on #399.
+**Guards:** and put `approved` back on #399. In a repository onboarded at a niyam release with
+#534, a new `Proposal:` for the slice and the owner's 👍 on it is enough. Before that release,
+the Guard a repository pins still reads the first answer.
 
 ## Renames
 
