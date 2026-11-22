@@ -14,6 +14,10 @@ import { prMerged, prStarted, prePush, prWorkRules, propose, section, sliceProbl
 const SLUG = 'example-org/example-app';
 /** Another repository, where a slice this one builds can be planned. */
 const PLANS = 'example-org/example-plans';
+/** Its issues' own addresses. */
+const P = `https://github.com/${PLANS}/issues`;
+/** Issues' own addresses, as the work rules name them for the owner to act on (#557). */
+const W = `https://github.com/${SLUG}/issues`;
 const OWNER = 'example-owner';
 const ACCOUNTS = { owners: [OWNER], agents: [AGENT] };
 const T0 = '2026-10-01T00:00:00Z';
@@ -262,7 +266,7 @@ describe('sliceProblems', () => {
   it('refuses an unapproved start', async () => {
     const g = graph();
     g.timeline.splice(1, 1);
-    assert.deepEqual(await problems(g.issue), ['work item #10 is not approved: example-owner adds the approved label before any slice starts']);
+    assert.deepEqual(await problems(g.issue), [`work item #10, ${W}/10, is not approved: example-owner adds the approved label before any slice starts`]);
   });
 
   it('refuses an approval taken back', async () => {
@@ -274,9 +278,9 @@ describe('sliceProblems', () => {
   it('refuses an approval by anyone but the owner', async () => {
     const g = graph();
     g.timeline[1] = { event: 'labeled', created_at: APPROVED, actor: { login: AGENT }, label: { name: 'approved' } };
-    assert.deepEqual(await problems(g.issue), ['work item #10 was labeled approved by ExampleBot, not example-owner']);
+    assert.deepEqual(await problems(g.issue), [`work item #10, ${W}/10, was labeled approved by ExampleBot, not example-owner`]);
     g.timeline[1] = { event: 'labeled', created_at: APPROVED, actor: null, label: { name: 'approved' } };
-    assert.deepEqual(await problems(g.issue), ['work item #10 was labeled approved by someone unknown, not example-owner']);
+    assert.deepEqual(await problems(g.issue), [`work item #10, ${W}/10, was labeled approved by someone unknown, not example-owner`]);
   });
 
   it('ignores other labels', async () => {
@@ -292,7 +296,7 @@ describe('sliceProblems', () => {
       return g;
     };
     const proposed =
-      '#12 was added to work item #10 after its approval; example-owner reacts 👍 on ExampleBot\'s proposal on #12, or adds a "Decision:" comment naming #12, or #12 links example-owner\'s request for it on #10';
+      `#12 was added to work item #10, ${W}/10, after its approval; example-owner reacts 👍 on ExampleBot's proposal on #12, ${W}/12, or adds a "Decision:" comment naming #12 on ${W}/12, or #12 links example-owner's request for it on #10`;
     const refused = `${proposed}; ExampleBot proposes it with: niyam propose 12 --page <page url>`;
 
     it('is refused without the owner\'s decision', async () => {
@@ -326,7 +330,7 @@ describe('sliceProblems', () => {
     }
 
     describe('a batch answer on the Approvals issue', () => {
-      const batched = `${proposed}, or example-owner comments on #700, the Approvals issue, with a first line "Decision: approve #12"`;
+      const batched = `${proposed}, or example-owner comments on #700, the Approvals issue, ${W}/700, with a first line "Decision: approve #12"`;
       const proposes = '; ExampleBot proposes it with: niyam propose 12 --page <page url>';
 
       it("passes when the first line of the owner's comment there approves it among others", async () => {
@@ -368,7 +372,7 @@ describe('sliceProblems', () => {
       });
 
       it('answers nothing, and fails nothing, where GitHub cannot find the Approvals issue', async () => {
-        assert.deepEqual(await problems(added().issue, [], {}, { ...ACCOUNTS, approvals: 701 }), [`${batched.replace('#700', '#701')}${proposes}`]);
+        assert.deepEqual(await problems(added().issue, [], {}, { ...ACCOUNTS, approvals: 701 }), [`${batched.replace('#700', '#701').replace('issues/700', 'issues/701')}${proposes}`]);
       });
 
       it('refuses one the agent edited, and takes one owners alone edited', async () => {
@@ -551,7 +555,11 @@ describe('sliceProblems', () => {
         ['on a proposal naming #12abc', [thumb()], comment('Proposal: add #12abc', LATER, AGENT), refused],
       ] as const) {
         it(`does not pass when ${name}`, async () => {
-          assert.deepEqual(await problems(withProposal([...thumbs], made).issue), [expected]);
+          const proposal = made ?? comment('Proposal: add #12 (Add the thing) to work item #10', LATER, AGENT);
+          // With the agent's proposal there, the refusal names its own address, where the owner reacts (#557).
+          const want = expected === proposed ? proposed.replace(`ExampleBot's proposal on #12, ${W}/12`, `ExampleBot's proposal, ${proposal.html_url as string}`) : expected;
+          assert.match(want, /#issuecomment-|propose 12/);
+          assert.deepEqual(await problems(withProposal([...thumbs], proposal).issue), [want]);
         });
       }
 
@@ -604,7 +612,7 @@ describe('sliceProblems', () => {
       ...extra,
     });
     const refused =
-      'state #30 was closed as not planned after approval; example-owner reacts 👍 on ExampleBot\'s proposal for it on #12, or adds a "Decision:" comment to it; ExampleBot proposes it with: niyam propose 30 --page <page url>';
+      `state #30, ${W}/30, was closed as not planned after approval; example-owner reacts 👍 on ExampleBot's proposal for it on #12, ${W}/12, or adds a "Decision:" comment to it; ExampleBot proposes it with: niyam propose 30 --page <page url>`;
 
     it('is refused without the owner\'s decision', async () => {
       const g = graph();
@@ -649,7 +657,7 @@ describe('sliceProblems', () => {
       const h = graph();
       h.states.push(state());
       h.approvals.push(comment('Decision: approve #30', APPROVED));
-      const batched = refused.replace('; ExampleBot proposes', ', or example-owner comments on #700, the Approvals issue, with a first line "Decision: approve #30"; ExampleBot proposes');
+      const batched = refused.replace('; ExampleBot proposes', `, or example-owner comments on #700, the Approvals issue, ${W}/700, with a first line "Decision: approve #30"; ExampleBot proposes`);
       assert.deepEqual(await problems(h.issue, [], {}, WITH_APPROVALS), [batched]);
     });
 
@@ -672,7 +680,7 @@ describe('sliceProblems', () => {
       g.thumbs.set(made.id as string, [thumb()]);
       assert.deepEqual(await problems(g.issue), []);
       g.thumbs.set(made.id as string, [thumb(LATEST, AGENT)]);
-      assert.deepEqual(await problems(g.issue), [refused.replace(/; ExampleBot proposes it with: .*$/, '')]);
+      assert.deepEqual(await problems(g.issue), [refused.replace(/; ExampleBot proposes it with: .*$/, '').replace(`proposal for it on #12, ${W}/12`, `proposal for it, ${made.html_url as string}`)]);
     });
 
     describe('past the first page of states', () => {
@@ -685,7 +693,7 @@ describe('sliceProblems', () => {
       };
 
       it('refuses a state dropped on the second page', async () => {
-        assert.deepEqual(await problems(many({}).issue), [refused.replaceAll('#30', '#149').replace('propose 30', 'propose 149')]);
+        assert.deepEqual(await problems(many({}).issue), [refused.replaceAll('#30', '#149').replace('issues/30,', 'issues/149,').replace('propose 30', 'propose 149')]);
       });
 
       it("passes with the owner's Decision: among the state's earlier comments", async () => {
@@ -714,10 +722,14 @@ describe('sliceProblems', () => {
       body,
       head: { ref, repo: repo === null ? null : { full_name: repo } },
     });
+    /** The refusal for pull request `number` from branch `b<number>` here: its address, and the command that deletes its branch (#557). */
+    const second = (number: number, ref = `b${number}`): string =>
+      `#12 already has pull request #${number}, https://github.com/${SLUG}/pull/${number}; one slice, one pull request. If #${number} is superseded, close it and delete its branch: git push origin --delete ${ref}`;
+    const fork = (number: number): string => `#12 already has pull request #${number}, https://github.com/${SLUG}/pull/${number}; one slice, one pull request. If #${number} is superseded, close it`;
 
     it('is refused', async () => {
       assert.deepEqual(await problems(graph().issue, [pull(5, 'Slice: #12'), pull(6, null), pull(7, 'Slice: #13')]), [
-        '#12 already has pull request #5; one slice, one pull request',
+        second(5),
       ]);
     });
 
@@ -728,16 +740,27 @@ describe('sliceProblems', () => {
 
     it("counts a fork's pull request from a branch of the same name", async () => {
       assert.deepEqual(await problems(graph().issue, [pull(6, 'Slice: #12', 'feature', 'someone/example-app'), pull(7, 'Slice: #12', 'feature', null)], { branch: 'feature' }), [
-        '#12 already has pull request #6; one slice, one pull request',
-        '#12 already has pull request #7; one slice, one pull request',
+        fork(6),
+        fork(7),
       ]);
+    });
+
+    it("gives GitHub's own address for it, and quotes a branch the shell would split (#557)", async () => {
+      const given = { ...pull(5, 'Slice: #12', "it's mine"), html_url: 'https://github.com/example-org/example-app/pull/5?given' };
+      assert.deepEqual(await problems(graph().issue, [given]), [
+        "#12 already has pull request #5, https://github.com/example-org/example-app/pull/5?given; one slice, one pull request. If #5 is superseded, close it and delete its branch: git push origin --delete 'it'\\''s mine'",
+      ]);
+      // A branch git would read as an option or a forced push is named in full.
+      for (const ref of ['-x', '+x']) {
+        assert.deepEqual(await problems(graph().issue, [pull(5, 'Slice: #12', ref)]), [second(5, `refs/heads/${ref}`)]);
+      }
     });
 
     it('reads every page of open pull requests', async () => {
       const sys = new FakeSys();
       github(sys, graph().issue, Array.from({ length: 100 }, (_, i) => pull(100 + i, 'none')));
       sys.route('GET', `/repos/${SLUG}/pulls?state=open&per_page=100&page=2`, { status: 200, json: [pull(9, 'Slice: #12')] });
-      assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), ['#12 already has pull request #9; one slice, one pull request']);
+      assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), [second(9)]);
     });
   });
 
@@ -822,9 +845,9 @@ describe('sliceProblems', () => {
     it('refuses one whose Work item there is not approved, or approved by someone else', async () => {
       const g = graph();
       g.timeline.splice(1, 1);
-      assert.deepEqual((await foreign(g.issue)).problems, [`work item ${PLANS}#10 is not approved: example-owner adds the approved label before any slice starts`]);
+      assert.deepEqual((await foreign(g.issue)).problems, [`work item ${PLANS}#10, ${P}/10, is not approved: example-owner adds the approved label before any slice starts`]);
       g.timeline.push({ event: 'labeled', created_at: APPROVED, actor: { login: AGENT }, label: { name: 'approved' } });
-      assert.deepEqual((await foreign(g.issue)).problems, [`work item ${PLANS}#10 was labeled approved by ExampleBot, not example-owner`]);
+      assert.deepEqual((await foreign(g.issue)).problems, [`work item ${PLANS}#10, ${P}/10, was labeled approved by ExampleBot, not example-owner`]);
     });
 
     describe('added after approval', () => {
@@ -833,7 +856,7 @@ describe('sliceProblems', () => {
         g.timeline[0] = { event: 'sub_issue_added', created_at: LATER, sub_issue: { number: 12 } };
         return g;
       };
-      const proposed = `${PLANS}#12 was added to work item ${PLANS}#10 after its approval; example-owner reacts 👍 on ExampleBot's proposal on ${PLANS}#12, or adds a "Decision:" comment naming #12, or ${PLANS}#12 links example-owner's request for it on ${PLANS}#10`;
+      const proposed = `${PLANS}#12 was added to work item ${PLANS}#10, ${P}/10, after its approval; example-owner reacts 👍 on ExampleBot's proposal on ${PLANS}#12, ${P}/12, or adds a "Decision:" comment naming #12 on ${P}/12, or ${PLANS}#12 links example-owner's request for it on ${PLANS}#10`;
       const proposes = `; ExampleBot proposes it in a clone of ${PLANS} with: niyam propose 12 --page <page url>`;
 
       it('is refused without the owner\'s say there, which is to be proposed from its own repository', async () => {
@@ -867,7 +890,7 @@ describe('sliceProblems', () => {
         github(sys, added().issue, [], PLANS);
         sys.route('GET', `/repos/${PLANS}/contents/.github/niyam.json`, { status: 200, json: { content: Buffer.from(JSON.stringify({ approvals: APPROVALS })).toString('base64') } });
         assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), [
-          `${proposed}, or example-owner comments on ${PLANS}#700, the Approvals issue, with a first line "Decision: approve #12"${proposes}`,
+          `${proposed}, or example-owner comments on ${PLANS}#700, the Approvals issue, ${P}/700, with a first line "Decision: approve #12"${proposes}`,
         ]);
         // The settings there unread (404 here): no batch path, as for a repository whose settings name none.
         assert.deepEqual((await foreign(added().issue, [], WITH_APPROVALS)).problems, [`${proposed}${proposes}`]);
@@ -888,7 +911,7 @@ describe('sliceProblems', () => {
         { number: 6, body: 'Slice: #12', head: { ref: 'a', repo: { full_name: SLUG } } },
         { number: 7, body: `Slice: https://github.com/${PLANS}/issues/12`, head: { ref: 'b', repo: { full_name: SLUG } } },
       ];
-      assert.deepEqual((await foreign(graph().issue, pulls)).problems, [`${PLANS}#12 already has pull request #7; one slice, one pull request`]);
+      assert.deepEqual((await foreign(graph().issue, pulls)).problems, [`${PLANS}#12 already has pull request #7, https://github.com/${SLUG}/pull/7; one slice, one pull request. If #7 is superseded, close it and delete its branch: git push origin --delete b`]);
       const sys = new FakeSys();
       github(sys, graph().issue, [pulls[1] as Node]);
       assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), []);
@@ -1003,7 +1026,7 @@ describe('prWorkRules', () => {
     github(sys, g.issue);
     const { code, err } = await check(sys);
     assert.equal(code, 1);
-    assert.deepEqual(err, ['✗ work item #10 is not approved: example-owner adds the approved label before any slice starts', 'pr-work-rules: refused by the work rules']);
+    assert.deepEqual(err, [`✗ work item #10, ${W}/10, is not approved: example-owner adds the approved label before any slice starts`, 'pr-work-rules: refused by the work rules']);
   });
 
   for (const [body, problem] of [
@@ -2040,7 +2063,7 @@ describe('propose', () => {
       assert.equal(code, 0);
       assert.deepEqual(out.slice(-2), [BATCH, 'Decision: approve #12 #30']);
       const asks = posted(sys).map((body) => body.split('\n\n').at(-1));
-      const ask = '@example-owner: react 👍 to this comment to approve it, or comment "Decision:", or answer the batch on Approvals, #700.';
+      const ask = `@example-owner: react 👍 to this comment to approve it, or comment "Decision:", or answer the batch on Approvals, ${W}/700.`;
       assert.deepEqual(asks, [ask, ask]);
     });
 
@@ -2187,7 +2210,7 @@ describe('propose', () => {
     assert.deepEqual(await run(session(g).sys), {
       code: 1,
       out: [],
-      err: ['✗ work item #10 is not approved: example-owner adds the approved label before any slice starts', 'propose: refused by the work rules'],
+      err: [`✗ work item #10, ${W}/10, is not approved: example-owner adds the approved label before any slice starts`, 'propose: refused by the work rules'],
     });
   });
 
@@ -2240,14 +2263,14 @@ describe('with two owners and two agents', () => {
     g.timeline[1] = { event: 'labeled', created_at: APPROVED, actor: { login: 'second-owner' }, label: { name: 'approved' } };
     assert.deepEqual(await problems(g.issue, [], {}, TEAM), []);
     g.timeline[1] = { event: 'labeled', created_at: APPROVED, actor: { login: AGENT_2 }, label: { name: 'approved' } };
-    assert.deepEqual(await problems(g.issue, [], {}, TEAM), ['work item #10 was labeled approved by OtherBot, not example-owner or Second-Owner']);
+    assert.deepEqual(await problems(g.issue, [], {}, TEAM), [`work item #10, ${W}/10, was labeled approved by OtherBot, not example-owner or Second-Owner`]);
     g.timeline.splice(1, 1);
-    assert.deepEqual(await problems(g.issue, [], {}, TEAM), ['work item #10 is not approved: example-owner or Second-Owner adds the approved label before any slice starts']);
+    assert.deepEqual(await problems(g.issue, [], {}, TEAM), [`work item #10, ${W}/10, is not approved: example-owner or Second-Owner adds the approved label before any slice starts`]);
   });
 
   it("names both owners and both agents in what a slice added after approval owes", async () => {
     assert.deepEqual(await problems(added().issue, [], {}, TEAM), [
-      '#12 was added to work item #10 after its approval; example-owner or Second-Owner reacts 👍 on ExampleBot or OtherBot\'s proposal on #12, or adds a "Decision:" comment naming #12, or #12 links example-owner or Second-Owner\'s request for it on #10; ExampleBot or OtherBot proposes it with: niyam propose 12 --page <page url>',
+      `#12 was added to work item #10, ${W}/10, after its approval; example-owner or Second-Owner reacts 👍 on ExampleBot or OtherBot's proposal on #12, ${W}/12, or adds a "Decision:" comment naming #12 on ${W}/12, or #12 links example-owner or Second-Owner's request for it on #10; ExampleBot or OtherBot proposes it with: niyam propose 12 --page <page url>`,
     ]);
   });
 
@@ -2290,7 +2313,7 @@ describe('with two owners and two agents', () => {
   it("takes the second owner's Decision: or 👍 on a dropped state", async () => {
     const g = dropped();
     assert.deepEqual(await problems(g.issue, [], {}, TEAM), [
-      'state #30 was closed as not planned after approval; example-owner or Second-Owner reacts 👍 on ExampleBot or OtherBot\'s proposal for it on #12, or adds a "Decision:" comment to it; ExampleBot or OtherBot proposes it with: niyam propose 30 --page <page url>',
+      `state #30, ${W}/30, was closed as not planned after approval; example-owner or Second-Owner reacts 👍 on ExampleBot or OtherBot's proposal for it on #12, ${W}/12, or adds a "Decision:" comment to it; ExampleBot or OtherBot proposes it with: niyam propose 30 --page <page url>`,
     ]);
     g.comments.push(comment('Decision: drop #30', LATEST, OWNER_2));
     assert.deepEqual(await problems(g.issue, [], {}, TEAM), []);

@@ -175,9 +175,13 @@ const comment = (login: string, body: string, labels: string[] = []) => ({ actio
 describe('needsOwner', () => {
   it('labels an issue where the agent asks the owner, once', async () => {
     const sys = job('issue_comment', comment(AGENT, `Needs you: approve? ${PAGE}`));
-    assert.deepEqual(await runJob(sys), { code: 0, out: ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner'] });
+    assert.deepEqual(await runJob(sys), { code: 0, out: ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner'] });
     assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`]);
     assert.deepEqual(sys.requests[0]?.body, { labels: ['needs-owner'] });
+    // The ask's own address, where GitHub gives it, so whoever reads the line passes on the very comment (#557).
+    const own = comment(AGENT, `Needs you: approve? ${PAGE}`);
+    const linked = job('issue_comment', { ...own, comment: { ...own.comment, html_url: `https://github.com/${SLUG}/issues/7#issuecomment-41` } });
+    assert.deepEqual((await runJob(linked)).out, [`needs-owner: #7 asks the owner (Needs you:) at https://github.com/${SLUG}/issues/7#issuecomment-41; labelled needs-owner`]);
     const again = job('issue_comment', comment(AGENT, 'Proposal: x', ['needs-owner']));
     await runJob(again);
     assert.deepEqual(calls(again), []);
@@ -230,7 +234,7 @@ describe('needsOwner', () => {
       });
       edited.route('GET', thumbs, { status: 200, json: [{ user: { login: 'someone' }, created_at: '2026-11-15T09:59:41Z' }, { user: null, created_at: '2026-11-15T09:59:41Z' }, { user: { login: OWNER }, created_at: ASKED }] });
       edited.route('POST', `${API}/graphql`, { status: 200, json: { data: { nodes: [{ id: 'IC_73', userContentEdits: { totalCount: 1, nodes: [{ editor: { login: AGENT } }] } }] } } });
-      assert.deepEqual((await runJob(edited)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+      assert.deepEqual((await runJob(edited)).out, ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
       // Read before and again after labelling: the GraphQL reads are the edits of the one Decision: after the ask.
       assert.deepEqual(calls(edited), ['POST /graphql', `POST /repos/${SLUG}/issues/7/labels`, 'POST /graphql']);
     });
@@ -248,10 +252,10 @@ describe('needsOwner', () => {
       const sys = job('issue_comment', asked());
       sys.route('GET', events, { status: 200, json: relabelled.slice(0, 1) });
       quiet(sys);
-      assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+      assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
       assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`]);
       const on = job('issue_comment', { ...asked(), issue: { number: 7, labels: [{ name: 'needs-owner' }] } });
-      assert.deepEqual((await runJob(on)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+      assert.deepEqual((await runJob(on)).out, ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
       assert.deepEqual(on.requests, []);
     });
 
@@ -296,7 +300,7 @@ describe('needsOwner', () => {
         assert.match((await runJob(named)).out[0] ?? '', /already answered with a "Decision: approve" on #9/);
         assert.deepEqual(calls(named), []);
         const other = run([says(OWNER, 90, 'Decision: approve #7')], proposal);
-        assert.deepEqual((await runJob(other)).out, ['needs-owner: #7 asks the owner (Proposal:); labelled needs-owner']);
+        assert.deepEqual((await runJob(other)).out, ['needs-owner: #7 asks the owner (Proposal:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
       });
 
       it("labels it where the batch answer is someone else's, older than the ask, names other issues only, or was edited by someone else", async () => {
@@ -307,7 +311,7 @@ describe('needsOwner', () => {
           says(OWNER, 94, 'Decision: approve #7', '2026-11-15T09:59:40Z', { node_id: 'IC_94', updated_at: '2026-11-15T09:59:45Z' }),
         ]);
         sys.route('POST', `${API}/graphql`, { status: 200, json: { data: { nodes: [{ id: 'IC_94', userContentEdits: { totalCount: 1, nodes: [{ editor: { login: AGENT } }] } }] } } });
-        assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+        assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
         assert.deepEqual(calls(sys), ['POST /graphql', `POST /repos/${SLUG}/issues/7/labels`, 'POST /graphql']);
       });
 
@@ -316,7 +320,7 @@ describe('needsOwner', () => {
         missing.route('GET', events, { status: 200, json: [] });
         quiet(missing);
         missing.route('GET', batch, { status: 404, json: null });
-        assert.deepEqual((await runJob(missing)).out, ['needs-owner: #7 asks the owner (Needs you:); labelled needs-owner']);
+        assert.deepEqual((await runJob(missing)).out, ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
         const approved = job('issue_comment', asked(), ON_9);
         approved.route('GET', events, { status: 200, json: relabelled });
         await runJob(approved);
@@ -377,7 +381,7 @@ describe('needsOwner', () => {
       assert.deepEqual((await runJob(sys)).out, [
         'needs-owner: the owner approved #2925, #2924, #2923, #2922, #2742, #2740, #2739, #2814 on #7, the Approvals issue; judging each issue labelled needs-owner',
         '#2925: the owner answered with a "Decision: approve" on #7, the Approvals issue; needs-owner taken off',
-        '#2748: waits on the owner (the proposal for #2748)',
+        '#2748: waits on the owner (the proposal for #2748, https://github.com/example-org/example-app/issues/2748)',
         "#2924: no agent asked there, and the owner's batch answer names it; needs-owner taken off",
         '#5: no agent asked there; left as it is',
         'needs-owner: 4 labelled needs-owner, 2 cleared',
@@ -389,7 +393,7 @@ describe('needsOwner', () => {
     it('counts the answer once where the Approvals issue lists it, and only from that list when the event names no id', async () => {
       for (const [made, listed, line] of [
         [{ node_id: undefined, updated_at: undefined }, true, '#12: the owner answered with a "Decision: approve" on #7, the Approvals issue; needs-owner taken off'],
-        [{ id: undefined }, false, '#12: waits on the owner (the Needs you: ask)'],
+        [{ id: undefined }, false, '#12: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/12)'],
       ] as const) {
         const sys = job('issue_comment', answer('Decision: approve #12', made), ON_7);
         sys.route('GET', LABELLED, { status: 200, json: [{ number: 12 }] });
@@ -425,17 +429,17 @@ describe('needsOwner', () => {
 
       it("1. clears a slice owing only a State's drop when the batch names the State, and not when it names the slice", async () => {
         assert.deepEqual(await both([drop(1)], 'Decision: approve #30'), twice(BATCHED));
-        assert.deepEqual(await both([drop(1)], 'Decision: approve #12'), twice('#12: waits on the owner (the proposal for #30)'));
+        assert.deepEqual(await both([drop(1)], 'Decision: approve #12'), twice('#12: waits on the owner (the proposal for #30, https://github.com/example-org/example-app/issues/12)'));
       });
 
       it('2. keeps a slice whose other proposal waits when the batch names one, and clears it when it names both', async () => {
-        assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #12'), twice('#12: waits on the owner (the proposal for #30)'));
-        assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #30'), twice('#12: waits on the owner (the proposal for #12)'));
+        assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #12'), twice('#12: waits on the owner (the proposal for #30, https://github.com/example-org/example-app/issues/12)'));
+        assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #30'), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
         assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #12 #30'), twice(BATCHED));
       });
 
       it('3. keeps a slice where the owner 👍d the latest proposal and an earlier one waits, and clears it when each is answered', async () => {
-        assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #99', { 121: hour(3) }), twice('#12: waits on the owner (the proposal for #12)'));
+        assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #99', { 121: hour(3) }), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
         assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #99', { 120: hour(3), 121: hour(3) }), twice('#12: the owner answered with a 👍 on the ask; needs-owner taken off'));
         assert.deepEqual(
           await both([add(1), drop(2)], 'Decision: approve #12', { 121: hour(3) }),
@@ -444,7 +448,7 @@ describe('needsOwner', () => {
       });
 
       it('counts a Decision: on the slice only for the proposals before it', async () => {
-        assert.deepEqual(await both([add(1), says(OWNER, 122, 'Decision: yes', 2), drop(3)], 'Decision: approve #99'), twice('#12: waits on the owner (the proposal for #30)'));
+        assert.deepEqual(await both([add(1), says(OWNER, 122, 'Decision: yes', 2), drop(3)], 'Decision: approve #99'), twice('#12: waits on the owner (the proposal for #30, https://github.com/example-org/example-app/issues/12)'));
         assert.deepEqual(await both([add(1), drop(2), says(OWNER, 122, 'Decision: yes', 3)], 'Decision: approve #99'), twice('#12: the owner answered with a Decision: comment; needs-owner taken off'));
       });
 
@@ -452,20 +456,20 @@ describe('needsOwner', () => {
         const ask = (h: number) => says(AGENT, 123, `Needs you: go? ${PAGE}`, h);
         // A Needs you: before a later proposal is not owed; the latest one is, for the slice itself.
         assert.deepEqual(await both([ask(1), drop(2)], 'Decision: approve #30'), twice(BATCHED));
-        assert.deepEqual(await both([drop(1), ask(2)], 'Decision: approve #30'), twice('#12: waits on the owner (the Needs you: ask)'));
+        assert.deepEqual(await both([drop(1), ask(2)], 'Decision: approve #30'), twice('#12: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/12)'));
         assert.deepEqual(await both([drop(1), ask(2)], 'Decision: approve #30 #12'), twice(BATCHED));
       });
 
       it("counts an answer to a slice's addition only after the slice was last added (#207)", async () => {
         const readded = (h: number) => [{ event: 'parent_issue_added', created_at: hour(0) }, { event: 'commented' }, { event: 'parent_issue_added', created_at: hour(h) }];
         // Taken out and added again at 04:00, after the proposal at 01:00: a 👍 or a Decision: before that answers nothing.
-        assert.deepEqual(await both([add(1)], 'Decision: approve #99', { 120: hour(3) }, readded(4)), twice('#12: waits on the owner (the proposal for #12)'));
+        assert.deepEqual(await both([add(1)], 'Decision: approve #99', { 120: hour(3) }, readded(4)), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
         assert.deepEqual(await both([add(1)], 'Decision: approve #99', { 120: hour(6) }, readded(4)), twice('#12: the owner answered with a 👍 on the ask; needs-owner taken off'));
-        assert.deepEqual(await both([add(1), says(OWNER, 122, 'Decision: yes', 3)], 'Decision: approve #99', {}, readded(4)), twice('#12: waits on the owner (the proposal for #12)'));
+        assert.deepEqual(await both([add(1), says(OWNER, 122, 'Decision: yes', 3)], 'Decision: approve #99', {}, readded(4)), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
         assert.deepEqual(await both([add(1), says(OWNER, 122, 'Decision: yes', 6)], 'Decision: approve #99', {}, readded(4)), twice('#12: the owner answered with a Decision: comment; needs-owner taken off'));
         // The batch answer at 05:00 counts after an addition at 04:00, not after one at 06:00.
         assert.deepEqual(await both([add(1)], 'Decision: approve #12', {}, readded(4)), twice(BATCHED));
-        assert.deepEqual(await both([add(1)], 'Decision: approve #12', {}, readded(6)), twice('#12: waits on the owner (the proposal for #12)'));
+        assert.deepEqual(await both([add(1)], 'Decision: approve #12', {}, readded(6)), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
         // A State's drop is not the slice's addition, and an addition before the proposal changes nothing.
         assert.deepEqual(
           await both([add(1), drop(2)], 'Decision: approve #12', { 121: hour(3) }, readded(4)),
@@ -512,9 +516,9 @@ describe('needsOwner', () => {
       sys.route('DELETE', `${API}/repos/${SLUG}/issues/1/labels/needs-owner`, { status: 200, json: null });
       assert.deepEqual((await runJob(sys)).out, [
         '#1: the owner answered with a "Decision: approve" on #70, the Approvals issue; needs-owner taken off',
-        '#2: waits on the owner (the proposal for #2)',
-        '#3: waits on the owner (the proposal for #3)',
-        '#4: waits on the owner (the proposal for #4)',
+        '#2: waits on the owner (the proposal for #2, https://github.com/example-org/example-app/issues/2)',
+        '#3: waits on the owner (the proposal for #3, https://github.com/example-org/example-app/issues/3)',
+        '#4: waits on the owner (the proposal for #4, https://github.com/example-org/example-app/issues/4)',
         'needs-owner: 4 labelled needs-owner, 1 cleared',
       ]);
       assert.deepEqual(calls(sys), [`DELETE /repos/${SLUG}/issues/1/labels/needs-owner`, 'POST /graphql']);
@@ -537,13 +541,29 @@ describe('needsOwner', () => {
       sys.route('GET', `${API}/repos/${SLUG}/issues/1/comments?per_page=100&page=1`, { status: 200, json: [{ id: 10, body: 'Proposal: 1', user: { login: AGENT }, created_at: '2026-11-08T01:00:00Z' }] });
       sys.route('GET', `${API}/repos/${SLUG}/issues/comments/10/reactions?content=%2B1&per_page=100&page=1`, { status: 200, json: [] });
       sys.route('GET', `${API}/repos/${SLUG}/issues/71/comments?per_page=100&page=1`, { status: 404, json: { message: 'Not Found' } });
-      assert.deepEqual((await runJob(sys)).out, ['#1: waits on the owner (the proposal for #1)', 'needs-owner: 1 labelled needs-owner, 0 cleared']);
+      assert.deepEqual((await runJob(sys)).out, ['#1: waits on the owner (the proposal for #1, https://github.com/example-org/example-app/issues/1)', 'needs-owner: 1 labelled needs-owner, 0 cleared']);
+    });
+
+    it("sweeps: names each waiting ask by the comment's own address where GitHub gives it (#557)", async () => {
+      const sys = job('schedule', {}, { owner: OWNER, agent: AGENT });
+      const at = (id: number): string => `https://github.com/${SLUG}/issues/1#issuecomment-${id}`;
+      sys.route('GET', `${API}/repos/${SLUG}/issues?state=open&labels=needs-owner&per_page=100&page=1`, { status: 200, json: [{ number: 1 }] });
+      sys.route('GET', `${API}/repos/${SLUG}/issues/1/comments?per_page=100&page=1`, {
+        status: 200,
+        json: [
+          { id: 10, body: 'Proposal: add #1', user: { login: AGENT }, created_at: '2026-11-08T01:00:00Z', html_url: at(10) },
+          { id: 11, body: 'Proposal: drop state #30', user: { login: AGENT }, created_at: '2026-11-08T02:00:00Z', html_url: at(11) },
+        ],
+      });
+      sys.route('GET', `${API}/repos/${SLUG}/issues/1/timeline?per_page=100&page=1`, { status: 200, json: [] });
+      for (const id of [10, 11]) sys.route('GET', `${API}/repos/${SLUG}/issues/comments/${id}/reactions?content=%2B1&per_page=100&page=1`, { status: 200, json: [] });
+      assert.deepEqual((await runJob(sys)).out, [`#1: waits on the owner (the proposal for #1, ${at(10)}; the proposal for #30, ${at(11)})`, 'needs-owner: 1 labelled needs-owner, 0 cleared']);
     });
   });
 
   it('labels a pull request where the agent asks in a review comment, and clears it at a decision there', async () => {
     const asked = job('pull_request_review_comment', { action: 'created', comment: { body: `Proposal: x ${PAGE}`, user: { login: AGENT } }, pull_request: { number: 7, labels: [] } });
-    assert.deepEqual((await runJob(asked)).out, ['needs-owner: #7 asks the owner (Proposal:); labelled needs-owner']);
+    assert.deepEqual((await runJob(asked)).out, ['needs-owner: #7 asks the owner (Proposal:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
     assert.deepEqual(calls(asked), [`POST /repos/${SLUG}/issues/7/labels`]);
     const decided = job('pull_request_review_comment', { action: 'created', comment: { body: 'Decision: yes', user: { login: OWNER } }, pull_request: { number: 7, labels: [{ name: 'needs-owner' }] } });
     await runJob(decided);
@@ -611,11 +631,11 @@ describe('needsOwner', () => {
     for (const number of [1, 4]) sys.route('DELETE', `${API}/repos/${SLUG}/issues/${number}/labels/needs-owner`, { status: 404, json: null });
     assert.deepEqual((await runJob(sys)).out, [
       '#1: the owner answered with a 👍 on the ask; needs-owner taken off',
-      '#2: waits on the owner (the Needs you: ask)',
-      '#3: waits on the owner (the Needs you: ask)',
+      '#2: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/2)',
+      '#3: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/3)',
       '#4: the owner answered with a Decision: comment; needs-owner taken off',
       '#5: no agent asked there; left as it is',
-      '#6: waits on the owner (the Needs you: ask)',
+      '#6: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/6)',
       'needs-owner: 6 labelled needs-owner, 2 cleared',
     ]);
     assert.deepEqual(calls(sys), [`DELETE /repos/${SLUG}/issues/1/labels/needs-owner`, `DELETE /repos/${SLUG}/issues/4/labels/needs-owner`]);
@@ -639,7 +659,7 @@ describe('needsOwner', () => {
     });
     sys.route('DELETE', `${API}/repos/${SLUG}/issues/2/labels/needs-owner`, { status: 200, json: null });
     assert.deepEqual((await runJob(sys)).out, [
-      '#1: waits on the owner (the Needs you: ask)',
+      '#1: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/1)',
       '#2: the owner answered with a Decision: comment; needs-owner taken off',
       'needs-owner: 2 labelled needs-owner, 1 cleared',
     ]);

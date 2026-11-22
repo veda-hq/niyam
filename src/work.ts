@@ -35,7 +35,7 @@ const STATE_LINE = new RegExp(`^State:\\s*${ISSUE_NAMED}\\s*$`, 'gim');
 const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
 /** Whether `a` and `b` are one issue. */
-const sameIssue = (a: IssueRef, b: IssueRef): boolean => a.number === b.number && sameRepo(a.repo, b.repo);
+export const sameIssue = (a: IssueRef, b: IssueRef): boolean => a.number === b.number && sameRepo(a.repo, b.repo);
 
 /** How a message names `ref` from repository `here`: `#N` there, `owner/name#N` anywhere else. */
 export function refName(ref: IssueRef, here: string): string {
@@ -315,10 +315,10 @@ async function readSlice(
     .filter((event): event is Extract<TimelineEvent, { event: 'labeled' | 'unlabeled' }> => (event.event === 'labeled' || event.event === 'unlabeled') && event.label.name === 'approved')
     .at(-1);
   if (approval?.event !== 'labeled') {
-    return { problems: [`work item ${nameOf(parent.number)} is not approved: ${either(owners)} adds the approved label before any slice starts`], owed: [] };
+    return { problems: [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, is not approved: ${either(owners)} adds the approved label before any slice starts`], owed: [] };
   }
   if (!anyLogin(owners, approval.actor?.login)) {
-    return { problems: [`work item ${nameOf(parent.number)} was labeled approved by ${approval.actor?.login ?? 'someone unknown'}, not ${either(owners)}`], owed: [] };
+    return { problems: [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, was labeled approved by ${approval.actor?.login ?? 'someone unknown'}, not ${either(owners)}`], owed: [] };
   }
   const approvedAt = approval.created_at;
   const parentComments = events.filter((event): event is { event: 'commented' } & Comment => event.event === 'commented');
@@ -435,15 +435,60 @@ function owedProblem(one: Owed, slice: IssueRef, here: string, parent: number | 
   const owner = either(owners);
   // The agent proposes as itself; with several, any of them.
   const agent = either(agents);
-  const at = (number: number): string => refName({ repo: slice.repo, number }, here);
+  const at = (number: number | undefined): string => (number === undefined ? '#undefined' : refName({ repo: slice.repo, number }, here));
   const s = at(slice.number);
   const where = sameRepo(slice.repo, here) ? '' : ` in a clone of ${slice.repo}`;
   const ask = `${one.note ? ` (${one.note})` : ''}${one.proposals.length > 0 ? '' : `; ${agent} proposes it${where} with: ${proposeCommand(one.number)}`}`;
+  // Each place the owner acts, by its full address, so an agent passes on a link, never a bare number.
+  const issue = (number: number | undefined): string => issueUrl(slice.repo, number);
+  // The comment the owner reacts to, where there is one; else the slice, where the proposal is to be posted.
+  const on =
+    one.proposals.length > 0
+      ? `${agent}'s proposal${one.kind === 'added' ? '' : ' for it'}, ${newest(one.proposals).html_url}`
+      : `${agent}'s proposal${one.kind === 'added' ? '' : ' for it'} on ${s}, ${issue(slice.number)}`;
   // Where the settings name an Approvals issue, one comment there answers this among a batch.
-  const batch = approvals === undefined ? '' : `, or ${owner} comments on ${at(approvals)}, the Approvals issue, with a first line "Decision: approve #${one.number}"`;
+  const batch = approvals === undefined ? '' : `, or ${owner} comments on ${at(approvals)}, the Approvals issue, ${issue(approvals)}, with a first line "Decision: approve #${one.number}"`;
   return one.kind === 'added'
-    ? `${s} was added to work item ${parent === undefined ? '' : at(parent)} after its approval; ${owner} reacts 👍 on ${agent}'s proposal on ${s}, or adds a "Decision:" comment naming #${slice.number}, or ${s} links ${owner}'s request for it on ${parent === undefined ? '' : at(parent)}${batch}${ask}`
-    : `state ${at(one.number)} was closed as not planned after approval; ${owner} reacts 👍 on ${agent}'s proposal for it on ${s}, or adds a "Decision:" comment to it${batch}${ask}`;
+    ? `${s} was added to work item ${at(parent)}, ${issue(parent)}, after its approval; ${owner} reacts 👍 on ${on}, or adds a "Decision:" comment naming #${slice.number} on ${issue(slice.number)}, or ${s} links ${owner}'s request for it on ${at(parent)}${batch}${ask}`
+    : `state ${at(one.number)}, ${issue(one.number)}, was closed as not planned after approval; ${owner} reacts 👍 on ${on}, or adds a "Decision:" comment to it${batch}${ask}`;
+}
+
+/** Issue `number`'s own address on GitHub, where the owner acts on it. */
+export function issueUrl(slug: string, number: number | undefined): string {
+  return `${GITHUB_WEB}/${slug}/issues/${number}`;
+}
+
+/** An open pull request, as GitHub's REST list gives it. */
+interface OpenPull {
+  number: number;
+  body: string | null;
+  html_url?: string;
+  head: { ref: string; repo: { full_name: string } | null };
+}
+
+/** A pull request's own address on GitHub: GitHub's, else built from its number. */
+export function pullUrl(slug: string, number: number, given?: unknown): string {
+  return typeof given === 'string' && given.startsWith('https://') ? given : `${GITHUB_WEB}/${slug}/pull/${number}`;
+}
+
+/**
+ * The command that deletes branch `ref` on origin, quoted where the shell
+ * would read it otherwise. A branch starting `-` or `+` is named in full,
+ * `refs/heads/…`, so git reads it neither as an option nor as a forced push.
+ */
+export function deleteBranchCommand(ref: string): string {
+  const target = /^[-+]/.test(ref) ? `refs/heads/${ref}` : ref;
+  return `git push origin --delete ${/^[\w./+-]+$/.test(target) ? target : `'${target.replaceAll("'", "'\\''")}'`}`;
+}
+
+/**
+ * Why `pull` stops another pull request for slice `slice`, with its address
+ * and, when it is superseded, what to do: close it and, for a branch in this
+ * repository (`here`), delete its branch, as an agent does itself.
+ */
+function secondPull(slug: string, slice: IssueRef, pull: OpenPull, here: boolean): string {
+  const remedy = here ? `close it and delete its branch: ${deleteBranchCommand(pull.head.ref)}` : 'close it';
+  return `${refName(slice, slug)} already has pull request #${pull.number}, ${pullUrl(slug, pull.number, pull.html_url)}; one slice, one pull request. If #${pull.number} is superseded, ${remedy}`;
 }
 
 /**
@@ -474,11 +519,10 @@ export async function sliceProblems(
   for (let page = 1; ; page++) {
     const pulls = await sys.http(`${API}/repos/${slug}/pulls?state=open&per_page=100&page=${page}`, { token });
     if (pulls.status !== 200 || !Array.isArray(pulls.json)) throw new Error(`cannot list open pull requests (HTTP ${pulls.status})`);
-    for (const pull of pulls.json as { number: number; body: string | null; head: { ref: string; repo: { full_name: string } | null } }[]) {
-      if (pull.number === mine.pull || (pull.head.ref === mine.branch && pull.head.repo?.full_name.toLowerCase() === slug.toLowerCase())) continue;
-      if (slicesNamed(pull.body ?? '', slug).some((one) => sameIssue(one, slice))) {
-        problems.push(`${refName(slice, slug)} already has pull request #${pull.number}; one slice, one pull request`);
-      }
+    for (const pull of pulls.json as OpenPull[]) {
+      const here = pull.head.repo?.full_name.toLowerCase() === slug.toLowerCase();
+      if (pull.number === mine.pull || (pull.head.ref === mine.branch && here)) continue;
+      if (slicesNamed(pull.body ?? '', slug).some((one) => sameIssue(one, slice))) problems.push(secondPull(slug, slice, pull, here));
     }
     if (pulls.json.length < 100) break;
   }
@@ -981,13 +1025,13 @@ function proposeCommand(number: number): string {
  * argues it, and how to answer. What changes, why and what it costs live on
  * the page, from the slice's sections.
  */
-function proposalBody(one: Owed, parent: number | undefined, page: string, { owners, approvals }: Settings): string {
+function proposalBody(slug: string, one: Owed, parent: number | undefined, page: string, { owners, approvals }: Settings): string {
   // The issue it is for comes first: that is how the work rules match a 👍 to it.
   const what = one.kind === 'added'
     ? `Proposal: add #${one.number} (${one.title}) to work item #${parent}.`
     : `Proposal: drop state #${one.number} (${one.title}), closed as not planned after work item #${parent}'s approval.`;
   // Where the settings name an Approvals issue, the owner may answer this there, among a batch.
-  const batch = approvals === undefined ? '' : `, or answer the batch on Approvals, #${approvals}`;
+  const batch = approvals === undefined ? '' : `, or answer the batch on Approvals, ${issueUrl(slug, approvals)}`;
   return `${what}\n\nPage: ${page}\n\n${either(owners.map((owner) => `@${owner}`))}: react 👍 to this comment to approve it, or comment "Decision:"${batch}.`;
 }
 
@@ -1093,7 +1137,7 @@ async function proposeOne(
     };
   }
   // Each comment meets the guard's rule for asks (a page link, ASK_LIMIT characters) before any is posted.
-  const bodies = new Map(page === undefined ? [] : fresh.map((one) => [one, proposalBody(one, read.parent, page, accounts)] as const));
+  const bodies = new Map(page === undefined ? [] : fresh.map((one) => [one, proposalBody(slug, one, read.parent, page, accounts)] as const));
   const unfit = [...bodies].flatMap(([one, body]) => {
     const problem = askProblem({ text: body, known: true, opensUnknown: false }, accounts.owners);
     return problem ? [`${named(one)}'s proposal is not posted: ${problem}; shorten ${named(one)}'s title`] : [];

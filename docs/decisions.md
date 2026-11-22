@@ -2602,3 +2602,31 @@
   audit reads nothing and never works around the lock with the keychain.
   Rejected: the owner's one-time browser sign-in, as `owner-step` uses,
   because it costs a device code for a read the agent can do.
+- **2026-11-22 — Decision: agents delete their closed pull requests'
+  branches, and every ask for the owner carries its link (slice #557 of
+  #453).** On veda-hq/veda#383 an agent closed veda-hq/veda#382 as
+  superseded and left its branch, which held a secret-shaped token, so
+  every pull request's Secret scans failed. It then asked Alok to delete the
+  branch and to 👍 "comment 7068450411 on #376", with no link. Alok asked
+  for both corrections in code, not agent memory.
+  - Work rules' "one slice, one pull request" refusal names the other pull
+    request's full address and, for a branch in the repository, the delete
+    command for when it is superseded; for a fork's, only to close it.
+  - The keep-going Stop hook reads the agents' closed, unmerged pull
+    requests from the repository for the slices the branch's own commits
+    name (the latest hundred closed), and holds the session while one's
+    branch is still there and builds no open pull request: before the
+    merged and the desktop-ready releases, after the subagent, stop-note,
+    running-push and GitHub-unknown ones. Relating them by slice, not
+    author: every session works as the same agent. Anything GitHub or the
+    settings cannot say gives none (fail open). Rejected: holding on
+    every closed agent branch in the repository, which would hold one
+    session on another's work.
+  - `doctor` marks ✗ a repository whose `delete_branch_on_merge` is off,
+    which a writer's token reads, naming the settings page. Rejected:
+    onboard turning it on: a repository setting the owner turns on
+    themselves.
+  - Every Work rules, Guard, `propose` and needs-owner text that sends an
+    agent to the owner names the full `https://github.com/…` address to
+    act at: the proposal comment's own where there is one, else the
+    issue's.
