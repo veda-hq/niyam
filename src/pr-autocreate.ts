@@ -320,7 +320,9 @@ function ownRange(sys: Sys, root: string, base: string, sha: string): string {
 /**
  * The slices the branch's own commits, every one ahead of the base and not
  * only the 50 the placeholder lists, name in `Slice:` trailers, read from
- * repository `slug`, oldest commit first. A log git cannot read names none.
+ * repository `slug`, oldest commit first. Where the clone cannot read the
+ * base, the whole history is read, as the placeholder lists it, and its
+ * inherited trailers lean toward a draft. A log git cannot read names none.
  */
 export function ownSlices(sys: Sys, root: string, base: string, sha: string, slug: string): IssueRef[] {
   return slicesNamed(git(sys, root, ['log', '--no-merges', '--reverse', '--format=%B', ownRange(sys, root, base, sha)]) ?? '', slug);
