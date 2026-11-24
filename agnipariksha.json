@@ -1,0 +1,47 @@
+{
+  "upstream": "origin/main",
+  "ignore": ["\\.test\\.ts$", "\\.test\\.mjs$", "\\.d\\.m?ts$", "(^|/)fixtures?/"],
+  "unsetEnv": [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_QUARANTINE_PATH",
+    "GITHUB_ACTIONS",
+    "GITHUB_STEP_SUMMARY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN"
+  ],
+  "lanes": [
+    {
+      "name": "src",
+      "cwd": "",
+      "config": "stryker/src.config.mjs",
+      "reuse": false,
+      "include": ["^src/[^/]+\\.ts$"],
+      "extensions": [".ts"],
+      "env": { "AGNIPARIKSHA_SUITES": "{suites}" }
+    },
+    {
+      "name": "scripts",
+      "cwd": "",
+      "config": "stryker/scripts.config.mjs",
+      "reuse": false,
+      "include": ["^scripts/[^/]+\\.mjs$"],
+      "extensions": [".mjs"],
+      "env": { "AGNIPARIKSHA_SUITES": "{suites}" }
+    }
+  ],
+  "reuseKey": {
+    "always": ["pnpm-lock.yaml", "node_modules/@stryker-mutator/core/package.json"],
+    "pluginDir": "stryker/",
+    "helperPackages": [],
+    "sharedWorkspace": "src"
+  }
+}

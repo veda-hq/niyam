@@ -5,6 +5,9 @@ coverage/
 .dvara/*
 !.dvara/records-baseline.json
 .DS_Store
+# The mutation gate's reports and Stryker's sandboxes (agnipariksha.json).
+/reports/
+.stryker-tmp/
 
 # Agent scratch files, and the per-machine .local link (or folder) worktrees make.
 .tmp/
