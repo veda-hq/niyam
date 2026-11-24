@@ -7,7 +7,7 @@ import { schema } from './doc-numbers.ts';
 import { GITHUB_API, GITHUB_HOST } from './host.ts';
 import { commands } from './shell.ts';
 import type { HttpResult, Output, Sys } from './types.ts';
-import { sessionToken } from './work.ts';
+import { refName, sessionToken, slicesNamed, type IssueRef } from './work.ts';
 
 /**
  * Push, then pull request, for every push made in a client repository
@@ -311,6 +311,34 @@ function git(sys: Sys, root: string, args: readonly string[]): string | undefine
   return result.code === 0 ? result.stdout.trim() : undefined;
 }
 
+/** The branch's own commits: those ahead of the base, or the whole history when the clone cannot read the base. */
+function ownRange(sys: Sys, root: string, base: string, sha: string): string {
+  const ref = `refs/remotes/${REMOTE}/${base}`;
+  return git(sys, root, ['rev-parse', '--verify', '--quiet', ref]) !== undefined ? `${ref}..${sha}` : sha;
+}
+
+/**
+ * The slices the branch's own commits, the ones the placeholder lists, name
+ * in `Slice:` trailers, read from repository `slug`, oldest commit first. A
+ * log git cannot read names none.
+ */
+export function ownSlices(sys: Sys, root: string, base: string, sha: string, slug: string): IssueRef[] {
+  return slicesNamed(git(sys, root, ['log', '--no-merges', '--reverse', '--format=%B', ownRange(sys, root, base, sha)]) ?? '', slug);
+}
+
+/**
+ * Why the branch's pull request opens as a draft whatever the settings say,
+ * or undefined when its own commits name exactly one slice. A branch stacked
+ * on a peer's, or carrying a peer's work, names more than one or none, and a
+ * ready pull request would merge that work once its session writes the
+ * description with its own `Slice:` line (pr-watcher-hold-peer-work).
+ */
+export function heldBy(slices: readonly IssueRef[], slug: string): string | undefined {
+  if (slices.length === 1) return undefined;
+  if (slices.length === 0) return 'its own commits name no slice in a `Slice:` trailer';
+  return `its own commits name ${slices.length} slices (${slices.map((one) => refName(one, slug)).join(', ')})`;
+}
+
 /** Whether the commit has nothing the base lacks; false when the base cannot be read. */
 function nothingAhead(sys: Sys, root: string, base: string, sha: string): boolean {
   const ref = `refs/remotes/${REMOTE}/${base}`;
@@ -404,10 +432,8 @@ export class Pulls {
 }
 
 /** The placeholder body: what the push sent, and how the session replaces it. */
-export function placeholder(sys: Sys, root: string, settings: AutocreateSettings, branch: string, sha: string): { title: string; body: string } {
-  const ref = `refs/remotes/${REMOTE}/${settings.base}`;
-  const hasBase = git(sys, root, ['rev-parse', '--verify', '--quiet', ref]) !== undefined;
-  const log = git(sys, root, ['log', '--no-merges', '--reverse', '--format=%h %s', hasBase ? `${ref}..${sha}` : sha]) ?? '';
+export function placeholder(sys: Sys, root: string, settings: AutocreateSettings, branch: string, sha: string, held?: string): { title: string; body: string } {
+  const log = git(sys, root, ['log', '--no-merges', '--reverse', '--format=%h %s', ownRange(sys, root, settings.base, sha)]) ?? '';
   const commits = log.split('\n').filter((each) => each.includes(' ')).map((each) => {
     const at = each.indexOf(' ');
     return { short: each.slice(0, at), subject: each.slice(at + 1) };
@@ -417,6 +443,7 @@ export function placeholder(sys: Sys, root: string, settings: AutocreateSettings
   const body = [
     MARKER,
     `Opened automatically when \`${branch}\` was pushed. The pushing session replaces this body with the full description (${settings.describe}).`,
+    ...(held ? ['', `Opened as a draft: ${held}, so it may carry another slice's work. The session marks it ready with \`gh pr ready\` and this pull request's number once its description is written.`] : []),
     '',
     '## Commits',
     '',
@@ -425,6 +452,14 @@ export function placeholder(sys: Sys, root: string, settings: AutocreateSettings
     '',
   ].join('\n');
   return { title: commits[0]?.subject ?? branch, body };
+}
+
+/** What the session is told of a pull request opened as a draft because `held`. */
+function heldNote(pr: Pull, held: string, cloud: boolean): string {
+  const ready = cloud
+    ? `ask the user to mark it ready: \`gh pr ready ${pr.number}\` needs GraphQL, which this cloud session's GitHub proxy refuses`
+    : `mark it ready with \`gh pr ready ${pr.number}\``;
+  return `PR #${pr.number} was opened as a draft: ${held}, so it may carry another slice's work. Once its description is written, ${ready}.`;
 }
 
 /**
@@ -462,8 +497,9 @@ export async function ensurePr(sys: Sys, root: string, settings: AutocreateSetti
     } else if (nothingAhead(sys, root, settings.base, sha)) {
       notes.push(`Branch ${branch} has no commits ahead of ${settings.base}, so no PR was opened.`);
     } else {
-      const { title, body } = placeholder(sys, root, settings, branch, sha);
-      const made = await pulls.create(branch, settings.base, title, body, settings.draft);
+      const held = heldBy(ownSlices(sys, root, settings.base, sha, pulls.slug), pulls.slug);
+      const { title, body } = placeholder(sys, root, settings, branch, sha, held);
+      const made = await pulls.create(branch, settings.base, title, body, settings.draft || held !== undefined);
       if (typeof made === 'object' && 'noneAhead' in made) {
         notes.push(`Branch ${branch} has no commits ahead of ${settings.base}, so no PR was opened.`);
       } else if (typeof made === 'string') {
@@ -475,6 +511,7 @@ export async function ensurePr(sys: Sys, root: string, settings: AutocreateSetti
       } else {
         pr = made;
         created = true;
+        if (held) notes.push(heldNote(made, held, pulls.cloud));
       }
     }
     const state: State = { remoteSha: sha, branch, pr, created, notes };
@@ -829,8 +866,9 @@ export async function claudeHook(sys: Sys, io: Output, stdin: string, pullsOf: P
   const listed = !pulls.cloud && state.pr?.state === 'OPEN' && Boolean(state.pr.url) && listForAutofix(sys, session, state.pr.url);
   let message = await autofixMessage(sys, root, settings, state, session, pulls, listed);
   if (typeof message !== 'string') return bail(message.problem);
-  if (!message && state.notes.length > 0 && event === 'PostToolUse') {
-    message = state.notes.join('\n');
+  // A note rides with the instruction, or goes alone after a push; a Stop is never held for a note alone.
+  if (state.notes.length > 0 && (message || event === 'PostToolUse')) {
+    message = [message, ...state.notes].filter(Boolean).join('\n');
     try {
       saveState(sys, root, { ...state, notes: [] });
     } catch {
@@ -1009,7 +1047,7 @@ export async function spawnWatchers(sys: Sys, io: Output, args: readonly string[
       io.out(`⚠️  Could not start the PR watcher for ${branch} (${error instanceof Error ? error.message : String(error)}); open its PR yourself.`);
     }
   }
-  if (started.length > 0) io.out(`→ PR watcher started for ${started.join(', ')}: a ${settings.draft ? 'draft' : 'ready'} PR opens once the push lands.`);
+  if (started.length > 0) io.out(`→ PR watcher started for ${started.join(', ')}: ${settings.draft ? 'a draft PR opens' : 'a ready PR opens, or a draft where its own commits name no slice or more than one,'} once the push lands.`);
   return 0;
 }
 
@@ -1084,7 +1122,7 @@ export async function watch(sys: Sys, io: Output, args: readonly string[], pulls
     }
     if (!('problem' in state)) {
       const pr = state.pr;
-      log(`${branch}: ${pr ? `PR #${pr.number} ${state.created ? 'created' : 'exists'} (${pr.url})` : state.notes.join(' ') || 'no PR'}`);
+      log(`${branch}: ${[pr ? `PR #${pr.number} ${state.created ? 'created' : 'exists'} (${pr.url})` : '', ...state.notes].filter(Boolean).join(' ') || 'no PR'}`);
       return 0;
     }
     if (sys.now().getTime() >= retryDeadline) {
