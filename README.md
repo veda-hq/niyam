@@ -2019,15 +2019,18 @@ GitHub blocks `pull_request_target` in a public repository unless Settings,
 Actions, Policies allows it for that workflow, so `onboard` names that step
 there.
 
-Guard cannot judge a change to its own rules, so `.github/CODEOWNERS` names
-`@AlokBansal8` for the guard's files alone: `.github/workflows/shared-guard.yml`,
-`scripts/guard.mjs`, `scripts/guard.test.mjs`, the Mergify module it imports,
-`scripts/merge-queue.mjs` with its `scripts/merge-queue.test.mjs` (#524), and
-`.github/CODEOWNERS` itself. With "Require review from Code Owners" on in the `main` ruleset, a
-pull request that changes one of them waits for his approval. Every other
-pull request, including one under `.github/` that Guard passed, does not.
-The caller, `.github/workflows/niyam-guard.yml`, has no owner (#513), like
-every workflow but `shared-guard.yml`. Whatever the slice names, Guard holds the job that can
+Guard alone holds its own files. `.github/workflows/shared-guard.yml` is a
+guard file as everything under `.github/` is, and `scripts/guard.mjs`,
+`scripts/guard.test.mjs` and the Mergify module it imports,
+`scripts/merge-queue.mjs` with `scripts/merge-queue.test.mjs` (#524), are
+guard files through `"guard": ["scripts/*.mjs"]` in `.github/niyam.json`. A
+pull request that changes one passes only when its approved slice names the
+file under `**Guards:**`; none waits for a person's review (#578). A pull
+request cannot weaken Guard for its own merge, since `main`'s copy judges
+it, but a weakening that does merge judges every later pull request, so
+Guard's tests and Cubic are what catch it. The caller,
+`.github/workflows/niyam-guard.yml`, passes on its approved slice like every
+other workflow. Whatever the slice names, Guard holds the job that can
 report `niyam-guard / judge` to the caller's shape as `onboard` writes it, and
 its pin to forward moves to a niyam release (#512). Any other change to the
 file, another job included, passes only when an approved slice names it, as

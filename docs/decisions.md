@@ -2653,3 +2653,26 @@
   - Cost, accepted: any later unedited owner `Decision:` on the slice, or
     on its Work item naming it, re-settles its body as it then stands,
     even one about something else.
+- **2026-11-24 — Decision: Guard alone holds its own files, and CODEOWNERS
+  goes, ending P-63's owner review (Work item #468, slice #578).** Alok,
+  2026-11-23: "I see no value of my PR review in niyam, veda, and
+  athya-rules."
+  - On 2026-11-24 he turned off "Require review from Code Owners" in
+    `main`'s ruleset (read back: `require_code_owner_review: false`, no
+    approving reviews required), and `.github/CODEOWNERS` is deleted.
+  - Guard alone now holds `.github/workflows/shared-guard.yml` (under
+    `.github/`), `scripts/guard.mjs`, `scripts/guard.test.mjs`,
+    `scripts/merge-queue.mjs` and `scripts/merge-queue.test.mjs`
+    (`"guard": ["scripts/*.mjs"]`): a change to one passes
+    `niyam-guard / judge` only when its approved slice names it under
+    `**Guards:**`. Every path CODEOWNERS named was already a guard file.
+  - The trade, taken knowingly: a pull request cannot weaken Guard for its
+    own merge, since `main`'s copy judges it, but a weakening that does
+    merge judges every later pull request, and Guard's tests and Cubic are
+    what catch it. Alok's yes on such a change moves from the diff to the
+    slice, before the code exists.
+  - This ends P-63, P-65's line that CODEOWNERS holds a change to the guard
+    itself for Alok, and #513's "He still owns the Guard's own rules"
+    (above).
+  - Not changed: Cubic still reviews, and an open review thread still holds
+    the merge. veda's side is veda-hq/veda#559.
