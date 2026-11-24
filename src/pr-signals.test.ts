@@ -103,9 +103,12 @@ describe('dedupe', () => {
   });
 
   it('gives a lone thread its own one entry, a thread and a local finding one, and a signal with no thread none', () => {
-    const [lone, folded, bare] = dedupe([thread('a'), thread('b', { line: 9, author: 'review-bot' }), local('other', { line: 9 }), local('c', { line: 20 })], ['review-bot']);
+    const [lone, folded, bare] = dedupe(
+      [thread('a'), thread('b', { line: 9, author: 'review-bot', thread: 'PRRT_9', comment: 'PRRC_9' }), local('other', { line: 9 }), local('c', { line: 20 })],
+      ['review-bot'],
+    );
     assert.deepEqual(lone?.threads, [{ thread: 'PRRT_1', comment: 'PRRC_1' }]);
-    assert.deepEqual([folded?.threads, folded?.sources], [[{ thread: 'PRRT_1', comment: 'PRRC_1' }], ['review-thread', 'local-findings']]);
+    assert.deepEqual([folded?.thread, folded?.comment, folded?.threads, folded?.sources], ['PRRT_9', 'PRRC_9', [{ thread: 'PRRT_9', comment: 'PRRC_9' }], ['review-thread', 'local-findings']]);
     assert.equal(bare?.threads, undefined);
     const [noComment] = dedupe([{ source: 'review-thread', thread: 'PRRT_x', file: null, line: null, body: 'x' }], []);
     assert.deepEqual(noComment?.threads, [{ thread: 'PRRT_x' }]);
