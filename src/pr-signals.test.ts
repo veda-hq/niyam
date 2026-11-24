@@ -453,6 +453,15 @@ describe('prSignals', () => {
       assert.equal(result.err.length, want === 'dirty' ? 1 : 0);
     }
   });
+
+  it("keeps the first read's mergeable state when a push moved the head while the checks were read", async () => {
+    const sys = session();
+    let reads = 0;
+    sys.route('GET', `${REPO}/pulls/7`, () => (reads++ ? { status: 200, json: { state: 'open', merged_at: null, head: { sha: 'b'.repeat(40) }, mergeable_state: 'dirty' } } : { status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, mergeable_state: 'clean' } }));
+    const result = await run(sys, ['7', '--ci-only']);
+    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1 });
+    assert.deepEqual(result.err, []);
+  });
 });
 
 describe('ciSignals', () => {

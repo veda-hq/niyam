@@ -523,8 +523,10 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
   const after = await readPull(sys, token, slug, pr);
   const late = notOpen(io, pr, after, 'before-print');
   if (late !== undefined) return late;
-  // The later read is likelier to have the state worked out; while GitHub computes it, the first read's stands.
-  const ci = { mergeable: settled(after.mergeable) ? after.mergeable : pull.mergeable, checkRuns: checks.checkRuns, actionsRuns: checks.actionsRuns };
+  // The later read is likelier to have the state worked out; while GitHub computes it, or once a push has moved the
+  // head past the commit whose checks were read, the first read's stands.
+  const later = after.head === pull.head && settled(after.mergeable);
+  const ci = { mergeable: later ? after.mergeable : pull.mergeable, checkRuns: checks.checkRuns, actionsRuns: checks.actionsRuns };
   const warning = ciWarning(pr, pull.head, ci);
   if (warning) io.err(warning);
   io.out(
