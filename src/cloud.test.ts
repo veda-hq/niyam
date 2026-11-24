@@ -310,7 +310,7 @@ async function signsInClone(dir: string): Promise<void> {
   // No config of the machine running the tests, and no housekeeping that could race the cleanup.
   const gitEnv: Record<string, string> = { PATH: process.env.PATH ?? '', HOME: `${dir}/home`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
   const run = (command: string, args: string[], env: Record<string, string> = gitEnv, cwd = `${dir}/repo`): SpawnSyncReturns<string> => {
-    const ran = spawnSync(command, args, { cwd, env, encoding: 'utf8', timeout: 30_000 });
+    const ran = spawnSync(command, args, { cwd, env, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL' });
     assert.equal(ran.status, 0, `${command} ${args.join(' ')}: ${ran.stderr}`);
     return ran;
   };

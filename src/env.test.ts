@@ -154,7 +154,7 @@ describe('env, run by a real shell', () => {
     const printed = forEval(`${lockScript(HOME)}\n${SCRIPT}`);
     assert.ok(!printed.includes('#'), printed);
     const seen = ['eval "$1"', 'eval $1'].map((evaluate) => {
-      const ran = spawnSync('/bin/sh', ['-c', `${evaluate}; ${vars}`, 'sh', printed], { encoding: 'utf8', timeout: 10_000, env: { PATH: '/usr/bin:/bin', GITHUB_TOKEN: 'inherited' } });
+      const ran = spawnSync('/bin/sh', ['-c', `${evaluate}; ${vars}`, 'sh', printed], { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', env: { PATH: '/usr/bin:/bin', GITHUB_TOKEN: 'inherited' } });
       assert.equal(ran.status, 0, ran.stderr);
       return ran.stdout;
     });
@@ -167,6 +167,7 @@ describe('env, run by a real shell', () => {
     const ran = spawnSync('/bin/sh', ['-c', RUN_UNDER, 'niyam env', "export NIYAM_AGENT='ExampleBot'\nunset OTHER\n", 'sh', '-c', 'printf "%s %s %s" "$NIYAM_AGENT" "${OTHER-unset}" "$0"', 'arg zero'], {
       encoding: 'utf8',
       timeout: 10_000,
+      killSignal: 'SIGKILL',
       env: { PATH: '/usr/bin:/bin', OTHER: 'x' },
     });
     assert.equal(ran.status, 0);
@@ -174,7 +175,7 @@ describe('env, run by a real shell', () => {
   });
 
   it('runs nothing when the lines fail', () => {
-    const ran = spawnSync('/bin/sh', ['-c', RUN_UNDER, 'niyam env', 'false', 'echo', 'ran'], { encoding: 'utf8', timeout: 10_000 });
+    const ran = spawnSync('/bin/sh', ['-c', RUN_UNDER, 'niyam env', 'false', 'echo', 'ran'], { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL' });
     assert.notEqual(ran.status, 0);
     assert.equal(ran.stdout, '');
   });

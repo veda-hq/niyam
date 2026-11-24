@@ -65,7 +65,7 @@ beforeAll(() => {
 });
 after(() => removeFixtureRoot(SCRATCH));
 
-const gitIn = (root: string, ...args: string[]): string => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: hermeticGitEnv(), timeout: 30_000 });
+const gitIn = (root: string, ...args: string[]): string => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: hermeticGitEnv(), timeout: 30_000, killSignal: 'SIGKILL' });
 
 /**
  * A throwaway repository holding `files`, committed, with a GitHub `origin` and `origin/main` at that commit unless
