@@ -103,9 +103,16 @@ describe('parseHistory', () => {
 describe('repeatedFailure', () => {
   const runs = (list: Record<string, unknown>[]): HookRun[] => parseHistory(lines(...list)).runs;
 
+  const threshold = { failures: 3, trees: 2 };
+  const lint = { stages: [{ name: 'lint', startMs: 0, durationMs: 1, status: 'failed' }] };
+
   it('fires on three failures of one stage across two trees, on this branch', () => {
     const fired = repeatedFailure(runs([run(), run({ fingerprint: 'f2' }), run({ fingerprint: null })]), 'feature/a', []);
-    assert.deepEqual(fired, { fired: true, stage: 'test', failures: 3, trees: 2 });
+    assert.deepEqual(fired, { fired: true, stage: 'test', failures: 3, trees: 2, threshold });
+  });
+
+  it('names nothing with no failure on the branch', () => {
+    assert.deepEqual(repeatedFailure([], 'feature/a', []), { fired: false, stage: null, failures: 0, trees: 0, threshold });
   });
 
   it('counts nothing of another branch or kind, a pass, an ignored stage, or a run with no failed stage', () => {
@@ -115,17 +122,37 @@ describe('repeatedFailure', () => {
       run({ exitCode: 0 }),
       run({ stages: [{ name: 'gate', startMs: 0, durationMs: 1, status: 'timed_out' }] }),
       run({ stages: [{ name: 'lint', startMs: 0, durationMs: 1, status: 'skipped' }] }),
-      run(),
-      run({ fingerprint: 'f2' }),
     ];
-    assert.deepEqual(repeatedFailure(runs(noise), 'feature/a', ['gate']), { fired: false, stage: null, failures: 0, trees: 0 });
+    assert.deepEqual(repeatedFailure(runs(noise), 'feature/a', ['gate']), { fired: false, stage: null, failures: 0, trees: 0, threshold });
+    // Two real failures among the noise are a near miss, named with their own counts and nothing else's.
+    assert.deepEqual(repeatedFailure(runs([...noise, run(), run({ fingerprint: 'f2' })]), 'feature/a', ['gate']), { fired: false, stage: 'test', failures: 2, trees: 2, threshold });
+  });
+
+  it('names the stage nearest the trigger when none fires: most failures, then most trees, then the first seen', () => {
+    assert.deepEqual(repeatedFailure(runs([run(), run()]), 'feature/a', []), { fired: false, stage: 'test', failures: 2, trees: 1, threshold });
+    // Three failures in one tree is still short of the trigger; it is nearer than two.
+    assert.deepEqual(repeatedFailure(runs([run({ ...lint }), run({ ...lint, fingerprint: 'f2' }), run(), run(), run()]), 'feature/a', []), {
+      fired: false,
+      stage: 'test',
+      failures: 3,
+      trees: 1,
+      threshold,
+    });
+    assert.equal(repeatedFailure(runs([run(), run(), run({ ...lint }), run({ ...lint, fingerprint: 'f2' })]), 'feature/a', []).stage, 'lint');
+    assert.equal(repeatedFailure(runs([run(), run({ ...lint })]), 'feature/a', []).stage, 'test');
   });
 
   it('needs two trees, and names the stage that failed most', () => {
     assert.equal(repeatedFailure(runs([run(), run(), run()]), 'feature/a', []).fired, false);
-    const lint = { stages: [{ name: 'lint', startMs: 0, durationMs: 1, status: 'failed' }] };
     const both = [run(), run({ fingerprint: 'f2' }), run({ fingerprint: 'f3' }), run({ ...lint }), run({ ...lint, fingerprint: 'f2' }), run({ ...lint, fingerprint: 'f3' }), run({ ...lint, fingerprint: 'f4' })];
-    assert.deepEqual(repeatedFailure(runs(both), 'feature/a', []), { fired: true, stage: 'lint', failures: 4, trees: 4 });
+    assert.deepEqual(repeatedFailure(runs(both), 'feature/a', []), { fired: true, stage: 'lint', failures: 4, trees: 4, threshold });
+  });
+
+  it('names a stage that fired over one that failed more without firing', () => {
+    const near = [run(), run(), run(), run(), run()];
+    const fires = [run({ ...lint }), run({ ...lint, fingerprint: 'f2' }), run({ ...lint })];
+    assert.deepEqual(repeatedFailure(runs([...near, ...fires]), 'feature/a', []), { fired: true, stage: 'lint', failures: 3, trees: 2, threshold });
+    assert.deepEqual(repeatedFailure(runs([...fires, ...near]), 'feature/a', []), { fired: true, stage: 'lint', failures: 3, trees: 2, threshold });
   });
 });
 
@@ -158,8 +185,8 @@ describe('parseRunLog and citesAuthority', () => {
 });
 
 describe('assertDeclared', () => {
-  const plumbing: Triggers = { plumbing: { fired: true, paths: ['a/1', 'a/2', 'a/3', 'a/4', 'a/5', 'a/6'] }, repeated: { fired: false, stage: null, failures: 0, trees: 0 } };
-  const both: Triggers = { ...plumbing, repeated: { fired: true, stage: 'test', failures: 3, trees: 2 } };
+  const plumbing: Triggers = { plumbing: { fired: true, paths: ['a/1', 'a/2', 'a/3', 'a/4', 'a/5', 'a/6'] }, repeated: { fired: false, stage: null, failures: 0, trees: 0, threshold: { failures: 3, trees: 2 } } };
+  const both: Triggers = { ...plumbing, repeated: { fired: true, stage: 'test', failures: 3, trees: 2, threshold: { failures: 3, trees: 2 } } };
   const brief = (over: Partial<BriefIssue> = {}): BriefIssue => ({ number: 9, state: 'OPEN', stateReason: null, type: 'Brief', body: briefToIssue(draft(), 'T').body, closingSha: null, ...over });
   const input = (over: Partial<GateInput> = {}): GateInput => ({
     triggers: plumbing,
@@ -308,6 +335,20 @@ describe('handoff', () => {
     const { out, io } = capture();
     assert.equal(await handoff(sys, io, ['--detect', '--base', 'origin/trunk']), 0);
     assert.deepEqual((JSON.parse(out.join('\n')) as { fired: string[] }).fired, ['repeated-stage-failure']);
+  });
+
+  it('names the stage nearest the repeated-failure trigger before it fires, and none with no failure', async () => {
+    const detect = async (history: string): Promise<{ fired: string[]; triggers: Triggers }> => {
+      const sys = repo(['src/a.ts']);
+      sys.files.set(`${ROOT}/.tmp/history.jsonl`, history);
+      const { out, io } = capture();
+      assert.equal(await handoff(sys, io, ['--detect']), 0);
+      return JSON.parse(out.join('\n')) as { fired: string[]; triggers: Triggers };
+    };
+    const near = await detect(lines(run(), run()));
+    assert.deepEqual([near.fired, near.triggers.repeated], [[], { fired: false, stage: 'test', failures: 2, trees: 1, threshold: { failures: 3, trees: 2 } }]);
+    const none = await detect('');
+    assert.deepEqual([none.fired, none.triggers.repeated], [[], { fired: false, stage: null, failures: 0, trees: 0, threshold: { failures: 3, trees: 2 } }]);
   });
 
   it('records a declaration that the gate then passes, recording its own verdict', async () => {

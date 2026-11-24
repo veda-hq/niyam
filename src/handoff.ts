@@ -121,12 +121,18 @@ export interface Repeated {
   stage: string | null;
   failures: number;
   trees: number;
+  /** What fires it: this many failures of one stage, across this many working trees. */
+  threshold: { failures: number; trees: number };
 }
 
 /**
  * Fires when one stage was the one a push died at (failed, or timed out) three times on this branch, across two
  * working trees or more: the code kept changing and the same thing kept failing. Runs of other branches, and of
  * no branch, are not this push's. A run with no fingerprint counts as a failure but not as another tree.
+ *
+ * A stage that fired is the one named, the one that failed most. When none fired, the stage nearest the trigger is
+ * named all the same, with its counts: the one that failed most, then on the most trees, then the first seen. A
+ * session reading "failures 0" with two real failures behind it tries once more blind, and that fires the trigger.
  */
 export function repeatedFailure(runs: readonly HookRun[], branch: string, ignore: readonly string[]): Repeated {
   const counts = new Map<string, number>();
@@ -140,12 +146,18 @@ export function repeatedFailure(runs: readonly HookRun[], branch: string, ignore
     if (run.fingerprint) seen.add(run.fingerprint);
     trees.set(stage, seen);
   }
-  let worst: Repeated = { fired: false, stage: null, failures: 0, trees: 0 };
+  const threshold = { failures: MIN_FAILURES, trees: MIN_TREES };
+  let worst: Repeated = { fired: false, stage: null, failures: 0, trees: 0, threshold };
+  let nearest = worst;
   for (const [stage, failures] of counts) {
     const distinct = trees.get(stage)?.size ?? 0;
-    if (failures >= MIN_FAILURES && distinct >= MIN_TREES && failures > worst.failures) worst = { fired: true, stage, failures, trees: distinct };
+    if (failures >= MIN_FAILURES && distinct >= MIN_TREES) {
+      if (failures > worst.failures) worst = { fired: true, stage, failures, trees: distinct, threshold };
+    } else if (failures > nearest.failures || (failures === nearest.failures && distinct > nearest.trees)) {
+      nearest = { fired: false, stage, failures, trees: distinct, threshold };
+    }
   }
-  return worst;
+  return worst.fired ? worst : nearest;
 }
 
 export const CALL_SITES = ['push-skill', 'pre-push-hook', 'hook-verify'] as const;
@@ -558,7 +570,7 @@ async function openDraft(sys: Sys, io: Output, h: Here, draft: string, dispositi
 }
 
 /**
- * `niyam handoff`: --detect says which triggers fire; --record appends the session's declaration, opening its
+ * `niyam handoff`: --detect says which triggers fire, and the stage nearest the repeated-failure one; --record appends the session's declaration, opening its
  * brief first with --open-brief; --assert-fresh is the gate, as the pre-push hook runs it.
  */
 export async function handoff(sys: Sys, io: Output, args: readonly string[]): Promise<number> {
