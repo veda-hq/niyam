@@ -62,7 +62,7 @@ after(() => removeFixtureRoot(SCRATCH));
 /** A git repository with an origin/main, and these files committed. */
 function repo(files: Record<string, string> = {}): { dir: string; git: (...args: string[]) => string; sys: Sys } {
   const dir = mkdtempSync(join(SCRATCH, 'repo-'));
-  const git = (...args: string[]): string => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: hermeticGitEnv(), timeout: 30_000 });
+  const git = (...args: string[]): string => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: hermeticGitEnv(), timeout: 30_000, killSignal: 'SIGKILL' });
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 't@example.invalid');
   git('config', 'user.name', 'T');
@@ -354,7 +354,7 @@ describe('reserveDocNumber', () => {
 
   it('previews in a repository with no commit, and reports git failing', () => {
     const dir = mkdtempSync(join(SCRATCH, 'bare-'));
-    execFileSync('git', ['init', '-q'], { cwd: dir, env: hermeticGitEnv(), timeout: 30_000 });
+    execFileSync('git', ['init', '-q'], { cwd: dir, env: hermeticGitEnv(), timeout: 30_000, killSignal: 'SIGKILL' });
     const sys = { ...realSys(), cwd: dir };
     assert.equal(reserveDocNumber(sys, dir, SETTINGS, ADR, { dryRun: true }), '0001');
     assert.throws(() => reserveDocNumber(sys, dir, SETTINGS, ADR), /git rev-parse HEAD/);

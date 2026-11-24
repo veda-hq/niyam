@@ -12,7 +12,7 @@ import { commitSignature, newKey, privateKeyText, publicLine, readPrivateKey, si
 
 /** Runs real ssh-keygen in `dir`, failing the test on a non-zero exit unless `fails`. */
 function keygen(dir: string, args: string[], input?: Buffer | string, fails = false): { stdout: string; stderr: string } {
-  const ran = spawnSync('ssh-keygen', args, { cwd: dir, input, encoding: 'utf8', timeout: 30_000 });
+  const ran = spawnSync('ssh-keygen', args, { cwd: dir, input, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL' });
   if (!fails) assert.equal(ran.status, 0, `ssh-keygen ${args.join(' ')}: ${ran.stderr}`);
   return { stdout: ran.stdout, stderr: ran.stderr };
 }

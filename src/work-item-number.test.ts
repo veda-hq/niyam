@@ -41,7 +41,7 @@ after(() => removeFixtureRoot(SCRATCH));
 function fixture(rfcs: readonly string[] = [], docNumbers: unknown = RAW): string {
   const dir = mkdtempSync(join(SCRATCH, 'repo-'));
   const git = (...args: string[]): void => {
-    const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(), timeout: 30_000 });
+    const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: hermeticGitEnv(), timeout: 30_000, killSignal: 'SIGKILL' });
     assert.equal(result.status, 0, `git ${args.join(' ')}: ${result.stderr}`);
   };
   mkdirSync(join(dir, 'docs/rfcs'), { recursive: true });
