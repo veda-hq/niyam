@@ -939,6 +939,15 @@ pull request that is merged or closed is refused (exit 3 or 4, and
 printing, as one can merge while its signals are read. `--ci-only` reads the
 checks alone.
 
+An empty list of failures is green only once CI has run, so the output also
+carries `ci`: `{ "mergeable", "checkRuns", "actionsRuns" }`, the pull
+request's `mergeable_state` and how many check runs its head has, and how
+many of them GitHub Actions ran. A warning on standard error says when none
+has run. On a conflicted pull request (`dirty`), GitHub runs no
+`pull_request` workflow, so the warning says to merge the base and push
+before reading it as clear. On a head with no GitHub Actions check run yet,
+it says no CI has run on that commit. `signals` is the same either way.
+
 A repository with a local review, one that runs before a push and writes its
 findings to a file, names it in `.github/niyam.json`, with the logins of its
 review bots:
@@ -967,6 +976,13 @@ niyam handoff --detect                      # what fires, as JSON
 niyam handoff --record --disposition own-work --reason "the workflow change is this slice"
 niyam handoff --record --disposition handed-off --reason "..." --open-brief .tmp/brief.md
 ```
+
+`--detect` names the stage nearest the repeated-failure trigger before it
+fires, with its counts and the threshold, under `triggers.repeated`
+(`{ "fired": false, "stage": "test", "failures": 2, "trees": 1,
+"threshold": { "failures": 3, "trees": 2 } }`), so two real failures never
+read as none (#588). A stage that fired wins over
+one that failed more without firing.
 
 `own-work` is one sentence. `handed-off` names a Brief issue (`--brief #N`,
 or `--open-brief <draft.md>`, which lints the draft and opens it as one, on
@@ -1048,6 +1064,15 @@ hold the pushed commit, then opens the pull request, retrying GitHub for ten
 minutes. Nothing opens for a protected or merge-queue branch, another remote,
 a branch with no commits ahead of the base, one with a merged pull request
 (it is retired) or a closed one (reopening is a person's call), or in CI.
+A branch whose own commits, every one ahead of the base (the placeholder
+lists the first 50; the whole history where the clone cannot read the base,
+which leans toward a draft), name no slice or more than one in their `Slice:` trailers opens as a
+draft whatever `draft` says: it is stacked on a peer's branch or carries a
+peer's work, which a ready pull request would merge once its session writes
+the description. The placeholder body and the note the session gets (and
+the watch log line) name those slices, and say the session marks it ready
+with `gh pr ready N` once the description is written; a cloud session, whose
+proxy refuses the GraphQL that needs, is told to ask the user.
 `NIYAM_PR_AUTOCREATE=0` on a push opens none for the commit it sent: the
 choice is recorded before git sends the refs, and a push whose choice cannot
 be recorded is refused (exit 3). Every answer is kept in

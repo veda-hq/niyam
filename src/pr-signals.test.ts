@@ -257,8 +257,8 @@ describe('pages', () => {
 function session(pull: Record<string, unknown> = {}): FakeSys {
   const sys = new FakeSys();
   sys.env = { NIYAM_AGENT: AGENT, GH_TOKEN: 'ghp_good' };
-  sys.route('GET', `${REPO}/pulls/7`, { status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, ...pull } });
-  sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [] } });
+  sys.route('GET', `${REPO}/pulls/7`, { status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, mergeable_state: 'clean', ...pull } });
+  sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ id: 1, name: 'ci', conclusion: 'success', app: { slug: 'github-actions' } }] } });
   sys.route('GET', `${REPO}/commits/${HEAD}/status?per_page=100&page=1`, { status: 200, json: { statuses: [] } });
   sys.route('GET', `${REPO}/pulls/7/files?per_page=100&page=1`, { status: 200, json: [{ filename: 'src/a.ts' }] });
   sys.route('POST', '/graphql', () => ({
@@ -306,6 +306,7 @@ describe('prSignals', () => {
     );
     assert.deepEqual(out.resolved, [{ file: 'src/a.ts', line: 8, preview: 'Rename it.', createdAt: '2026-11-13T00:00:00Z' }]);
     assert.deepEqual([out.ok, out.pr, out.cloud, out.duplicates, out.findings], [true, 7, false, 1, { status: 'ok', droppedOffDiff: 1 }]);
+    assert.deepEqual(out.ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1 });
     assert.equal(out.signals[0]?.candidates?.length, 1);
     assert.deepEqual(result.err, []);
     const query = sys.requests.find((r) => r.url.endsWith('/graphql'))?.body as { variables: Record<string, unknown> };
@@ -381,7 +382,7 @@ describe('prSignals', () => {
     const sys = session();
     sys.files.set(`${ROOT}/.tmp/review/findings.json`, JSON.stringify({ issues: [{ title: 'x', file: 'src/a.ts', line: 1 }] }));
     const out = parsed(await run(sys, ['7', '--ci-only']));
-    assert.deepEqual([out.signals, out.resolved, out.findings], [[], [], undefined]);
+    assert.deepEqual([out.signals, out.resolved, out.findings, out.ci], [[], [], undefined, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1 }]);
     assert.ok(!sys.requests.some((r) => r.url.endsWith('/graphql')));
   });
 
@@ -418,6 +419,49 @@ describe('prSignals', () => {
     delete sys.env.GH_TOKEN;
     assert.deepEqual(await run(sys, ['7']), { code: 1, out: [], err: ['✗ this session has no token; run niyam doctor'] });
   });
+
+  it('says a conflicted pull request runs no CI, so its empty list is not green', async () => {
+    const sys = session({ mergeable_state: 'dirty' });
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [] } });
+    const result = await run(sys, ['7', '--ci-only']);
+    assert.equal(result.code, 0);
+    const out = parsed(result);
+    assert.deepEqual([out.signals, out.ci], [[], { mergeable: 'dirty', checkRuns: 0, actionsRuns: 0 }]);
+    assert.deepEqual(result.err, ['⚠ #7 has merge conflicts, so GitHub runs no pull_request workflows on it: merge the base and push before reading it as clear']);
+  });
+
+  it('says when no GitHub Actions check run is on the head yet, though another app ran', async () => {
+    const sys = session();
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ id: 3, name: 'Cubic', conclusion: 'success', app: { slug: 'cubic' } }] } });
+    const result = await run(sys, ['7', '--ci-only']);
+    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 0 });
+    assert.deepEqual(result.err, [`⚠ no CI has run on ${HEAD} yet: no GitHub Actions check run is on it, so no failure listed is not a pass`]);
+  });
+
+  it("takes the later read's mergeable state, unless GitHub is still working it out", async () => {
+    for (const [first, later, want] of [
+      ['dirty', 'unknown', 'dirty'],
+      [undefined, 'clean', 'clean'],
+      ['clean', undefined, 'clean'],
+      [undefined, undefined, null],
+    ] as const) {
+      const sys = session();
+      let reads = 0;
+      sys.route('GET', `${REPO}/pulls/7`, () => ({ status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, mergeable_state: reads++ ? later : first } }));
+      const result = await run(sys, ['7', '--ci-only']);
+      assert.equal((parsed(result).ci as { mergeable: unknown }).mergeable, want);
+      assert.equal(result.err.length, want === 'dirty' ? 1 : 0);
+    }
+  });
+
+  it("keeps the first read's mergeable state when a push moved the head while the checks were read", async () => {
+    const sys = session();
+    let reads = 0;
+    sys.route('GET', `${REPO}/pulls/7`, () => (reads++ ? { status: 200, json: { state: 'open', merged_at: null, head: { sha: 'b'.repeat(40) }, mergeable_state: 'dirty' } } : { status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, mergeable_state: 'clean' } }));
+    const result = await run(sys, ['7', '--ci-only']);
+    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1 });
+    assert.deepEqual(result.err, []);
+  });
 });
 
 describe('ciSignals', () => {
@@ -441,12 +485,16 @@ describe('ciSignals', () => {
       status: 200,
       json: { statuses: [{ context: 'deploy', state: 'error', description: 'build failed' }, { context: 'other', state: 'success' }] },
     });
-    assert.deepEqual(await ciSignals(sys, 't', 'example-org/example-app', HEAD), [
-      { source: 'ci-failure', check: 'ci / test', file: null, line: null, body: 'error TS2322: wrong type', failureType: 'typecheck' },
-      { source: 'ci-failure', check: 'Cubic', file: null, line: null, body: 'Cubic: failure\nReview failed', failureType: 'other' },
-      { source: 'ci-failure', check: 'ci / build', file: null, line: null, body: 'ci / build: timed_out', failureType: 'build' },
-      { source: 'ci-failure', check: 'deploy', file: null, line: null, body: 'deploy: error\nbuild failed', failureType: 'build' },
-    ]);
+    assert.deepEqual(await ciSignals(sys, 't', 'example-org/example-app', HEAD), {
+      signals: [
+        { source: 'ci-failure', check: 'ci / test', file: null, line: null, body: 'error TS2322: wrong type', failureType: 'typecheck' },
+        { source: 'ci-failure', check: 'Cubic', file: null, line: null, body: 'Cubic: failure\nReview failed', failureType: 'other' },
+        { source: 'ci-failure', check: 'ci / build', file: null, line: null, body: 'ci / build: timed_out', failureType: 'build' },
+        { source: 'ci-failure', check: 'deploy', file: null, line: null, body: 'deploy: error\nbuild failed', failureType: 'build' },
+      ],
+      checkRuns: 5,
+      actionsRuns: 4,
+    });
     assert.equal(sys.requests.find((r) => r.url.endsWith('/jobs/11/logs'))?.token, 't');
   });
 
@@ -464,7 +512,7 @@ describe('ciSignals', () => {
     });
     sys.route('GET', `${REPO}/actions/jobs/21/logs`, { status: 200, json: null, text: '2026-11-14T17:05:12.8364488Z ✗ #7 names no slice' });
     sys.route('GET', `${REPO}/actions/jobs/22/logs`, { status: 200, json: null, text: '2026-11-14T17:05:17.9145970Z ✗ #7 names no slice' });
-    const failures = await ciSignals(sys, 't', 'example-org/example-app', HEAD);
+    const failures = (await ciSignals(sys, 't', 'example-org/example-app', HEAD)).signals;
     assert.deepEqual(
       failures.map((s) => s.body),
       ['✗ #7 names no slice', '✗ #7 names no slice'],
@@ -476,7 +524,7 @@ describe('ciSignals', () => {
     const sys = session();
     sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ id: 11, name: 'ci', conclusion: 'cancelled', app: { slug: 'github-actions' } }] } });
     sys.route('GET', `${REPO}/actions/jobs/11/logs`, { status: 200, json: null });
-    assert.deepEqual((await ciSignals(sys, 't', 'example-org/example-app', HEAD)).map((s) => s.body), ['ci: cancelled']);
+    assert.deepEqual((await ciSignals(sys, 't', 'example-org/example-app', HEAD)).signals.map((s) => s.body), ['ci: cancelled']);
     sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ name: 'no id' }] } });
     await assert.rejects(ciSignals(sys, 't', 'example-org/example-app', HEAD), /lists a check run with no id or name/);
     sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [] } });
