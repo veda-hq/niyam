@@ -97,8 +97,8 @@ after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A clone with a bare origin standing in for GitHub, main pushed and `feature` pushed one commit ahead. */
-function world(): { dir: string; work: string; bare: string; git: (...args: string[]) => string; commit: (name: string) => string } {
+/** A clone with a bare origin standing in for GitHub, main pushed and `feature` pushed one commit ahead, which names slice #7. */
+function world(): { dir: string; work: string; bare: string; git: (...args: string[]) => string; commit: (name: string, ...more: string[]) => string } {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-autocreate-')));
   dirs.push(dir);
   const bare = join(dir, 'origin.git');
@@ -114,16 +114,17 @@ function world(): { dir: string; work: string; bare: string; git: (...args: stri
   git('remote', 'add', 'origin', URL_OF);
   git('config', `url.${bare}.insteadOf`, URL_OF);
   let n = 0;
-  const commit = (name: string): string => {
+  // Each of `more` is a paragraph of the message after the subject, such as a trailer.
+  const commit = (name: string, ...more: string[]): string => {
     writeFileSync(join(work, `f${n++}.txt`), `${name}\n`);
     git('add', '-A');
-    git('commit', '-q', '-m', name);
+    git('commit', '-q', '-m', name, ...more.flatMap((each) => ['-m', each]));
     return git('rev-parse', 'HEAD');
   };
   commit('base');
   git('push', '-q', '-u', 'origin', 'main');
   git('checkout', '-q', '-b', 'feature');
-  commit('✨ feat: the first change');
+  commit('✨ feat: the first change', 'Slice: #7');
   git('push', '-q', '-u', 'origin', 'feature');
   return { dir, work, bare, git, commit };
 }
@@ -386,6 +387,79 @@ describe('pr-autocreate claude-hook (real git, GitHub faked)', () => {
     assert.match(body.body, /full description \(`\/ship` step 9\)\./);
     assert.match(body.body, /\n\n🤖 Generated\n$/);
     assert.match(context(got.out), /real description \(`\/ship` step 9\)/);
+    // A draft the settings ask for, with one slice named: nothing is held.
+    assert.doesNotMatch(body.body, /Opened as a draft/);
+    assert.doesNotMatch(context(got.out), /was opened as a draft/);
+  });
+
+  describe("a branch carrying another slice's work (pr-watcher-hold-peer-work)", () => {
+    const opened = (): { draft: boolean; body: string } => github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean; body: string };
+
+    it('opens a draft when its own commits name two slices, says which in the body and the note, and says the note once', async () => {
+      w.commit("✨ feat: a peer's change", 'Slice: #8');
+      w.git('push', '-q');
+      const got = await hook(sys, bash(w.work, 'git push'));
+      assert.equal(opened().draft, true);
+      assert.match(opened().body, /\n\nOpened as a draft: its own commits name 2 slices \(#7, #8\), so it may carry another slice's work\. The session marks it ready with `gh pr ready` and this pull request's number once its description is written\.\n\n## Commits\n/);
+      // The placeholder still names no slice, so Work rules still fails it.
+      assert.doesNotMatch(opened().body, /^Slice:/m);
+      const said = context(got.out);
+      assert.match(said, /^PR #100 \(.*\) was opened automatically/);
+      assert.match(said, /\nPR #100 was opened as a draft: its own commits name 2 slices \(#7, #8\), so it may carry another slice's work\. Once its description is written, mark it ready with `gh pr ready 100`\.$/);
+      assert.deepEqual(record(w.work, 'feature').notes, []);
+    });
+
+    it('opens a draft when they name none', async () => {
+      w.git('checkout', '-q', '-b', 'loose', 'main');
+      w.commit('🐛 fix: no trailer');
+      w.git('push', '-q', '-u', 'origin', 'loose');
+      const got = await hook(sys, bash(w.work, 'git push'));
+      assert.equal(opened().draft, true);
+      assert.match(opened().body, /Opened as a draft: its own commits name no slice in a `Slice:` trailer, so it may carry another slice's work\./);
+      assert.match(context(got.out), /PR #100 was opened as a draft: its own commits name no slice/);
+    });
+
+    it('opens ready by the commits ahead of the base alone: a slice the base already has is not the branch\'s', async () => {
+      w.git('checkout', '-q', 'main');
+      w.commit('🔧 chore: earlier work', 'Slice: #3');
+      w.git('push', '-q', 'origin', 'main');
+      w.git('checkout', '-q', '-b', 'next');
+      w.commit('✨ feat: the next change', 'Slice: #9');
+      w.git('push', '-q', '-u', 'origin', 'next');
+      const got = await hook(sys, bash(w.work, 'git push'));
+      assert.equal(opened().draft, false);
+      assert.doesNotMatch(opened().body, /Opened as a draft/);
+      assert.doesNotMatch(context(got.out), /was opened as a draft/);
+    });
+
+    it('says the note with the instruction when Stop tells it', async () => {
+      w.commit("✨ feat: a peer's change", 'Slice: #8');
+      w.git('push', '-q');
+      const got = await hook(sys, input('Stop', { cwd: w.work }));
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), /\nPR #100 was opened as a draft: .*`gh pr ready 100`\.$/);
+    });
+
+    it('in a cloud session asks the user to mark it ready, since gh pr ready needs GraphQL', async () => {
+      const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
+      w.commit("✨ feat: a peer's change", 'Slice: #8');
+      w.git('push', '-q');
+      const said = context((await hook(cloud, bash(w.work, 'git push'), viaToken(true))).out);
+      assert.match(said, /Once its description is written, ask the user to mark it ready: `gh pr ready 100` needs GraphQL, which this cloud session's GitHub proxy refuses\.$/);
+    });
+
+    it('fails toward a draft when git cannot read the commits', async () => {
+      const { sys: fakeSys, github: fakeHub } = (() => {
+        const each = new FakeSys();
+        const hub = new FakeGitHub();
+        each.http = hub.http as FakeSys['http'];
+        each.execOverride = (call) => (call.command === 'git' ? { code: 1, stdout: '', stderr: '' } : undefined);
+        return { sys: each, github: hub };
+      })();
+      const state = await ensurePr(fakeSys, ROOT, autocreateSettings({}), 'feature', SHA, new Pulls(fakeSys, SLUG, 't', false));
+      assert.equal((fakeHub.calls.find((call) => call.method === 'POST')?.body as { draft: boolean }).draft, true);
+      assert.match(JSON.stringify(state), /PR #100 was opened as a draft: its own commits name no slice/);
+    });
   });
 
   it('says nothing done when the settings cannot be read', async () => {
@@ -623,7 +697,7 @@ describe('pr-autocreate spawn-watchers and watch (real git, GitHub faked)', () =
       'not a ref line',
       '',
     ].join('\n'));
-    assert.deepEqual(got, { code: 0, out: ['→ PR watcher started for feature: a ready PR opens once the push lands.'], err: [] });
+    assert.deepEqual(got, { code: 0, out: ['→ PR watcher started for feature: a ready PR opens, or a draft where its own commits name no slice or more than one, once the push lands.'], err: [] });
     assert.deepEqual(sys.detached, [[sys.runtime.node, sys.runtime.cli, 'pr-autocreate', 'watch', '--root', w.work, '--branch', 'feature', '--sha', SHA, join(w.work, '.tmp/pr-autocreate/watch.log')]]);
     assert.equal(readFileSync(optoutPath(w.work, 'feature'), 'utf8'), `${SHA} 0\n`);
   });
@@ -671,6 +745,14 @@ describe('pr-autocreate spawn-watchers and watch (real git, GitHub faked)', () =
     github.pulls.push({ number: 4, head: 'other', state: 'open', merged_at: null, body: '' });
     w.git('push', '-q', 'origin', 'HEAD:other');
     assert.deepEqual(await watching(['--root', w.work, '--branch', 'other', '--sha', sha]), ['2026-11-15T10:00:00 other: PR #4 exists (https://github.com/example-org/example-app/pull/4)']);
+  });
+
+  it("opens a draft for a branch carrying another slice's work, and its log line says why", async () => {
+    w.commit("✨ feat: a peer's change", 'Slice: #8');
+    w.git('push', '-q');
+    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', w.git('rev-parse', 'HEAD')]);
+    assert.equal((github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean }).draft, true);
+    assert.deepEqual(out, ["2026-11-15T10:00:00 feature: PR #100 created (https://github.com/example-org/example-app/pull/100) PR #100 was opened as a draft: its own commits name 2 slices (#7, #8), so it may carry another slice's work. Once its description is written, mark it ready with `gh pr ready 100`."]);
   });
 
   it('gives up when the push never lands, in the line push instructions look for', async () => {

@@ -1037,6 +1037,15 @@ hold the pushed commit, then opens the pull request, retrying GitHub for ten
 minutes. Nothing opens for a protected or merge-queue branch, another remote,
 a branch with no commits ahead of the base, one with a merged pull request
 (it is retired) or a closed one (reopening is a person's call), or in CI.
+A branch whose own commits, every one ahead of the base (the placeholder
+lists the first 50; the whole history where the clone cannot read the base,
+which leans toward a draft), name no slice or more than one in their `Slice:` trailers opens as a
+draft whatever `draft` says: it is stacked on a peer's branch or carries a
+peer's work, which a ready pull request would merge once its session writes
+the description. The placeholder body and the note the session gets (and
+the watch log line) name those slices, and say the session marks it ready
+with `gh pr ready N` once the description is written; a cloud session, whose
+proxy refuses the GraphQL that needs, is told to ask the user.
 `NIYAM_PR_AUTOCREATE=0` on a push opens none for the commit it sent: the
 choice is recorded before git sends the refs, and a push whose choice cannot
 be recorded is refused (exit 3). Every answer is kept in
