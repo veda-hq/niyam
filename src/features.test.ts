@@ -157,7 +157,7 @@ describe('checks of features that are off', () => {
     const sys = identityOnly();
     sys.acceptToken('ghs_run', AGENT);
     const { io, err } = capture();
-    assert.equal(await prePush(sys, io, `refs/heads/w ${'a'.repeat(40)} refs/heads/w ${'b'.repeat(40)}`, 'https://github.com/example-org/example-app.git'), 0);
+    assert.equal(await prePush(sys, io, `refs/heads/w ${'a'.repeat(40)} refs/heads/w ${'b'.repeat(40)}`, 'https://github.com/example-org/example-app.git', 'origin'), 0);
     assert.deepEqual(err, ['pre-push: work-rules is off in .github/niyam.json; nothing to check']);
   });
 
@@ -255,13 +255,15 @@ describe('checks on a personal repository', () => {
     askedOnce(sys);
   });
 
-  it('pre-push checks only that an agent pushes as the agent, saying why the work rules cannot run', async () => {
+  it('pre-push checks only that an agent pushes as the agent and not to a retired branch, saying why the work rules cannot run', async () => {
     const sys = personal();
     sys.acceptToken('ghs_run', AGENT);
     const { io, err } = capture();
-    assert.equal(await prePush(sys, io, `refs/heads/w ${'a'.repeat(40)} refs/heads/w ${'b'.repeat(40)}`, 'https://github.com/example-org/example-app.git'), 0);
+    assert.equal(await prePush(sys, io, `refs/heads/w ${'a'.repeat(40)} refs/heads/w ${'b'.repeat(40)}`, 'https://github.com/example-org/example-app.git', 'origin'), 0);
     assert.deepEqual(err, [`pre-push: work-rules is off ${WHY}; nothing to check`]);
-    askedOnce(sys);
+    const [retired, ...rest] = sys.requests.filter((r) => r.url.startsWith('https://api.github.com/repos/'));
+    assert.deepEqual(retired, { url: 'https://api.github.com/repos/example-org/example-app/pulls?head=example-org%3Aw&state=all&per_page=20', method: 'GET', token: 'ghs_run', timeoutMs: 30_000 });
+    assert.deepEqual(rest, [{ url: 'https://api.github.com/repos/example-org/example-app', method: 'GET', token: 'ghs_run' }]);
   });
 
   it('propose posts nothing, saying why', async () => {

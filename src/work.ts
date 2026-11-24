@@ -11,6 +11,8 @@ import { ownersAlone, whyNotCounted } from './edits.ts';
 import { batchAnswers } from './approvals.ts';
 import { approvalsOf } from './issue-types.ts';
 import { PAGE_LINK, askProblem } from './asks.ts';
+import { Pulls, type PullsOf, RETIRED_REFUSAL, refuseRetired } from './pr-autocreate.ts';
+import { errorDetail } from './error-detail.ts';
 
 /** An issue a `Slice:` or `State:` line names: its repository, `owner/name`, and its number. */
 export interface IssueRef {
@@ -683,9 +685,13 @@ async function mergedFromDefault(sys: Sys, root: string, slug: string, token: st
 
 /**
  * Before a push from an agent session, run by the client's pre-push git hook
- * with git's ref lines on stdin and the remote's URL: first that it reaches
- * GitHub as the agent, the pre-push identity guard, which holds even in a
- * session whose Claude Code hooks never ran. Then the work rules: all the commits one push
+ * with git's ref lines on stdin and the remote's URL and name: first that it
+ * reaches GitHub as the agent, the pre-push identity guard, which holds even
+ * in a session whose Claude Code hooks never ran. Then that no pushed branch
+ * is one whose pull request merged with none open, as `niyam pr-autocreate
+ * refuse-retired` judges it: such a push recreates a branch the merge
+ * retired, and its commits land in no pull request; a branch GitHub cannot
+ * answer for only warns. Then the work rules: all the commits one push
  * brings, across every ref, must name exactly one slice between them, as a
  * trailer `Slice: #N`, that may be built. Commits a remote already has, and
  * the commits on the remote's default branch that the clone can find, are not
@@ -698,7 +704,7 @@ async function mergedFromDefault(sys: Sys, root: string, slug: string, token: st
  * push's commits are all merges, those the merges did not bring. Pushes
  * outside agent sessions pass; an agent session with no token is refused.
  */
-export async function prePush(sys: Sys, io: Output, refLines: string, url: string): Promise<number> {
+export async function prePush(sys: Sys, io: Output, refLines: string, url: string, remote: string): Promise<number> {
   if (!agentSession(sys)) return 0;
   const { root, slug } = repoAt(sys);
   const accounts = loadSettings(sys, root);
@@ -706,6 +712,20 @@ export async function prePush(sys: Sys, io: Output, refLines: string, url: strin
   if (identity) {
     io.err(`✗ ${identity}`);
     io.err(`pre-push: refused; an agent session pushes to GitHub only as ${either(accounts.agents)}`);
+    return 1;
+  }
+  // refuse-retired's own check, on the hook's stderr. Whatever else it exits, a warning said so and the push goes on.
+  const hook: Output = { out: (line) => io.err(line), err: (line) => io.err(line) };
+  // Asked with the session's own token alone: never gh's signed-in account, which on this Mac is the owner's.
+  const session = sessionToken(sys);
+  const pullsOf: PullsOf = () => (session ? new Pulls(sys, slug, session, sys.env.CLAUDE_CODE_REMOTE === 'true') : { problem: 'this agent session has no token; run niyam doctor' });
+  const retired = await refuseRetired(sys, hook, ['--root', root, '--remote', remote], refLines, pullsOf).catch((error: unknown) => {
+    // fail-open: as refuse-retired's own crash does, this warns "not checked" and the work rules still run.
+    io.err(`⚠️  Could not check whether a pushed branch's PR already merged (${errorDetail(error)}); not checked.`);
+    return 0;
+  });
+  if (retired === RETIRED_REFUSAL) {
+    io.err('pre-push: refused; a merged pull request retired this branch');
     return 1;
   }
   // The hand-off gate, where the repository names its plumbing: on its own setting, not a feature.

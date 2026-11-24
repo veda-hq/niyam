@@ -139,7 +139,7 @@ describe('prePush identity guard', () => {
   it("refuses an agent session's push with the owner's credentials before the work rules", async () => {
     const sys = withCredentials('gho_owner', 'example-owner');
     const { io, err } = capture();
-    assert.equal(await prePush(sys, io, LINES, HTTPS), 1);
+    assert.equal(await prePush(sys, io, LINES, HTTPS, 'origin'), 1);
     assert.deepEqual(err, [
       `✗ this push would reach GitHub as example-owner, not ${AGENT}; agent sessions push only as ${AGENT}: ${NOT_SET_UP}`,
       `pre-push: refused; an agent session pushes to GitHub only as ${AGENT}`,
@@ -151,14 +151,14 @@ describe('prePush identity guard', () => {
     const sys = new FakeSys();
     sys.env = { CLAUDECODE: '1' };
     const { io, err } = capture();
-    assert.equal(await prePush(sys, io, LINES, 'git@github.com:example-org/example-app.git'), 1);
+    assert.equal(await prePush(sys, io, LINES, 'git@github.com:example-org/example-app.git', 'origin'), 1);
     assert.match(err[0] ?? '', /over SSH/);
   });
 
   it("leaves the owner's own pushes alone", async () => {
     const sys = new FakeSys();
     const { io, err } = capture();
-    assert.equal(await prePush(sys, io, LINES, 'git@github.com:example-org/example-app.git'), 0);
+    assert.equal(await prePush(sys, io, LINES, 'git@github.com:example-org/example-app.git', 'origin'), 0);
     assert.deepEqual({ err, calls: sys.calls }, { err: [], calls: [] });
   });
 });

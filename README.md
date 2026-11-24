@@ -1085,8 +1085,9 @@ GitHub as the session's agent, with every check `as-agent` makes, and the
 watcher with the push's own token. Its own errors never fail a push or hold
 a session.
 
-`refuse-retired --root <repo> --remote <name>`, which the pre-push hook runs
-before its expensive checks with the same ref lines, refuses (exit 3) a push to
+`refuse-retired --root <repo> --remote <name>`, which a client's own pre-push
+hook can run before its expensive checks with the same ref lines (`niyam
+pre-push` runs the same check itself), refuses (exit 3) a push to
 a branch whose pull request merged while none is open. Such a push recreates a
 branch the merge retired, and the commits after the merge land in no pull
 request. The refusal names the way out. A branch GitHub cannot answer for, or
@@ -1290,7 +1291,16 @@ SSH keys, the owner's; over HTTPS to GitHub, git is asked for the
 credentials it would push with (one in the URL included) and GitHub for
 whose they are, and only the agent's push goes ahead; in a Claude cloud
 session, GitHub is asked through its proxy whose account the session is. The
-owner's pushes from their own terminal are not checked. With `work-rules` on, it then applies the same rules before an
+owner's pushes from their own terminal are not checked. Then, before the
+work rules and whatever features are on, an agent session's push to origin
+is refused when a pushed branch's pull request merged and none is open, as
+`niyam pr-autocreate refuse-retired` refuses it and with its message: the
+push would recreate a branch the merge retired, and its commits would land
+in no pull request. Only the branches a pull request could come from are
+judged: not the `prAutocreate` base branch, its `protected` branches or
+those under its `skip` prefixes. GitHub is asked once per judged branch,
+with the session's own token; when it cannot be asked, one warning line
+says so and the push goes on. With `work-rules` on, it then applies the same rules before an
 agent session pushes: all the commits
 one push brings, on one branch, name one slice between them as a
 `Slice: #N` trailer. Commits a remote already has are not the push's own,
