@@ -1146,8 +1146,8 @@ describe('prWorkRules', () => {
     });
 
     it("refuses an owner's, and a fork's of any author", async () => {
-      for (const [number, login] of [[41, OWNER], [44, 'someone']] as const) {
-        const sys = actions({ number, body: null, user: { login }, head: { ref: 'dependabot/x' } });
+      for (const [number, login, repo] of [[41, OWNER, SLUG], [44, 'someone', 'someone/example-app']] as const) {
+        const sys = actions({ number, body: null, user: { login }, head: { ref: 'dependabot/x', repo: { full_name: repo } } });
         assert.deepEqual(await check(sys), { code: 1, out: [], err: refused(number, 'dependabot/x') });
       }
     });

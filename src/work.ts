@@ -545,8 +545,10 @@ function report(io: Output, where: string, problems: string[]): number {
 }
 
 /**
- * The work rules on a pull request, run by the shared workflow. The owner's
- * pull requests pass; an agent's must name exactly one slice, as a line
+ * The work rules on a pull request, run by the shared workflow. A pull
+ * request from a DEPENDABOT_BRANCH branch fails unless Dependabot opened it,
+ * whoever did (#591). Otherwise the owner's pull requests pass; an agent's
+ * must name exactly one slice, as a line
  * `Slice: #N`, that may be built, and name with lines `State: #N` only States
  * under it, at least one open one when the slice is closed already (a fix);
  * but for onboard's own: from ONBOARD_BRANCH alone in this repository,
