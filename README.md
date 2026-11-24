@@ -2089,7 +2089,8 @@ GitHub blocks `pull_request_target` in a public repository unless Settings,
 Actions, Policies allows it for that workflow, so `onboard` names that step
 there.
 
-Guard alone holds its own files. `.github/workflows/shared-guard.yml` is a
+Guard holds its own files, and `.github/CODEOWNERS` names their owner.
+`.github/workflows/shared-guard.yml` is a
 guard file as everything under `.github/` is, and `scripts/guard.mjs`,
 `scripts/guard.test.mjs` and the Mergify module it imports,
 `scripts/merge-queue.mjs` with `scripts/merge-queue.test.mjs` (#524), are
@@ -2097,8 +2098,12 @@ guard files through `"guard": ["scripts/*.mjs"]` in `.github/niyam.json`. A
 pull request that changes one passes only when its approved slice names the
 file under `**Guards:**`, unless Guard exempts it as a mechanical pin move
 (Dependabot's sha bumps, an onboard's version moves to a niyam release); none
-waits for a person's review (#578). A pull request cannot weaken Guard for
-its own merge: `main`'s caller runs the niyam release it pins, never the
+waits for a person's review (#578). `.github/CODEOWNERS` names `@AlokBansal8`
+for these files and for itself, as a record of who owns them (#604). It holds
+no merge: "Require review from Code Owners" is off in the `main` ruleset, so
+GitHub only requests his review, and Guard holds the change. A pull request
+cannot weaken Guard for its own merge: `main`'s caller runs the niyam release
+it pins, never the
 pull request's copy. A weakening that does merge judges every later pull
 request once it is released and the caller's pin moves to that release, so
 Guard's tests and Cubic are what catch it. The caller,
