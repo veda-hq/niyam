@@ -207,14 +207,17 @@ interface Pull {
   state: 'OPEN' | 'MERGED' | 'CLOSED';
   mergedAt: string | null;
   head: string;
+  /** GitHub's `mergeable_state` (`clean`, `dirty`, `blocked`, …), or null when it gives none. */
+  mergeable: string | null;
 }
 
 async function readPull(sys: Sys, token: string, slug: string, pr: number): Promise<Pull> {
   const { status, json } = await sys.http(`${API}/repos/${slug}/pulls/${pr}`, { token });
-  const pull = json as { state?: unknown; merged_at?: unknown; head?: { sha?: unknown } } | null;
+  const pull = json as { state?: unknown; merged_at?: unknown; head?: { sha?: unknown }; mergeable_state?: unknown } | null;
   if (status !== 200 || typeof pull?.state !== 'string' || typeof pull.head?.sha !== 'string') throw new Error(`cannot read pull request #${pr} in ${slug} (HTTP ${status})`);
   const mergedAt = typeof pull.merged_at === 'string' ? pull.merged_at : null;
-  return { state: mergedAt ? 'MERGED' : pull.state === 'open' ? 'OPEN' : 'CLOSED', mergedAt, head: pull.head.sha };
+  const mergeable = typeof pull.mergeable_state === 'string' ? pull.mergeable_state : null;
+  return { state: mergedAt ? 'MERGED' : pull.state === 'open' ? 'OPEN' : 'CLOSED', mergedAt, head: pull.head.sha, mergeable };
 }
 
 /** Refuses a pull request that is not open: a stale findings file must not make signals for a merged one. */
@@ -397,21 +400,25 @@ export function excerpt(log: string): string {
 /**
  * The head commit's failing check runs and statuses, each with the error lines of its log when GitHub Actions ran
  * it (a check run's id is its job's), else its name, conclusion and summary. Every page is read: a check left out
- * reads as one that passed.
+ * reads as one that passed. With them, how many check runs the head has, and how many GitHub Actions ran: none
+ * is no CI run yet, so no failure listed is not a pass.
  */
-export async function ciSignals(sys: Sys, token: string, slug: string, head: string): Promise<RawSignal[]> {
+export async function ciSignals(sys: Sys, token: string, slug: string, head: string): Promise<{ signals: RawSignal[]; checkRuns: number; actionsRuns: number }> {
   const commit = `repos/${slug}/commits/${head}`;
   const runs = await restList(sys, token, `${commit}/check-runs`, 'check_runs');
   const statuses = await restList(sys, token, `${commit}/status`, 'statuses');
   // Every failing run is kept, even when a run of that name passed: two workflows can name a job alike, and a
   // pass must never hide a failure. The same failure reported twice has the same lines, and dedupe folds it.
   const signals: RawSignal[] = [];
+  let actionsRuns = 0;
   for (const raw of runs) {
     const run = raw as { id?: unknown; name?: unknown; conclusion?: unknown; app?: { slug?: unknown } | null; output?: { title?: unknown; summary?: unknown } | null };
     if (!isId(run?.id) || typeof run.name !== 'string') throw new Error(`${commit} lists a check run with no id or name`);
+    const actions = run.app?.slug === 'github-actions';
+    if (actions) actionsRuns++;
     if (typeof run.conclusion !== 'string' || !FAILED.has(run.conclusion)) continue;
     let body = [`${run.name}: ${run.conclusion}`, run.output?.title, run.output?.summary].filter((part) => typeof part === 'string' && part).join('\n');
-    if (run.app?.slug === 'github-actions') {
+    if (actions) {
       const log = await sys.http(`${API}/repos/${slug}/actions/jobs/${run.id}/logs`, { token, text: true });
       const lines = log.status === 200 ? excerpt(log.text ?? '') : '';
       if (lines) body = lines;
@@ -425,7 +432,21 @@ export async function ciSignals(sys: Sys, token: string, slug: string, head: str
     const body = [`${status.context}: ${status.state}`, status.description].filter((part) => typeof part === 'string' && part).join('\n');
     signals.push({ source: 'ci-failure', check: status.context, file: null, line: null, body, failureType: failureType(body) });
   }
-  return signals;
+  return { signals, checkRuns: runs.length, actionsRuns };
+}
+
+/** Whether GitHub has worked out the pull request's `mergeable_state`: it says `unknown` while it computes it. */
+const settled = (state: string | null): state is string => state !== null && state !== 'unknown';
+
+/**
+ * The warning for a pull request on which no CI has run, so its empty list of failures is not green: a conflicted
+ * one, on which GitHub runs no `pull_request` workflow, or a head with no GitHub Actions check run yet. A
+ * conflicted one's warning wins, since merging the base is the fix for both.
+ */
+export function ciWarning(pr: number, head: string, ci: { mergeable: string | null; actionsRuns: number }): string | undefined {
+  if (ci.mergeable === 'dirty') return `⚠ #${pr} has merge conflicts, so GitHub runs no pull_request workflows on it: merge the base and push before reading it as clear`;
+  if (ci.actionsRuns === 0) return `⚠ no CI has run on ${head} yet: no GitHub Actions check run is on it, so no failure listed is not a pass`;
+  return undefined;
 }
 
 /** The local findings as signals, without those citing a file the pull request does not change: another branch's. */
@@ -456,7 +477,8 @@ const DIFF_CHARS = 4000;
  * Prints, as one JSON object, a pull request's open review threads, its failing checks (error lines only) and the
  * local review's findings, duplicates folded, each thread with the ids `review-thread` takes; resolved threads come
  * with it, to tell a new finding from one answered. Refuses a pull request that is not open, before reading anything
- * and again before printing. In a Claude cloud session the threads come over the proxy's REST routes.
+ * and again before printing. Says, under `ci` and in a warning, when no CI has run on it. In a Claude cloud session
+ * the threads come over the proxy's REST routes.
  */
 export async function prSignals(sys: Sys, io: Output, args: readonly string[]): Promise<number> {
   const { pr, ciOnly } = signalArgs(args);
@@ -474,7 +496,7 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
   if (refused !== undefined) return refused;
 
   const threads = ciOnly ? { signals: [], resolved: [] } : threadSignals(await (cloud ? cloudThreads : graphThreads)(sys, token, slug, pr));
-  const ci = await ciSignals(sys, token, slug, pull.head);
+  const checks = await ciSignals(sys, token, slug, pull.head);
   let findings: { status: FindingsRead['status']; reason?: string; droppedOffDiff?: number } | undefined;
   let local: RawSignal[] = [];
   if (!ciOnly && settings.findings) {
@@ -490,7 +512,7 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
     if (read.status === 'failed') io.err(`⚠ the local review failed (${read.reason}): its findings are missing, so lean on the bots' threads`);
   }
 
-  const raw = [...threads.signals, ...ci, ...local];
+  const raw = [...threads.signals, ...checks.signals, ...local];
   const signals = addCandidates(dedupe(raw, settings.bots), threads.resolved, (file, since) => {
     const log = sys.exec('git', ['log', '-p', `--after=${since}`, '--', file], { cwd: root });
     if (log.code !== 0) return '';
@@ -498,11 +520,16 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
   });
 
   // Reading takes a while, and a green pull request can merge meanwhile.
-  const late = notOpen(io, pr, await readPull(sys, token, slug, pr), 'before-print');
+  const after = await readPull(sys, token, slug, pr);
+  const late = notOpen(io, pr, after, 'before-print');
   if (late !== undefined) return late;
+  // The later read is likelier to have the state worked out; while GitHub computes it, the first read's stands.
+  const ci = { mergeable: settled(after.mergeable) ? after.mergeable : pull.mergeable, checkRuns: checks.checkRuns, actionsRuns: checks.actionsRuns };
+  const warning = ciWarning(pr, pull.head, ci);
+  if (warning) io.err(warning);
   io.out(
     JSON.stringify(
-      { ok: true, pr, cloud, signals, resolved: threads.resolved, duplicates: raw.length - signals.length, ...(findings ? { findings } : {}) },
+      { ok: true, pr, cloud, ci, signals, resolved: threads.resolved, duplicates: raw.length - signals.length, ...(findings ? { findings } : {}) },
       null,
       2,
     ),

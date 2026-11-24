@@ -912,6 +912,15 @@ pull request that is merged or closed is refused (exit 3 or 4, and
 printing, as one can merge while its signals are read. `--ci-only` reads the
 checks alone.
 
+An empty list of failures is green only once CI has run, so the output also
+carries `ci`: `{ "mergeable", "checkRuns", "actionsRuns" }`, the pull
+request's `mergeable_state` and how many check runs its head has, and how
+many of them GitHub Actions ran. A warning on standard error says when none
+has run. On a conflicted pull request (`dirty`), GitHub runs no
+`pull_request` workflow, so the warning says to merge the base and push
+before reading it as clear. On a head with no GitHub Actions check run yet,
+it says no CI has run on that commit. `signals` is the same either way.
+
 A repository with a local review, one that runs before a push and writes its
 findings to a file, names it in `.github/niyam.json`, with the logins of its
 review bots:
