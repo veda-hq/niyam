@@ -2025,9 +2025,12 @@ guard file as everything under `.github/` is, and `scripts/guard.mjs`,
 `scripts/merge-queue.mjs` with `scripts/merge-queue.test.mjs` (#524), are
 guard files through `"guard": ["scripts/*.mjs"]` in `.github/niyam.json`. A
 pull request that changes one passes only when its approved slice names the
-file under `**Guards:**`; none waits for a person's review (#578). A pull
-request cannot weaken Guard for its own merge, since `main`'s copy judges
-it, but a weakening that does merge judges every later pull request, so
+file under `**Guards:**`, unless Guard exempts it as a mechanical pin move
+(Dependabot's sha bumps, an onboard's version moves to a niyam release); none
+waits for a person's review (#578). A pull request cannot weaken Guard for
+its own merge: `main`'s caller runs the niyam release it pins, never the
+pull request's copy. A weakening that does merge judges every later pull
+request once it is released and the caller's pin moves to that release, so
 Guard's tests and Cubic are what catch it. The caller,
 `.github/workflows/niyam-guard.yml`, passes on its approved slice like every
 other workflow. Whatever the slice names, Guard holds the job that can

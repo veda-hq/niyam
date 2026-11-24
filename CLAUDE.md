@@ -10,7 +10,8 @@ the pull request tools' auto-merge does the same). The `main` ruleset holds the
 merge until every required check passes, Guard, Cubic's review, PR identity
 and Work rules included, and every review thread is resolved. A change to the
 guard itself passes Guard only when its approved slice names the file under
-`**Guards:**` (#578). Nothing waits for a person's review.
+`**Guards:**`, unless Guard exempts it as a mechanical pin move (#578).
+Nothing waits for a person's review.
 
 Leave auto-merge off only for a pull request that needs Alok's yes for a
 reason no check sees: a new dependency, vendored third-party code, or a major

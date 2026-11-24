@@ -2665,11 +2665,14 @@
     `scripts/merge-queue.mjs` and `scripts/merge-queue.test.mjs`
     (`"guard": ["scripts/*.mjs"]`): a change to one passes
     `niyam-guard / judge` only when its approved slice names it under
-    `**Guards:**`. Every path CODEOWNERS named was already a guard file.
+    `**Guards:**`, unless Guard exempts it as a mechanical pin move
+    (Dependabot's sha bumps, an onboard's version moves to a niyam
+    release). Every path CODEOWNERS named was already a guard file.
   - The trade, taken knowingly: a pull request cannot weaken Guard for its
-    own merge, since `main`'s copy judges it, but a weakening that does
-    merge judges every later pull request, and Guard's tests and Cubic are
-    what catch it. Alok's yes on such a change moves from the diff to the
+    own merge, since `main`'s caller runs the niyam release it pins, never
+    the pull request's copy, but a weakening that does merge judges every
+    later pull request once it is released and the caller's pin moves to
+    it, and Guard's tests and Cubic are what catch it. Alok's yes on such a change moves from the diff to the
     slice, before the code exists.
   - This ends P-63, P-65's line that CODEOWNERS holds a change to the guard
     itself for Alok, and #513's "He still owns the Guard's own rules"
