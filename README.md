@@ -786,6 +786,23 @@ as for any pull request naming it. A request made in chat is filed as a slice qu
 owner's words and proposed once. Anything else the agent adds, a fix filed
 as its own slice included, waits for the owner's 👍.
 
+**Filing a State.** In an agent session, `niyam state <slice> --title
+"<what this batch builds>"` files that State: an issue of type State, its
+body `Part of #N.`, attached under the slice through GitHub's sub-issues API
+(`POST /repos/{owner}/{repo}/issues/{slice}/sub_issues`) by the State's
+numeric `id`, which is not its number. It prints the line to put under the
+pull request's `Slice:` line, `State: #M`. It refuses an issue that is not a
+Slice. Under an open slice it files the State too, and says that the slice's
+pull request needs none while the slice stays open. If GitHub files the
+State but will not attach it, it exits 1 with the `gh api` call that
+attaches it. The slice is given as `12` or `'#12'`: in bash an unquoted `#`
+starts a comment, so the command niyam prints names it by its number alone.
+The work rules' refusal of a fix that names no open State names this
+command. So does pre-push: a push for a closed slice warns, `#N is closed,
+so its next pull request is a fix and needs a State: niyam state N --title
+"…"`, unless the branch's own open pull request already names an open State
+under it. The warning does not stop the push.
+
 **Approving with one tap.** In an agent session, `niyam propose
 <issue> --page <url>` asks the owner for what a slice owes: given the slice, it comments
 on it as the agent, one `Proposal:` comment for its addition after the

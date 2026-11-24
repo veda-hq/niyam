@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { FakeSys } from './fake.test.ts';
-import { USAGE, packageVersion, proposeArgs, run, versionOf } from './run.ts';
+import { USAGE, packageVersion, proposeArgs, run, stateArgs, versionOf } from './run.ts';
 
 const manifest: unknown = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -161,6 +161,30 @@ describe('run', () => {
     ];
     for (const [args, message] of bad) {
       assert.deepEqual(await capture(['propose', ...args]), { code: 2, out: [], err: [`niyam: ${message}`, USAGE] }, args.join(' '));
+    }
+  });
+
+  it('runs state, which takes one slice, as 12 or #12, and a title', async () => {
+    assert.deepEqual(stateArgs(['#12', '--title', 'Fix: narrow pages']), { slice: 12, title: 'Fix: narrow pages' });
+    assert.deepEqual(stateArgs(['--title=Fix: narrow pages ', '12']), { slice: 12, title: 'Fix: narrow pages' });
+    const refused = await capture(['state', '12', '--title', 'Fix'], () => new FakeSys());
+    assert.deepEqual(refused, { code: 1, out: [], err: ['✗ this session has no token; run niyam doctor'] });
+    const bad: Array<[string[], string]> = [
+      // What bash leaves of `niyam state #12 --title x`: the rest is a comment.
+      [[], "state needs the slice's number, as 12 or '#12' (quoted: in bash an unquoted # starts a comment)"],
+      [['--title', 'Fix'], "state needs the slice's number, as 12 or '#12' (quoted: in bash an unquoted # starts a comment)"],
+      [['twelve', '--title', 'Fix'], 'state needs the slice\'s number, not "twelve"'],
+      [['#0', '--title', 'Fix'], 'state needs the slice\'s number, not "#0"'],
+      [['99999999999999999999', '--title', 'Fix'], 'state needs the slice\'s number, not "99999999999999999999"'],
+      [['12', '13', '--title', 'Fix'], 'state takes one slice, not 2 (12 13)'],
+      [['12'], 'state needs --title "<what the State builds>"'],
+      [['12', '--title'], 'state --title needs what the State builds, as text'],
+      [['12', '--title', ' '], 'state --title needs what the State builds, as text'],
+      [['12', '--title=', 'x'], 'state --title needs what the State builds, as text'],
+      [['12', '--title', 'a', '--title', 'b'], 'state takes one --title'],
+    ];
+    for (const [args, message] of bad) {
+      assert.deepEqual(await capture(['state', ...args]), { code: 2, out: [], err: [`niyam: ${message}`, USAGE] }, args.join(' '));
     }
   });
 

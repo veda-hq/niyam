@@ -9,7 +9,7 @@ import type { Settings } from './agent.ts';
 import { RestBoard } from './fake-board.test.ts';
 import { AGENT, FakeSys, ROOT, SETTINGS, capture } from './fake.test.ts';
 import { askProblem } from './asks.ts';
-import { prMerged, prStarted, prePush, prWorkRules, propose, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
+import { fileState, prMerged, prStarted, prePush, prWorkRules, propose, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
 
 const SLUG = 'example-org/example-app';
 /** Another repository, where a slice this one builds can be planned. */
@@ -990,7 +990,7 @@ describe('prWorkRules', () => {
       assert.deepEqual(await check(sys), {
         code: 1,
         out: [],
-        err: ['✗ #12 is closed, so this pull request is a fix: file it as a State under #12 and name it with a line "State: #N"', 'pr-work-rules: refused by the work rules'],
+        err: ['✗ #12 is closed, so this pull request is a fix: file it as a State under #12 with niyam state 12 --title "…" and name it with a line "State: #N"', 'pr-work-rules: refused by the work rules'],
       });
     });
   }
@@ -1339,6 +1339,54 @@ describe('prePush', () => {
       assert.deepEqual(err, []);
       assert.deepEqual(await push(sys, `(delete) ${ZERO} refs/heads/work ${REMOTE}\nrefs/heads/main ${LOCAL} refs/heads/main ${REMOTE}\n`), { code: 0, err: [] });
       assert.deepEqual(sys.requests.filter((request) => request.url.includes('/pulls?head=')), [], 'no branch was listed');
+    });
+  });
+
+  describe('a push for a slice closed already', () => {
+    /** Slice #12 closed, with State #30 delivered and State #31 open under it. */
+    function closed(pulls: Node[] = []): FakeSys {
+      const sys = session('Fix the thing on narrow pages\n\nSlice: #12\n');
+      const g = graph();
+      g.issue.state = 'closed';
+      g.issue.closed_at = LATER;
+      g.states.push(
+        { number: 30, title: 'The thing', type: { name: 'State' }, state: 'closed', state_reason: 'completed', closed_at: LATER, comments: [] },
+        { number: 31, title: 'Fix: the thing on narrow pages', type: { name: 'State' }, state: 'open', state_reason: null, closed_at: null, comments: [] },
+      );
+      github(sys, g.issue, pulls);
+      return sys;
+    }
+    const own = (body: string, ref = 'work', repo = SLUG): Node => ({ number: 40, body, head: { ref, repo: { full_name: repo } } });
+    const WARNING = '⚠️  #12 is closed, so its next pull request is a fix and needs a State: niyam state 12 --title "…"';
+
+    it('warns that its pull request needs a State, with the command that files one, and goes ahead', async () => {
+      assert.deepEqual(await push(closed(), `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [WARNING] });
+    });
+
+    it("warns while the branch's own pull request names no open State under the slice", async () => {
+      for (const body of ['Slice: #12', 'Slice: #12\nState: #30', 'Slice: #12\nState: #99']) {
+        assert.deepEqual(await push(closed([own(body)]), `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [WARNING] }, body);
+      }
+      // A fork's branch of the same name is not this push's pull request, but another one for the slice.
+      const forked = await push(closed([own('Slice: #12\nState: #31', 'work', 'someone/example-app')]), `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`);
+      assert.equal(forked.code, 1);
+      assert.deepEqual(forked.err.slice(0, 1), [WARNING]);
+    });
+
+    it("says nothing once the branch's pull request names an open State under it", async () => {
+      assert.deepEqual(await push(closed([own('Slice: #12\nState: #31')]), `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [] });
+    });
+
+    it('says nothing for an open slice', async () => {
+      assert.deepEqual(await push(session('Slice: #12'), `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [] });
+    });
+
+    it('warns before what refuses the push', async () => {
+      const sys = closed([{ number: 41, body: 'Slice: #12', head: { ref: 'other', repo: { full_name: SLUG } } }]);
+      const refused = await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`);
+      assert.equal(refused.code, 1);
+      assert.deepEqual(refused.err.slice(0, 1), [WARNING]);
+      assert.match(refused.err[1] ?? '', /^✗ #12 already has pull request #41/);
     });
   });
 
@@ -1707,7 +1755,8 @@ describe('prePush', () => {
       const closed = session('Slice: #12');
       github(closed, { ...graph().issue, state: 'closed' });
       const untouched = new RestBoard(closed);
-      assert.deepEqual(await push(closed, pushing), { code: 0, err: [] });
+      // A closed slice moves nothing; the push says only that its pull request needs a State.
+      assert.deepEqual(await push(closed, pushing), { code: 0, err: ['⚠️  #12 is closed, so its next pull request is a fix and needs a State: niyam state 12 --title "…"'] });
       assert.deepEqual(moves(untouched), []);
       assert.ok(!closed.requests.some((r) => r.url.includes('projectsV2')));
     });
@@ -2424,6 +2473,87 @@ describe('propose', () => {
     const { code, out } = await run(sys);
     assert.equal(code, 0);
     assert.match(out[0] ?? '', /^propose: .*work-rules/);
+  });
+});
+
+describe('fileState', () => {
+  const FILE = `/repos/${SLUG}/issues`;
+  const ATTACH = `/repos/${SLUG}/issues/12/sub_issues`;
+  /** An agent session and slice #12, closed unless `open`; GitHub files the State as #31, whose id is 9031. */
+  function session(open = false): FakeSys {
+    const sys = new FakeSys();
+    sys.env = { NIYAM_AGENT: AGENT, GH_TOKEN: 'ghp_good' };
+    sys.acceptToken('ghp_good', AGENT);
+    const g = graph();
+    if (!open) g.issue.state = 'closed';
+    github(sys, g.issue);
+    sys.route('POST', FILE, { status: 201, json: { id: 9031, number: 31, html_url: `${W}/31` } });
+    sys.route('POST', ATTACH, { status: 201, json: { number: 12 } });
+    return sys;
+  }
+  async function run(sys: FakeSys, slice = 12, title = 'Fix: the thing on narrow pages'): Promise<{ code: number; out: string[]; err: string[] }> {
+    const { io, out, err } = capture();
+    return { code: await fileState(sys, io, slice, title), out, err };
+  }
+  const writes = (sys: FakeSys): Array<{ method: string | undefined; url: string; body: unknown; token: string | undefined }> =>
+    sys.requests.filter((request) => request.method === 'POST').map(({ method, url, body, token }) => ({ method, url, body, token }));
+
+  it('files a State under a closed slice, attached by its id, and prints the line that names it', async () => {
+    const sys = session();
+    assert.deepEqual(await run(sys), {
+      code: 0,
+      out: [`✓ #31, ${W}/31: a State under #12`, 'Put this line under the pull request\'s "Slice: #12" line:', 'State: #31'],
+      err: [],
+    });
+    assert.deepEqual(writes(sys), [
+      { method: 'POST', url: `https://api.github.com${FILE}`, body: { title: 'Fix: the thing on narrow pages', body: 'Part of #12.', type: 'State' }, token: 'ghp_good' },
+      // The id, not the number: GitHub's sub-issues API takes the issue's id.
+      { method: 'POST', url: `https://api.github.com${ATTACH}`, body: { sub_issue_id: 9031 }, token: 'ghp_good' },
+    ]);
+  });
+
+  it('files one under an open slice too, saying its pull request needs none while it stays open', async () => {
+    const filed = await run(session(true));
+    assert.equal(filed.code, 0);
+    assert.deepEqual(filed.out.slice(1), [
+      '#12 is open, so its pull request needs no State while it stays open; once it closes, the pull request that fixes it names this one under its "Slice: #12" line:',
+      'State: #31',
+    ]);
+  });
+
+  it('refuses an issue that is not a Slice, filing nothing', async () => {
+    const sys = session();
+    sys.route('GET', `${ISSUES}/12`, { status: 200, json: { number: 12, url: `${ISSUES}/12`, state: 'open', type: { name: 'Work item' } } });
+    assert.deepEqual(await run(sys), { code: 1, out: [], err: ['✗ #12 is not a Slice (its type is Work item); a State is filed under the slice it is part of'] });
+    sys.route('GET', `${ISSUES}/12`, { status: 404, json: { message: 'Not Found' } });
+    assert.deepEqual(await run(sys), { code: 1, out: [], err: [`✗ #12 is not an issue in ${SLUG}`] });
+    sys.route('GET', `${ISSUES}/12`, { status: 200, json: { number: 12, url: `${ISSUES}/12`, pull_request: {}, type: null } });
+    assert.deepEqual(await run(sys), { code: 1, out: [], err: [`✗ #12 is not an issue in ${SLUG}`] });
+    assert.deepEqual(writes(sys), []);
+  });
+
+  it('says GitHub refused, when it files no State', async () => {
+    const sys = session();
+    sys.route('POST', FILE, { status: 422, json: { message: 'Validation Failed' } });
+    assert.deepEqual(await run(sys), { code: 1, out: [], err: ['✗ GitHub did not file the State (HTTP 422: Validation Failed)'] });
+    assert.equal(writes(sys).length, 1, 'nothing was attached');
+  });
+
+  it('fails, with the call that attaches it, when the State is filed but not attached', async () => {
+    const sys = session();
+    sys.route('POST', ATTACH, { status: 422, json: { message: 'Validation Failed' } });
+    assert.deepEqual(await run(sys), {
+      code: 1,
+      out: [],
+      err: [`✗ #31, ${W}/31, was filed but not attached under #12 (HTTP 422: Validation Failed); attach it with: gh api --method POST repos/${SLUG}/issues/12/sub_issues -F sub_issue_id=9031`],
+    });
+  });
+
+  it('files nothing without a token', async () => {
+    const sys = session();
+    sys.env = { NIYAM_AGENT: AGENT };
+    assert.deepEqual(await run(sys), { code: 1, out: [], err: ['✗ this session has no token; run niyam doctor'] });
+    assert.deepEqual(writes(sys), []);
   });
 });
 
