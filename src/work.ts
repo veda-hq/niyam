@@ -1,4 +1,4 @@
-import { API, type Settings, anyLogin, either, isNoToken, loadSettings, repoAt } from './agent.ts';
+import { API, type Settings, anyLogin, either, isNoToken, loadSettings, repoAt, sameLogin } from './agent.ts';
 import { PERSONAL_REPO, isOn, isPersonal, notAdoptedLine, offLine, readRepo } from './features.ts';
 import { agentSession, pushIdentityProblem } from './push-identity.ts';
 import { cloudToken } from './cloud.ts';
@@ -30,6 +30,12 @@ const SLICE_LINE = new RegExp(`^Slice:\\s*${ISSUE_NAMED}\\s*$`, 'gim');
 
 /** How a pull request names a State of its slice that it delivers. */
 const STATE_LINE = new RegExp(`^State:\\s*${ISSUE_NAMED}\\s*$`, 'gim');
+
+/** Dependabot's account, the only one that opens pull requests from a DEPENDABOT_BRANCH branch. */
+const DEPENDABOT = 'dependabot[bot]';
+
+/** The prefix of every branch Dependabot opens a pull request from. */
+const DEPENDABOT_BRANCH = 'dependabot/';
 
 /** Whether `a` and `b` name one repository: GitHub reads owner and name in any case. */
 const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
@@ -575,6 +581,13 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
   if (await isPersonal(sys, slug, token)) {
     io.out(offLine('pr-work-rules', 'work-rules', PERSONAL_REPO));
     return 0;
+  }
+  // A review may skip dependabot/ branches as Dependabot's, matching the branch alone (niyam's cubic.yaml, #579), so
+  // any other author's pull request from one is refused, an owner's or a fork's included (#591).
+  if (pull.head.ref.startsWith(DEPENDABOT_BRANCH) && !sameLogin(pull.user.login, DEPENDABOT)) {
+    return report(io, 'pr-work-rules', [
+      `#${pull.number} is from the branch ${pull.head.ref}, but only ${DEPENDABOT} opens pull requests from ${DEPENDABOT_BRANCH} branches, which a review may skip as Dependabot's; push it to a branch of another name`,
+    ]);
   }
   if (!anyLogin(accounts.agents, pull.user.login)) {
     io.out(`pr-work-rules: #${pull.number} is by ${pull.user.login}, not an agent; the work rules bind agent pull requests`);

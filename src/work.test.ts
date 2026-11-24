@@ -1124,6 +1124,40 @@ describe('prWorkRules', () => {
     });
   });
 
+  describe('a pull request from a dependabot/ branch', () => {
+    const branch = 'dependabot/npm_and_yarn/x-1.2.3';
+    const refused = (number: number, ref: string): string[] => [
+      `✗ #${number} is from the branch ${ref}, but only dependabot[bot] opens pull requests from dependabot/ branches, which a review may skip as Dependabot's; push it to a branch of another name`,
+      'pr-work-rules: refused by the work rules',
+    ];
+
+    it("passes Dependabot's own, whatever the case of its login", async () => {
+      for (const login of ['dependabot[bot]', 'Dependabot[bot]']) {
+        const sys = actions({ number: 43, body: 'Bumps x.', user: { login }, head: { ref: branch } });
+        assert.deepEqual(await check(sys), { code: 0, out: [`pr-work-rules: #43 is by ${login}, not an agent; the work rules bind agent pull requests`], err: [] });
+      }
+    });
+
+    it("refuses an agent's, though it names a slice that may be built, without reading the slice", async () => {
+      const sys = actions({ number: 40, body: 'Slice: #12', user: { login: AGENT }, head: { ref: branch } });
+      github(sys, graph().issue, [{ number: 40, body: 'Slice: #12', head: { ref: branch } }]);
+      assert.deepEqual(await check(sys), { code: 1, out: [], err: refused(40, branch) });
+      assert.ok(!sys.requests.some((r) => r.url.includes('/issues/12')));
+    });
+
+    it("refuses an owner's, and a fork's of any author", async () => {
+      for (const [number, login] of [[41, OWNER], [44, 'someone']] as const) {
+        const sys = actions({ number, body: null, user: { login }, head: { ref: 'dependabot/x' } });
+        assert.deepEqual(await check(sys), { code: 1, out: [], err: refused(number, 'dependabot/x') });
+      }
+    });
+
+    it('holds only the prefix: a branch merely naming Dependabot passes as before', async () => {
+      const sys = actions({ number: 41, body: null, user: { login: OWNER }, head: { ref: 'fix-dependabot/x' } });
+      assert.equal((await check(sys)).code, 0);
+    });
+  });
+
   it("leaves the owner's pull requests alone", async () => {
     const sys = actions({ number: 41, body: null, user: { login: OWNER }, head: { ref: 'x' } });
     assert.deepEqual(await check(sys), { code: 0, out: ['pr-work-rules: #41 is by example-owner, not an agent; the work rules bind agent pull requests'], err: [] });
