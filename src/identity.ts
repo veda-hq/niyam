@@ -3,7 +3,7 @@ import { API, account, anyLogin, either, loadSettings, noreplyEmail, sameLogin }
 import { isOn, notAdoptedLine, offLine } from './features.ts';
 import type { Output, Sys } from './types.ts';
 
-interface Commit {
+export interface Commit {
   sha: string;
   parents?: { sha: string }[];
   author?: { login?: string } | null;
@@ -12,10 +12,10 @@ interface Commit {
 }
 
 /** GitHub lists at most 250 commits for a pull request. */
-const MOST_COMMITS = 250;
+export const MOST_COMMITS = 250;
 
 /** Pull request `number`'s commits, as many as GitHub lists: MOST_COMMITS or more means some went unseen. */
-async function commitsOf(sys: Sys, token: string, slug: string, number: number): Promise<Commit[]> {
+export async function commitsOf(sys: Sys, token: string, slug: string, number: number): Promise<Commit[]> {
   const commits: Commit[] = [];
   for (let page = 1; ; page++) {
     const { status, json } = await sys.http(`${API}/repos/${slug}/pulls/${number}/commits?per_page=100&page=${page}`, { token });
@@ -43,8 +43,8 @@ async function strayFrom(sys: Sys, token: string, slug: string, commits: Commit[
 }
 
 /** GitHub may record a push a moment after the run starts: the record is read this many times, this far apart. */
-const RECORD_READS = 6;
-const RECORD_WAIT_MS = 10_000;
+export const RECORD_READS = 6;
+export const RECORD_WAIT_MS = 10_000;
 
 /**
  * The PR identity check, run by the shared workflow on a pull request. Every
@@ -188,7 +188,7 @@ const ZERO = /^0+$/;
  * commits it brought that the pull request still has. A push GitHub records
  * with no actor, such as one by a deleted account, is credited to null.
  */
-async function whoPushed(
+export async function whoPushed(
   sys: Sys,
   token: string,
   branch: { repo: string; ref: string; base: string; commits: string[] },

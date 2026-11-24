@@ -1,6 +1,7 @@
 import { API, type Settings, anyLogin, either, isNoToken, loadSettings, repoAt, sameLogin } from './agent.ts';
 import { PERSONAL_REPO, isOn, isPersonal, notAdoptedLine, offLine, readRepo } from './features.ts';
 import { agentSession, pushIdentityProblem } from './push-identity.ts';
+import { MOST_COMMITS, RECORD_READS, RECORD_WAIT_MS, commitsOf, whoPushed } from './identity.ts';
 import { cloudToken } from './cloud.ts';
 import { MOVED_FILES, ONBOARD_BRANCH, ONBOARD_FILES } from './onboard-pull.ts';
 import type { Output, Sys } from './types.ts';
@@ -545,9 +546,39 @@ function report(io: Output, where: string, problems: string[]): number {
 }
 
 /**
+ * Why Dependabot's pull request `pull` carries more than Dependabot pushed, from
+ * GitHub's record of the pushes to its branch, or undefined when it carries
+ * only that. A commit the record does not yet credit is read again a moment
+ * later, then fails closed, as PR identity does.
+ */
+async function notDependabots(
+  sys: Sys,
+  token: string,
+  slug: string,
+  pull: { number: number; base?: { sha: string }; head: { ref: string; repo?: { full_name: string } | null } },
+): Promise<string | undefined> {
+  const head = pull.head.repo?.full_name;
+  if (!head || !pull.base) return `#${pull.number}'s branch has no record GitHub can read, so nothing shows that ${DEPENDABOT} pushed all of it`;
+  const commits = await commitsOf(sys, token, slug, pull.number);
+  if (commits.length >= MOST_COMMITS) return `#${pull.number} has ${MOST_COMMITS} or more commits, more than GitHub lists, so nothing shows that ${DEPENDABOT} pushed all of them`;
+  const branch = { repo: head, ref: pull.head.ref, base: pull.base.sha, commits: commits.map((commit) => commit.sha) };
+  let pushers = new Map<string, string | null>();
+  for (let read = 1; ; read++) {
+    pushers = await whoPushed(sys, token, branch);
+    if (read === RECORD_READS || commits.every((commit) => pushers.has(commit.sha))) break;
+    await sys.sleep(RECORD_WAIT_MS);
+  }
+  const stray = commits.filter((commit) => !sameLogin(pushers.get(commit.sha) ?? undefined, DEPENDABOT));
+  if (stray.length === 0) return undefined;
+  const named = stray.map((commit) => `${commit.sha.slice(0, 7)} (${pushers.has(commit.sha) ? `pushed by ${pushers.get(commit.sha) ?? 'an account GitHub no longer names'}` : 'no push recorded yet'})`).join(', ');
+  return `#${pull.number} is ${DEPENDABOT}'s, which no work rule binds and a review may skip, but it carries ${named}; open a pull request of your own that carries the bump and the change, and close this one`;
+}
+
+/**
  * The work rules on a pull request, run by the shared workflow. A pull
  * request from a DEPENDABOT_BRANCH branch fails unless Dependabot opened it,
- * whoever did (#591). Otherwise the owner's pull requests pass; an agent's
+ * whoever did, and Dependabot's fails unless Dependabot pushed every commit
+ * on it (#591). Otherwise the owner's pull requests pass; an agent's
  * must name exactly one slice, as a line
  * `Slice: #N`, that may be built, and name with lines `State: #N` only States
  * under it, at least one open one when the slice is closed already (a fix);
@@ -563,7 +594,7 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
     throw new Error('pr-work-rules runs in GitHub Actions: GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set');
   }
   const event = JSON.parse(sys.read(eventPath)) as {
-    pull_request?: { number: number; body: string | null; user: { login: string }; head: { ref: string; repo?: { full_name: string } | null } };
+    pull_request?: { number: number; body: string | null; user: { login: string }; base?: { sha: string }; head: { ref: string; repo?: { full_name: string } | null } };
   };
   const pull = event.pull_request;
   if (!pull) {
@@ -590,6 +621,12 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
     return report(io, 'pr-work-rules', [
       `#${pull.number} is from the branch ${pull.head.ref}, but only ${DEPENDABOT} opens pull requests from ${DEPENDABOT_BRANCH} branches, which a review may skip as Dependabot's; push it to a branch of another name`,
     ]);
+  }
+  // Dependabot's pull request is held to none of the rules below, and a review may skip it, so it carries only what
+  // Dependabot pushed: a fix lands through a pull request of its own that carries the bump (#591).
+  if (sameLogin(pull.user.login, DEPENDABOT)) {
+    const stray = await notDependabots(sys, token, slug, pull);
+    if (stray) return report(io, 'pr-work-rules', [stray]);
   }
   if (!anyLogin(accounts.agents, pull.user.login)) {
     io.out(`pr-work-rules: #${pull.number} is by ${pull.user.login}, not an agent; the work rules bind agent pull requests`);
