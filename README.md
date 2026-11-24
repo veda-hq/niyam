@@ -929,7 +929,10 @@ prints one JSON object: the pull request's open review threads, its failing
 checks and the local review's findings, as one list of signals with
 duplicates folded together, and its resolved threads, to tell a new finding
 from one already answered. Each thread's signal carries the ids
-`review-thread` takes there (`thread`, and `comment` for a reaction). A
+`review-thread` takes there (`thread`, and `comment` for a reaction), and
+`threads`, every `{ "thread", "comment" }` folded into it, its own first:
+two bots' threads on one concern are one signal, and each thread still holds
+the merge until it is resolved, so answer and resolve every one. A
 failing check run from GitHub Actions brings the error lines of its job's
 log, 40 at most; another check brings its name, conclusion and summary.
 Every page of every list is read to its end, and a page that says more follow
