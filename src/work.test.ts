@@ -1124,6 +1124,94 @@ describe('prWorkRules', () => {
     });
   });
 
+  describe('a pull request from a dependabot/ branch', () => {
+    const branch = 'dependabot/npm_and_yarn/x-1.2.3';
+    const refused = (number: number, ref: string): string[] => [
+      `✗ #${number} is from the branch ${ref}, but only dependabot[bot] opens pull requests from dependabot/ branches, which a review may skip as Dependabot's; push it to a branch of another name`,
+      'pr-work-rules: refused by the work rules',
+    ];
+
+    const REPO = `/repos/${SLUG}`;
+    const ZERO = '0'.repeat(40);
+    /** Dependabot's pull request #43 carrying `commits`, with the pushes GitHub recorded to its branch, oldest first. */
+    function dependabots(login: string, commits: string[], pushes: { type: string; actor: string | null; before: string; after: string; brings: string[] }[]): FakeSys {
+      const sys = actions({ number: 43, body: 'Bumps x.', user: { login }, base: { sha: 'base0' }, head: { ref: branch, repo: { full_name: SLUG } } });
+      sys.route('GET', `${REPO}/pulls/43/commits?per_page=100&page=1`, { status: 200, json: commits.map((sha) => ({ sha })) });
+      sys.route('GET', `${REPO}/activity?ref=${encodeURIComponent(`refs/heads/${branch}`)}&per_page=100`, {
+        status: 200,
+        json: [...pushes].reverse().map((push) => ({ activity_type: push.type, actor: push.actor ? { login: push.actor } : null, before: push.before, after: push.after })),
+      });
+      for (const push of pushes) {
+        const from = push.type === 'push' && push.before !== ZERO ? push.before : 'base0';
+        sys.route('GET', `${REPO}/compare/${from}...${push.after}?per_page=100&page=1`, { status: 200, json: { commits: push.brings.map((sha) => ({ sha })) } });
+      }
+      return sys;
+    }
+    const created = { type: 'branch_creation', actor: 'dependabot[bot]', before: ZERO, after: 'd1', brings: ['d1'] };
+
+    it("passes Dependabot's own, whatever the case of its login, rebased or not", async () => {
+      for (const login of ['dependabot[bot]', 'Dependabot[bot]']) {
+        const rebased = { type: 'force_push', actor: login, before: 'd1', after: 'd2', brings: ['d2'] };
+        for (const [commits, pushes] of [[['d1'], [created]], [['d2'], [created, rebased]]] as const) {
+          const sys = dependabots(login, [...commits], [...pushes]);
+          assert.deepEqual(await check(sys), { code: 0, out: [`pr-work-rules: #43 is by ${login}, not an agent; the work rules bind agent pull requests`], err: [] });
+        }
+      }
+    });
+
+    it('refuses Dependabot\'s carrying a commit someone else pushed, as 505 did', async () => {
+      const sys = dependabots('dependabot[bot]', ['d1', 'a1'], [created, { type: 'push', actor: AGENT, before: 'd1', after: 'a1', brings: ['a1'] }]);
+      assert.deepEqual(await check(sys), {
+        code: 1,
+        out: [],
+        err: [
+          `✗ #43 is dependabot[bot]'s, which no work rule binds and a review may skip, but it carries a1 (pushed by ${AGENT}); open a pull request of your own that carries the bump and the change, and close this one`,
+          'pr-work-rules: refused by the work rules',
+        ],
+      });
+    });
+
+    it('reads the record again for a commit it does not yet credit, then fails closed, naming one by a gone account', async () => {
+      const sys = dependabots('dependabot[bot]', ['d1', 'g1', 'n1'], [created, { type: 'push', actor: null, before: 'd1', after: 'g1', brings: ['g1'] }]);
+      const { code, err } = await check(sys);
+      assert.equal(code, 1);
+      assert.match(err[0] ?? '', /carries g1 \(pushed by an account GitHub no longer names\), n1 \(no push recorded yet\)/);
+      assert.equal(sys.requests.filter((r) => r.url.includes('/activity')).length, 6);
+    });
+
+    it('fails closed without a head repository or a base, or with more commits than GitHub lists', async () => {
+      for (const pull of [
+        { number: 43, body: null, user: { login: 'dependabot[bot]' }, base: { sha: 'base0' }, head: { ref: branch, repo: null } },
+        { number: 43, body: null, user: { login: 'dependabot[bot]' }, head: { ref: branch, repo: { full_name: SLUG } } },
+      ]) {
+        assert.match((await check(actions(pull))).err[0] ?? '', /has no record GitHub can read/);
+      }
+      const sys = dependabots('dependabot[bot]', [], []);
+      const page = Array.from({ length: 100 }, (_, i) => ({ sha: `c${i}` }));
+      for (const n of [1, 2, 3]) sys.route('GET', `${REPO}/pulls/43/commits?per_page=100&page=${n}`, { status: 200, json: page });
+      assert.match((await check(sys)).err[0] ?? '', /has 250 or more commits/);
+    });
+
+    it("refuses an agent's, though it names a slice that may be built, without reading the slice", async () => {
+      const sys = actions({ number: 40, body: 'Slice: #12', user: { login: AGENT }, head: { ref: branch } });
+      github(sys, graph().issue, [{ number: 40, body: 'Slice: #12', head: { ref: branch } }]);
+      assert.deepEqual(await check(sys), { code: 1, out: [], err: refused(40, branch) });
+      assert.ok(!sys.requests.some((r) => r.url.includes('/issues/12')));
+    });
+
+    it("refuses an owner's, and a fork's of any author", async () => {
+      for (const [number, login, repo] of [[41, OWNER, SLUG], [44, 'someone', 'someone/example-app']] as const) {
+        const sys = actions({ number, body: null, user: { login }, head: { ref: 'dependabot/x', repo: { full_name: repo } } });
+        assert.deepEqual(await check(sys), { code: 1, out: [], err: refused(number, 'dependabot/x') });
+      }
+    });
+
+    it('holds only the prefix: a branch merely naming Dependabot passes as before', async () => {
+      const sys = actions({ number: 41, body: null, user: { login: OWNER }, head: { ref: 'fix-dependabot/x' } });
+      assert.equal((await check(sys)).code, 0);
+    });
+  });
+
   it("leaves the owner's pull requests alone", async () => {
     const sys = actions({ number: 41, body: null, user: { login: OWNER }, head: { ref: 'x' } });
     assert.deepEqual(await check(sys), { code: 0, out: ['pr-work-rules: #41 is by example-owner, not an agent; the work rules bind agent pull requests'], err: [] });
