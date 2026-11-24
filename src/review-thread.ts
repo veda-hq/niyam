@@ -339,6 +339,12 @@ export async function reviewThread(sys: Sys, io: Output, args: readonly string[]
     const path = resolvePath(sys.cwd, file);
     if (!path.startsWith(`${root}/`)) return { problem: `${file} is outside the repository at ${root}; write ${what} in it, such as in .tmp/` };
     if (!sys.exists(path)) return { problem: `${file} is not there` };
+    // A link in the repository may lead out of it: follow it before reading.
+    try {
+      sys.confine(root, path);
+    } catch (error) {
+      throw new Error(`${file} may not be posted: ${why(error)}`, { cause: error });
+    }
     return sys.read(path);
   };
   let threads: ThreadArgs[];

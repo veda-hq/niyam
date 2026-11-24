@@ -905,13 +905,14 @@ Each entry is read by the rules its options are: a reply from `bodyFile`
 resolves the thread unless `"resolve": false`, and an inline `reply` resolves
 it only with `"resolve": true`. The list and every reply file must be in the
 repository, their paths read from the working directory, as for
-`--body-file`. Every entry, its ids and its reply file are checked before any
+`--body-file`; a link that leads out of the repository is refused, for
+`--body-file` too. Every entry, its ids and its reply file are checked before any
 request, so a malformed file, naming its entry, posts nothing; then the token
 is checked once, and each thread is answered in order. The run stops at the
 first refusal, from GitHub or from these rules, and prints which threads were
 done and which were not; rerunning the same file is safe,
 since a reply already there is not posted again and a resolved thread is left
-be. A thread still goes in the list only once its fix is on the remote: a
+alone. A thread still goes in the list only once its fix is on the remote: a
 thread resolved before its fix is pushed lets the pull request merge without
 it.
 

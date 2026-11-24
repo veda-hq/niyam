@@ -2693,7 +2693,10 @@
     first refusal, printing the threads done and not done. Rejected: going
     on past a refusal, which would leave a reader to sort out a mixed
     result; a rerun is safe instead, as a reply already there is not posted
-    again and a resolved thread is left be.
+    again and a resolved thread is left alone.
+  - A list or reply file is read only after its links are followed and
+    lead inside the git toplevel (`Sys.confine`), so a link in the
+    repository cannot post a file from outside it.
   - The list must be in the repository, as `--body-file` must: the allow
     rule runs the command without a prompt.
   - One thread per run is as before, on a machine and in a Claude cloud

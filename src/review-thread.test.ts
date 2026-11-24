@@ -400,14 +400,62 @@ describe('reviewThread --batch', () => {
     assert.equal(mutations(sys).length, 0);
   });
 
-  it('a rerun after a stop posts no reply twice and leaves resolved threads be', async () => {
-    const sys = batchSession([{ thread: THREAD, reply: 'Use a constant.', resolve: true }]);
-    sys.route('POST', '/graphql', {
-      status: 200,
-      json: { data: { node: { isResolved: true, pullRequest: { number: 40, author: { login: AGENT }, repository: { nameWithOwner: 'example-org/example-app' } }, comments: { nodes: [{ id: COMMENT, body: 'Use a constant.' }], pageInfo: { hasNextPage: false } } } } },
+  it('a rerun after a stop posts no reply twice and leaves resolved threads alone', async () => {
+    const sys = batchSession([
+      { thread: THREAD, reply: 'Fixed in abc123.', resolve: true },
+      { thread: THREAD2, reply: 'Fixed in def456.', resolve: true },
+    ]);
+    // GitHub as it stands: each thread's replies and whether it is resolved, changed by what the run posts.
+    const threads = new Map([THREAD, THREAD2].map((id) => [id, { bodies: ['Use a constant.'], resolved: false }]));
+    let refuseResolve = true;
+    sys.route('POST', '/graphql', () => {
+      const { query, variables } = sys.requests.at(-1)?.body as { query: string; variables: { id: string; body?: string } };
+      const thread = threads.get(variables.id) as { bodies: string[]; resolved: boolean };
+      if (query.startsWith('query')) {
+        const nodes = thread.bodies.map((body, i) => ({ id: `PRRC_${i}`, body }));
+        return { status: 200, json: { data: { node: { isResolved: thread.resolved, pullRequest: { number: 40, author: { login: AGENT }, repository: { nameWithOwner: 'example-org/example-app' } }, comments: { nodes, pageInfo: { hasNextPage: false } } } } } };
+      }
+      if (query.includes('addPullRequestReviewThreadReply')) thread.bodies.push(variables.body as string);
+      if (query.includes('resolveReviewThread')) {
+        if (variables.id === THREAD2 && refuseResolve) return { status: 502, json: null };
+        thread.resolved = true;
+      }
+      return { status: 200, json: { data: { done: true } } };
     });
-    assert.deepEqual((await run(sys, ['--batch', BATCH])).out, [`✓ ${THREAD} (#40) has this reply already`, `✓ ${THREAD} (#40) was already resolved`, `✓ answered 1 thread from ${BATCH}`]);
-    assert.equal(mutations(sys).length, 0);
+    const first = capture();
+    await assert.rejects(reviewThread(sys, first.io, ['--batch', BATCH]), /GitHub refused to resolve PRRT_kwDOsecond \(HTTP 502\)/);
+    assert.deepEqual(first.err, [`review-thread: stopped at ${THREAD2} (2 of 2); done: ${THREAD}; not done: ${THREAD2}`]);
+
+    refuseResolve = false;
+    const before = mutations(sys).length;
+    assert.deepEqual(await run(sys, ['--batch', BATCH]), {
+      code: 0,
+      out: [`✓ ${THREAD} (#40) has this reply already`, `✓ ${THREAD} (#40) was already resolved`, `✓ ${THREAD2} (#40) has this reply already`, `✓ resolved ${THREAD2} (#40)`, `✓ answered 2 threads from ${BATCH}`],
+      err: [],
+    });
+    assert.deepEqual(
+      mutations(sys).slice(before).map((m) => [m.query.match(/(\w+)\(input/)?.[1], m.variables.id]),
+      [['resolveReviewThread', THREAD2]],
+    );
+    assert.deepEqual([...threads.values()], [
+      { bodies: ['Use a constant.', 'Fixed in abc123.'], resolved: true },
+      { bodies: ['Use a constant.', 'Fixed in def456.'], resolved: true },
+    ]);
+  });
+
+  it('refuses a reply file whose link leads out of the repository, before any request', async () => {
+    const sys = batchSession([{ thread: THREAD, bodyFile: '.tmp/link.md' }]);
+    sys.files.set(`${ROOT}/.tmp/link.md`, 'secret');
+    sys.confine = (root, path) => {
+      if (path === `${ROOT}/.tmp/link.md`) throw new Error(`refused to write ${path}: it leads to /elsewhere/secret.md, outside the git toplevel ${root}`);
+    };
+    await assert.rejects(run(sys, ['--batch', BATCH]), /^Error: \.tmp\/link\.md may not be posted: refused to write .*: it leads to \/elsewhere\/secret\.md, outside the git toplevel/);
+    assert.equal(sys.requests.length, 0);
+    const single = session();
+    single.files.set(`${ROOT}/.tmp/link.md`, 'secret');
+    single.confine = sys.confine;
+    await assert.rejects(run(single, [THREAD, '--body-file', '.tmp/link.md']), /may not be posted/);
+    assert.equal(single.requests.length, 0);
   });
 
   for (const [name, text, problem] of [
@@ -531,13 +579,17 @@ describe('reviewThread in a Claude cloud session', () => {
 
   it("answers a batch over the proxy's REST routes, checking the token once", async () => {
     const sys = cloud();
-    sys.files.set(`${ROOT}/${BATCH}`, JSON.stringify([{ thread: '123', reply: 'Fixed in abc123.' }, { thread: '123', reaction: '+1', comment: '123', resolve: true }]));
+    // 999 opens a second thread on #40, with routes of its own.
+    sys.route('GET', `${REPO}/pulls/comments/999`, { status: 200, json: { pull_request_url: 'https://api.github.com/repos/example-org/example-app/pulls/40', in_reply_to_id: null } });
+    sys.route('POST', `${REPO}/pulls/comments/999/reactions`, { status: 201, json: { content: '+1' } });
+    sys.route('POST', `${REPO}/pulls/40/ccr/comments/999/resolve`, { status: 200, json: { comment_ids: [999], resolved: true } });
+    sys.files.set(`${ROOT}/${BATCH}`, JSON.stringify([{ thread: '123', reply: 'Fixed in abc123.' }, { thread: '999', reaction: '+1', comment: '999', resolve: true }]));
     assert.deepEqual(await run(sys, ['--batch', BATCH]), {
       code: 0,
-      out: ['✓ replied on 123 (#40)', '✓ reacted +1 on 123', '✓ resolved 123 (#40)', `✓ answered 2 threads from ${BATCH}`],
+      out: ['✓ replied on 123 (#40)', '✓ reacted +1 on 999', '✓ resolved 999 (#40)', `✓ answered 2 threads from ${BATCH}`],
       err: [],
     });
-    assert.deepEqual(posts(sys), ['pulls/40/comments/123/replies {"body":"Fixed in abc123."}', 'pulls/comments/123/reactions {"content":"+1"}', 'pulls/40/ccr/comments/123/resolve null']);
+    assert.deepEqual(posts(sys), ['pulls/40/comments/123/replies {"body":"Fixed in abc123."}', 'pulls/comments/999/reactions {"content":"+1"}', 'pulls/40/ccr/comments/999/resolve null']);
     assert.equal(userChecks(sys), 1);
   });
 
