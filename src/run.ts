@@ -294,7 +294,8 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         if (command === 'pr-started') return await prStarted(await sys(), io);
         if (command === 'pre-push') {
           const real = await sys();
-          return await prePush(real, io, real.readStdin(), rest[1] ?? '');
+          // git runs the hook with the remote's name, then its URL.
+          return await prePush(real, io, real.readStdin(), rest[1] ?? '', rest[0] ?? '');
         }
         if (command === 'onboard') return await onboard(await sys(), io, rest);
         if (command === 'machine') return await machine(await sys(), io, rest);

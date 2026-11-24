@@ -73,7 +73,8 @@ const HOOK_LAUNCHER = `$HOME/${CONFIG_DIR}/bin/${CLI}`;
 
 /**
  * The pre-push git hook: before a local agent session pushes, that it
- * reaches GitHub as the agent, then the work rules. It needs no Claude Code
+ * reaches GitHub as the agent, then that no pushed branch's pull request
+ * merged with none open, then the work rules. It needs no Claude Code
  * hook to have run: any shell Claude Code runs sets CLAUDECODE, in a Claude
  * cloud session too.
  */

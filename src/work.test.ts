@@ -1159,7 +1159,7 @@ describe('prePush', () => {
   }
   async function push(sys: FakeSys, lines: string): Promise<{ code: number; err: string[] }> {
     const { io, err } = capture();
-    return { code: await prePush(sys, io, lines, 'https://github.com/example-org/example-app.git'), err };
+    return { code: await prePush(sys, io, lines, 'https://github.com/example-org/example-app.git', 'origin'), err };
   }
 
   it('lets an agent push commits naming a slice that may be built', async () => {
@@ -1167,6 +1167,89 @@ describe('prePush', () => {
     assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [] });
     assert.deepEqual(sys.calls.find((c) => c.args[0] === 'log')?.args, ['log', '--format=%B', LOCAL, '--not', REMOTE, '--remotes']);
     assert.equal(sys.requests[0]?.token, 'ghp_good');
+  });
+
+  describe('a push to a branch whose pull request merged', () => {
+    const HEADS = `/repos/${SLUG}/pulls?head=example-org%3Awork&state=all&per_page=20`;
+    const pull = (number: number, state: 'open' | 'closed', merged = false): Node => ({
+      number,
+      html_url: `https://github.com/${SLUG}/pull/${number}`,
+      state,
+      merged_at: merged ? LATER : null,
+      head: { ref: 'work' },
+    });
+    const listed = (sys: FakeSys): number => sys.requests.filter((request) => request.url.endsWith(HEADS)).length;
+
+    it('is refused, before the work rules, as refuse-retired refuses it', async () => {
+      const sys = session('Add the thing\n\nSlice: #12\n');
+      sys.route('GET', HEADS, { status: 200, json: [pull(5, 'closed', true)] });
+      assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
+        code: 1,
+        err: [
+          '❌ Error: work already has MERGED PR #5 and no open PR. Pushing it',
+          '   recreates a branch the merge retired, and the commits after the merge land in no PR.',
+          '   Move the commits missing from the PR head to a fresh branch, then push that.',
+          'pre-push: refused; a merged pull request retired this branch',
+        ],
+      });
+      assert.equal(listed(sys), 1);
+      assert.equal(sys.requests.find((request) => request.url.endsWith(HEADS))?.token, 'ghp_good');
+      assert.equal(sys.calls.some((call) => call.args[0] === 'log'), false, 'the work rules were not read');
+    });
+
+    it("names the client's way out where its settings set one", async () => {
+      const sys = session('Slice: #12');
+      sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: OWNER, agent: AGENT, prAutocreate: { retire: 'scripts/retire-branch.sh {number}' } }));
+      sys.route('GET', HEADS, { status: 200, json: [pull(5, 'closed', true)] });
+      const refused = await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`);
+      assert.equal(refused.code, 1);
+      assert.deepEqual(refused.err.slice(2), ['   Retire it: move the commits missing from the PR head to a fresh branch, then push that:', '     scripts/retire-branch.sh 5', 'pre-push: refused; a merged pull request retired this branch']);
+    });
+
+    it('goes ahead when the branch has an open pull request too, or only closed ones', async () => {
+      for (const pulls of [[pull(6, 'open'), pull(5, 'closed', true)], [pull(5, 'closed')]]) {
+        const sys = session('Slice: #12');
+        sys.route('GET', HEADS, { status: 200, json: pulls });
+        assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [] });
+        assert.equal(listed(sys), 1);
+      }
+    });
+
+    it('warns in one line and goes ahead when GitHub cannot be asked', async () => {
+      const sys = session('Slice: #12');
+      sys.route('GET', HEADS, { status: 502, json: { message: 'Bad Gateway' } });
+      assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
+        code: 0,
+        err: ["⚠️  Could not ask GitHub whether work's PR already merged (GitHub answered 502 listing pull requests); not checked."],
+      });
+      sys.route('GET', HEADS, () => {
+        throw new Error('socket hang up');
+      });
+      assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
+        code: 0,
+        err: ["⚠️  Could not ask GitHub whether work's PR already merged (socket hang up); not checked."],
+      });
+      // A crash in the check is no live branch either: it says so, and the work rules go on.
+      const log = sys.execOverride;
+      sys.execOverride = (call) => {
+        if (call.args[0] === 'config') throw new Error('git is gone');
+        return log(call);
+      };
+      assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
+        code: 0,
+        err: ["⚠️  Could not check whether a pushed branch's PR already merged (git is gone); not checked."],
+      });
+    });
+
+    it('asks nothing for a push to another remote, a deletion or the base branch', async () => {
+      const sys = session('Slice: #12');
+      sys.route('GET', HEADS, { status: 200, json: [pull(5, 'closed', true)] });
+      const { io, err } = capture();
+      assert.equal(await prePush(sys, io, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`, 'https://github.com/example-org/example-app.git', 'upstream'), 0);
+      assert.deepEqual(err, []);
+      assert.deepEqual(await push(sys, `(delete) ${ZERO} refs/heads/work ${REMOTE}\nrefs/heads/main ${LOCAL} refs/heads/main ${REMOTE}\n`), { code: 0, err: [] });
+      assert.equal(listed(sys), 0);
+    });
   });
 
   it('runs the hand-off gate where the repository names its plumbing, before the work rules', async () => {
@@ -1309,7 +1392,12 @@ describe('prePush', () => {
       call.args.join(' ') === 'credential fill' ? { code: 0, stdout: 'password=ghp_good\n', stderr: '' } : log(call);
     assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}`), {
       code: 1,
-      err: ['✗ this agent session has no token, so the work rules cannot be checked; run niyam doctor', 'pre-push: refused by the work rules'],
+      err: [
+        // The retired-branch check fails open; the work rules do not.
+        "⚠️  Could not ask GitHub whether work's PR already merged (no GitHub token: GH_TOKEN is unset and gh is signed in to no account); not checked.",
+        '✗ this agent session has no token, so the work rules cannot be checked; run niyam doctor',
+        'pre-push: refused by the work rules',
+      ],
     });
   });
 
@@ -2352,7 +2440,7 @@ describe('with two owners and two agents', () => {
       github(sys, graph().issue);
       sys.acceptToken('ghp_good', login);
       const { io, err } = capture();
-      return { code: await prePush(sys, io, `refs/heads/work ${'a'.repeat(40)} refs/heads/work ${'b'.repeat(40)}\n`, 'https://github.com/example-org/example-app.git'), err };
+      return { code: await prePush(sys, io, `refs/heads/work ${'a'.repeat(40)} refs/heads/work ${'b'.repeat(40)}\n`, 'https://github.com/example-org/example-app.git', 'origin'), err };
     };
     assert.deepEqual(await push(AGENT), { code: 0, err: [] });
     assert.deepEqual(await push(AGENT_2), { code: 0, err: [] });

@@ -308,6 +308,7 @@ export class FakeSys implements Sys {
     // An SSH key with no passphrase: its file starts "open:".
     if (command === 'ssh-keygen' && args[1] === '-P') return this.files.get(args[4] ?? '')?.startsWith('open:') ? ok() : fail('incorrect passphrase');
     if (command === 'git' && args[0] === 'remote') return ok(`${this.origin}\n`);
+    if (command === 'git' && args.join(' ') === 'config --get remote.origin.url') return ok(`${this.origin}\n`);
     // As the agent session's credential helper does: the token in GH_TOKEN, else nothing.
     if (command === 'git' && args.join(' ') === 'credential fill') {
       const token = options.env?.GH_TOKEN;
@@ -478,6 +479,8 @@ export class FakeSys implements Sys {
     // The organisation has this repository alone, and no open issue with no type, unless a test routes them.
     if (url === 'https://api.github.com/orgs/example-org/repos?type=all&per_page=100&page=1') return { status: 200, json: [{ full_name: 'example-org/example-app' }] };
     if (/^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/issues\?type=none&state=open&per_page=100&page=1$/.test(url)) return { status: 200, json: [] };
+    // A branch has no pull request, so a push to it is no push to a retired branch, unless a test routes them.
+    if (/^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/pulls\?head=[^&]+&state=all&per_page=20$/.test(url)) return { status: 200, json: [] };
     return { status: 404, json: { message: 'Not Found' } };
   }
 
