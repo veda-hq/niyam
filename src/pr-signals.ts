@@ -197,7 +197,8 @@ export interface Finding {
 
 /**
  * The local findings file's state: `ok`, a review that finished (no findings is a clean review); `failed`, one that
- * crashed or was killed, whose empty list proves nothing; `absent`, no file.
+ * crashed or was killed, whose empty list proves nothing and whose findings may be an earlier push's; `absent`, no
+ * file.
  */
 export type FindingsRead = { status: 'ok' | 'absent'; findings: Finding[] } | { status: 'failed'; findings: Finding[]; reason: string };
 
@@ -487,6 +488,22 @@ export function findingSignals(findings: readonly Finding[], changed: ReadonlySe
   return { kept, dropped };
 }
 
+/** A failed local review's finding, printed but never a signal: it may be the previous push's. */
+export interface Unconfirmed {
+  file: string | null;
+  line: number | null;
+  title: string;
+}
+
+/** A failed local review's findings, each by its file, line and title. */
+export function unconfirmedFindings(findings: readonly Finding[]): Unconfirmed[] {
+  return findings.map((finding) => ({
+    file: (finding.file ?? finding.path ?? '').trim() || null,
+    line: typeof finding.line === 'number' ? finding.line : null,
+    title: finding.title ?? finding.description ?? '',
+  }));
+}
+
 const DIFF_CHARS = 4000;
 
 /**
@@ -513,19 +530,29 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
 
   const threads = ciOnly ? { signals: [], resolved: [] } : threadSignals(await (cloud ? cloudThreads : graphThreads)(sys, token, slug, pr));
   const checks = await ciSignals(sys, token, slug, pull.head);
-  let findings: { status: FindingsRead['status']; reason?: string; droppedOffDiff?: number } | undefined;
+  let findings: { status: FindingsRead['status']; reason?: string; droppedOffDiff?: number; unconfirmed?: Unconfirmed[] } | undefined;
   let local: RawSignal[] = [];
   if (!ciOnly && settings.findings) {
     const path = `${root}/${settings.findings}`;
     const read = readFindings(sys.exists(path) ? sys.read(path) : null);
-    findings = { status: read.status, ...(read.status === 'failed' ? { reason: read.reason } : {}) };
-    if (read.findings.length) {
-      const changed = new Set((await restList(sys, token, `repos/${slug}/pulls/${pr}/files`)).map((file) => String((file as { filename?: unknown } | null)?.filename)));
-      const { kept, dropped } = findingSignals(read.findings, changed);
-      local = kept;
-      if (dropped) findings.droppedOffDiff = dropped;
+    if (read.status === 'failed') {
+      // A failed run's file can hold the previous push's findings, which a later commit may have fixed: none is a signal.
+      const unconfirmed = unconfirmedFindings(read.findings);
+      findings = { status: read.status, reason: read.reason, ...(unconfirmed.length ? { unconfirmed } : {}) };
+      io.err(
+        unconfirmed.length
+          ? `⚠ the local review failed (${read.reason}): its ${unconfirmed.length} finding(s) are left out of signals, under findings.unconfirmed; check whether each file and line changed since, and lean on the bots' threads`
+          : `⚠ the local review failed (${read.reason}): its findings are missing, so lean on the bots' threads`,
+      );
+    } else {
+      findings = { status: read.status };
+      if (read.findings.length) {
+        const changed = new Set((await restList(sys, token, `repos/${slug}/pulls/${pr}/files`)).map((file) => String((file as { filename?: unknown } | null)?.filename)));
+        const { kept, dropped } = findingSignals(read.findings, changed);
+        local = kept;
+        if (dropped) findings.droppedOffDiff = dropped;
+      }
     }
-    if (read.status === 'failed') io.err(`⚠ the local review failed (${read.reason}): its findings are missing, so lean on the bots' threads`);
   }
 
   const raw = [...threads.signals, ...checks.signals, ...local];
