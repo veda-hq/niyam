@@ -16,6 +16,11 @@ export interface Signal {
   thread?: string;
   /** The id `review-thread --comment-id` takes for the thread's first comment: its node id, or in a cloud session its REST id. */
   comment?: string;
+  /**
+   * Every review thread folded into this signal, `thread` and `comment` first: answer each, as an unresolved
+   * duplicate still holds the merge.
+   */
+  threads?: ThreadRef[];
   author?: string;
   file: string | null;
   line: number | null;
@@ -26,6 +31,12 @@ export interface Signal {
   failureType?: 'lint' | 'typecheck' | 'test' | 'build' | 'other';
   /** Resolved threads that may be the same concern: a hint for the reader, never a verdict. */
   candidates?: Candidate[];
+}
+
+/** A review thread a signal answers: the ids `review-thread` takes. */
+export interface ThreadRef {
+  thread: string;
+  comment?: string;
 }
 
 /** A resolved thread, kept so a new finding can be told apart from one already answered. */
@@ -110,9 +121,11 @@ const bare = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, 
  * Folds signals that are one concern into one, numbered SIG-001 on: those at one file and line with the same
  * body, and a bot's thread and the local finding at one concrete file and line, the same review worded twice. A
  * pull-request-level finding (no file or line) folds only on its body, so two different ones never merge. The
- * thread's copy wins, as it is the one review-thread answers; otherwise the first.
+ * thread's copy wins, as it is the one review-thread answers; otherwise the first. Every thread folded in is kept
+ * under `threads`, the winner's first, so answering each answers them all.
  */
 export function dedupe(raw: readonly RawSignal[], bots: readonly string[]): Signal[] {
+  const own = (s: RawSignal): ThreadRef[] => s.threads ?? (s.thread ? [{ thread: s.thread, ...(s.comment ? { comment: s.comment } : {}) }] : []);
   const bot = new Set(bots.map(bare));
   const fromBot = (s: RawSignal): boolean => s.source === 'local-findings' || (s.source === 'review-thread' && s.author !== undefined && bot.has(bare(s.author)));
   const same = (a: RawSignal, b: RawSignal): boolean =>
@@ -121,17 +134,20 @@ export function dedupe(raw: readonly RawSignal[], bots: readonly string[]): Sign
   for (const signal of raw) {
     const at = merged.findIndex((kept) => same(kept, signal));
     if (at < 0) {
-      merged.push({ ...signal, sources: [signal.source] });
+      const threads = own(signal);
+      merged.push({ ...signal, sources: [signal.source], ...(threads.length ? { threads } : {}) });
       continue;
     }
     const kept = merged[at] as RawSignal;
     const winner = signal.source === 'review-thread' && kept.source !== 'review-thread' ? signal : kept;
     const loser = winner === kept ? signal : kept;
+    const threads = [...own(winner), ...own(loser)];
     merged[at] = {
       ...winner,
-      ...(winner.thread ?? loser.thread ? { thread: (winner.thread ?? loser.thread) as string } : {}),
+      ...threads[0],
       ...(winner.severity ?? loser.severity ? { severity: (winner.severity ?? loser.severity) as string } : {}),
       sources: [...new Set([...(kept.sources ?? [kept.source]), signal.source])],
+      ...(threads.length ? { threads } : {}),
     };
   }
   return merged.map((signal, i) => ({ ...signal, id: `SIG-${String(i + 1).padStart(3, '0')}`, sources: signal.sources ?? [signal.source] }));

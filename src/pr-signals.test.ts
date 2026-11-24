@@ -81,7 +81,34 @@ describe('dedupe', () => {
   it('folds one concern at one line, keeping the thread, its sources and the severity', () => {
     const [one, ...rest] = dedupe([local('P1: Limit is wrong', { severity: 'P1' }), thread('limit is wrong')], []);
     assert.equal(rest.length, 0);
-    assert.deepEqual(one, { ...thread('limit is wrong'), id: 'SIG-001', severity: 'P1', sources: ['local-findings', 'review-thread'] });
+    assert.deepEqual(one, { ...thread('limit is wrong'), id: 'SIG-001', severity: 'P1', sources: ['local-findings', 'review-thread'], threads: [{ thread: 'PRRT_1', comment: 'PRRC_1' }] });
+  });
+
+  it("folds two bots' threads at one line into one signal that keeps both threads, the first one's ids its own", () => {
+    const signals = dedupe(
+      [
+        local('Off-by-one in the loop bound'),
+        thread('The limit is off by one.', { author: 'review-bot[bot]', thread: 'PRRT_a', comment: 'PRRC_a' }),
+        thread('Loop bound exceeds the array.', { author: 'other-bot', thread: 'PRRT_b', comment: 'PRRC_b' }),
+      ],
+      ['review-bot', 'other-bot'],
+    );
+    assert.equal(signals.length, 1);
+    const [one] = signals;
+    assert.deepEqual([one?.thread, one?.comment, one?.author, one?.sources], ['PRRT_a', 'PRRC_a', 'review-bot[bot]', ['local-findings', 'review-thread']]);
+    assert.deepEqual(one?.threads, [
+      { thread: 'PRRT_a', comment: 'PRRC_a' },
+      { thread: 'PRRT_b', comment: 'PRRC_b' },
+    ]);
+  });
+
+  it('gives a lone thread its own one entry, a thread and a local finding one, and a signal with no thread none', () => {
+    const [lone, folded, bare] = dedupe([thread('a'), thread('b', { line: 9, author: 'review-bot' }), local('other', { line: 9 }), local('c', { line: 20 })], ['review-bot']);
+    assert.deepEqual(lone?.threads, [{ thread: 'PRRT_1', comment: 'PRRC_1' }]);
+    assert.deepEqual([folded?.threads, folded?.sources], [[{ thread: 'PRRT_1', comment: 'PRRC_1' }], ['review-thread', 'local-findings']]);
+    assert.equal(bare?.threads, undefined);
+    const [noComment] = dedupe([{ source: 'review-thread', thread: 'PRRT_x', file: null, line: null, body: 'x' }], []);
+    assert.deepEqual(noComment?.threads, [{ thread: 'PRRT_x' }]);
   });
 
   it("folds a bot's thread and the local finding at one line, worded differently", () => {
@@ -113,10 +140,10 @@ describe('dedupe', () => {
   it('keeps the first of two findings with no thread, and the thread of the first when both have one', () => {
     const [kept] = dedupe([local('same'), { source: 'ci-failure', file: 'src/a.ts', line: 3, body: 'same', severity: 'x' }], []);
     assert.deepEqual([kept?.source, kept?.severity, kept?.thread], ['local-findings', 'x', undefined]);
-    const [first] = dedupe([thread('same', { thread: 'PRRT_a' }), thread('same', { thread: 'PRRT_b' })], []);
-    assert.equal(first?.thread, 'PRRT_a');
+    const [first] = dedupe([thread('same', { thread: 'PRRT_a' }), thread('same', { thread: 'PRRT_b', comment: 'PRRC_b' })], []);
+    assert.deepEqual([first?.thread, first?.comment, first?.threads], ['PRRT_a', 'PRRC_1', [{ thread: 'PRRT_a', comment: 'PRRC_1' }, { thread: 'PRRT_b', comment: 'PRRC_b' }]]);
     const [carried] = dedupe([local('same'), thread('same', { thread: 'PRRT_c' }), local('same')], []);
-    assert.deepEqual([carried?.thread, carried?.sources], ['PRRT_c', ['local-findings', 'review-thread']]);
+    assert.deepEqual([carried?.thread, carried?.sources, carried?.threads], ['PRRT_c', ['local-findings', 'review-thread'], [{ thread: 'PRRT_c', comment: 'PRRC_1' }]]);
   });
 });
 
@@ -290,7 +317,7 @@ async function run(sys: FakeSys, args: string[]): Promise<{ code: number; out: s
   return { code: await prSignals(sys, io, args), out, err };
 }
 
-const parsed = (result: { out: string[] }): { signals: { id: string; source: string; sources: string[]; thread?: string; comment?: string; body: string; candidates?: unknown[] }[]; [key: string]: unknown } =>
+const parsed = (result: { out: string[] }): { signals: { id: string; source: string; sources: string[]; thread?: string; comment?: string; threads?: unknown[]; body: string; candidates?: unknown[] }[]; [key: string]: unknown } =>
   JSON.parse(result.out.join('\n')) as never;
 
 describe('prSignals', () => {
@@ -301,8 +328,8 @@ describe('prSignals', () => {
     assert.equal(result.code, 0);
     const out = parsed(result);
     assert.deepEqual(
-      out.signals.map((s) => [s.id, s.source, s.sources, s.thread, s.comment]),
-      [['SIG-001', 'review-thread', ['review-thread', 'local-findings'], 'PRRT_open', 'PRRC_open']],
+      out.signals.map((s) => [s.id, s.source, s.sources, s.thread, s.comment, s.threads]),
+      [['SIG-001', 'review-thread', ['review-thread', 'local-findings'], 'PRRT_open', 'PRRC_open', [{ thread: 'PRRT_open', comment: 'PRRC_open' }]]],
     );
     assert.deepEqual(out.resolved, [{ file: 'src/a.ts', line: 8, preview: 'Rename it.', createdAt: '2026-11-13T00:00:00Z' }]);
     assert.deepEqual([out.ok, out.pr, out.cloud, out.duplicates, out.findings], [true, 7, false, 1, { status: 'ok', droppedOffDiff: 1 }]);
