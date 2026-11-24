@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://cubic.dev/schema/cubic-repository-config.schema.json
+# Cubic reads this from main only (https://docs.cubic.dev/configure/cubic-yaml).
+version: 1
+reviews:
+  ignore:
+    # Cubic will not review a bot-authored pull request on niyam's plan, and main's ruleset requires its check,
+    # so a Dependabot pull request could never merge (#579). Dependabot opens every one from a dependabot/ branch.
+    # Its bumps are still checked by every other required check, provenance and pins among them.
+    head_branches:
+      - 'dependabot/**'
