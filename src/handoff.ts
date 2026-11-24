@@ -132,7 +132,7 @@ export interface Repeated {
  *
  * A stage that fired is the one named, the one that failed most. When none fired, the stage nearest the trigger is
  * named all the same, with its counts: the one that failed most, then on the most trees, then the first seen. A
- * session reading "failures 0" with two real failures behind it tries once more blind, and that fires the trigger.
+ * session reading "failures 0" with two real failures behind it tries once more blind, which can fire the trigger.
  */
 export function repeatedFailure(runs: readonly HookRun[], branch: string, ignore: readonly string[]): Repeated {
   const counts = new Map<string, number>();

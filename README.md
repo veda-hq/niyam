@@ -942,9 +942,10 @@ niyam handoff --record --disposition handed-off --reason "..." --open-brief .tmp
 ```
 
 `--detect` names the stage nearest the repeated-failure trigger before it
-fires, with its counts and the threshold (`"fired": false, "stage": "test",
-"failures": 2, "trees": 1, "threshold": { "failures": 3, "trees": 2 }`), so
-two real failures never read as none (#588). A stage that fired wins over
+fires, with its counts and the threshold, under `triggers.repeated`
+(`{ "fired": false, "stage": "test", "failures": 2, "trees": 1,
+"threshold": { "failures": 3, "trees": 2 } }`), so two real failures never
+read as none (#588). A stage that fired wins over
 one that failed more without firing.
 
 `own-work` is one sentence. `handed-off` names a Brief issue (`--brief #N`,
