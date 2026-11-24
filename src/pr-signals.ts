@@ -500,7 +500,7 @@ export function unconfirmedFindings(findings: readonly Finding[]): Unconfirmed[]
   return findings.map((finding) => ({
     file: (finding.file ?? finding.path ?? '').trim() || null,
     line: typeof finding.line === 'number' ? finding.line : null,
-    title: finding.title ?? finding.description ?? '',
+    title: [finding.title, finding.description].find(Boolean) ?? '',
   }));
 }
 

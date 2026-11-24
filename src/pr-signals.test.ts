@@ -193,9 +193,10 @@ describe('readFindings', () => {
 
 describe('unconfirmedFindings', () => {
   it("names each of a failed review's findings by its file, line and title", () => {
-    assert.deepEqual(unconfirmedFindings([{ title: 't', file: ' src/a.ts ', line: 4 }, { description: 'd', path: 'src/b.ts' }, {}]), [
+    assert.deepEqual(unconfirmedFindings([{ title: 't', file: ' src/a.ts ', line: 4 }, { description: 'd', path: 'src/b.ts' }, { title: '', description: 'e' }, {}]), [
       { file: 'src/a.ts', line: 4, title: 't' },
       { file: 'src/b.ts', line: null, title: 'd' },
+      { file: null, line: null, title: 'e' },
       { file: null, line: null, title: '' },
     ]);
   });
