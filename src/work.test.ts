@@ -1230,14 +1230,16 @@ describe('prePush', () => {
         err: ["⚠️  Could not ask GitHub whether work's PR already merged (socket hang up); not checked."],
       });
       // A crash in the check is no live branch either: it says so, and the work rules go on.
-      const log = sys.execOverride;
-      sys.execOverride = (call) => {
-        if (call.args[0] === 'config') throw new Error('git is gone');
-        return log(call);
-      };
+      const env = sys.env;
+      sys.env = new Proxy(env, {
+        get: (target, name) => {
+          if (name === 'CI') throw new Error('the environment is gone');
+          return target[name as string];
+        },
+      });
       assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
         code: 0,
-        err: ["⚠️  Could not check whether a pushed branch's PR already merged (git is gone); not checked."],
+        err: ["⚠️  Could not check whether a pushed branch's PR already merged (the environment is gone); not checked."],
       });
     });
 
@@ -1248,7 +1250,7 @@ describe('prePush', () => {
       assert.equal(await prePush(sys, io, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`, 'https://github.com/example-org/example-app.git', 'upstream'), 0);
       assert.deepEqual(err, []);
       assert.deepEqual(await push(sys, `(delete) ${ZERO} refs/heads/work ${REMOTE}\nrefs/heads/main ${LOCAL} refs/heads/main ${REMOTE}\n`), { code: 0, err: [] });
-      assert.equal(listed(sys), 0);
+      assert.deepEqual(sys.requests.filter((request) => request.url.includes('/pulls?head=')), [], 'no branch was listed');
     });
   });
 
@@ -1394,11 +1396,13 @@ describe('prePush', () => {
       code: 1,
       err: [
         // The retired-branch check fails open; the work rules do not.
-        "⚠️  Could not ask GitHub whether work's PR already merged (no GitHub token: GH_TOKEN is unset and gh is signed in to no account); not checked.",
+        "⚠️  Could not ask GitHub whether work's PR already merged (this agent session has no token; run niyam doctor); not checked.",
         '✗ this agent session has no token, so the work rules cannot be checked; run niyam doctor',
         'pre-push: refused by the work rules',
       ],
     });
+    // Never gh's signed-in account, the owner's on this Mac.
+    assert.equal(sys.calls.some((call) => call.command === 'gh'), false);
   });
 
   it('counts the slices across every ref of one push', async () => {

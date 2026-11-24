@@ -11,7 +11,7 @@ import { ownersAlone, whyNotCounted } from './edits.ts';
 import { batchAnswers } from './approvals.ts';
 import { approvalsOf } from './issue-types.ts';
 import { PAGE_LINK, askProblem } from './asks.ts';
-import { RETIRED_REFUSAL, refuseRetired } from './pr-autocreate.ts';
+import { Pulls, type PullsOf, RETIRED_REFUSAL, refuseRetired } from './pr-autocreate.ts';
 import { errorDetail } from './error-detail.ts';
 
 /** An issue a `Slice:` or `State:` line names: its repository, `owner/name`, and its number. */
@@ -716,7 +716,10 @@ export async function prePush(sys: Sys, io: Output, refLines: string, url: strin
   }
   // refuse-retired's own check, on the hook's stderr. Whatever else it exits, a warning said so and the push goes on.
   const hook: Output = { out: (line) => io.err(line), err: (line) => io.err(line) };
-  const retired = await refuseRetired(sys, hook, ['--root', root, '--remote', remote], refLines).catch((error: unknown) => {
+  // Asked with the session's own token alone: never gh's signed-in account, which on this Mac is the owner's.
+  const session = sessionToken(sys);
+  const pullsOf: PullsOf = () => (session ? new Pulls(sys, slug, session, sys.env.CLAUDE_CODE_REMOTE === 'true') : { problem: 'this agent session has no token; run niyam doctor' });
+  const retired = await refuseRetired(sys, hook, ['--root', root, '--remote', remote], refLines, pullsOf).catch((error: unknown) => {
     // fail-open: as refuse-retired's own crash does, this warns "not checked" and the work rules still run.
     io.err(`⚠️  Could not check whether a pushed branch's PR already merged (${errorDetail(error)}); not checked.`);
     return 0;

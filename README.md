@@ -1241,8 +1241,11 @@ work rules and whatever features are on, an agent session's push to origin
 is refused when a pushed branch's pull request merged and none is open, as
 `niyam pr-autocreate refuse-retired` refuses it and with its message: the
 push would recreate a branch the merge retired, and its commits would land
-in no pull request. GitHub is asked once per pushed branch; when it cannot
-be asked, one warning line says so and the push goes on. With `work-rules` on, it then applies the same rules before an
+in no pull request. Only the branches a pull request could come from are
+judged: not the `prAutocreate` base branch, its `protected` branches or
+those under its `skip` prefixes. GitHub is asked once per judged branch,
+with the session's own token; when it cannot be asked, one warning line
+says so and the push goes on. With `work-rules` on, it then applies the same rules before an
 agent session pushes: all the commits
 one push brings, on one branch, name one slice between them as a
 `Slice: #N` trailer. Commits a remote already has are not the push's own,
