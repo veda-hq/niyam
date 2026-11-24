@@ -173,6 +173,9 @@ describe('run', () => {
       err: ['niyam: review-thread needs --reply <text>, --body-file <path>, --resolve, or --reaction', USAGE],
     });
     assert.equal((await capture(['review-thread', 'PRRT_x', '--resolve', 'more'])).code, 2);
+    assert.deepEqual(await capture(['review-thread', '--batch']), { code: 2, out: [], err: ['niyam: --batch needs the path of a JSON file listing the threads', USAGE] });
+    const batch = await capture(['review-thread', '--batch', '.tmp/batch.json'], () => new FakeSys());
+    assert.deepEqual(batch, { code: 1, out: [], err: ['✗ .tmp/batch.json is not there', 'review-thread: refused'] });
   });
 
   it('runs pr-signals, whose arguments are checked first', async () => {
