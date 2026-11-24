@@ -963,7 +963,12 @@ The file holds `{"issues": [{"title", "description", "file", "line",
 "priority"}], "metadata": {"status"}}`. A finding citing a file the pull
 request does not change is dropped, as another branch's. A file whose
 `metadata.status` is `failed` is reported as a failed review, never a clean
-one. A bot's thread and the local finding at the same file and line are one
+one, and its findings are not signals. A failed or timed-out run's file can
+hold the previous push's findings, which a later commit may have fixed. They
+are printed under `findings.unconfirmed` (file, line and title), and the
+warning says how many were left out and to check whether each file and line
+changed since. A real one becomes a signal once the review runs again and
+finishes. A bot's thread and the local finding at the same file and line are one
 signal: the same review, posted twice.
 
 **The hand-off gate.** A session working on one thing that trips over

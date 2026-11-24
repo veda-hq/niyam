@@ -17,6 +17,7 @@ import {
   signalArgs,
   signalSettings,
   threadSignals,
+  unconfirmedFindings,
   type RawSignal,
 } from './pr-signals.ts';
 import { connection, nextCursor, restList } from './pages.ts';
@@ -187,6 +188,17 @@ describe('readFindings', () => {
     assert.deepEqual(readFindings('{"issues":[{"title":"t"}],"metadata":{"status":"failed","failureReason":"killed"}}'), { status: 'failed', findings: [{ title: 't' }], reason: 'killed' });
     assert.deepEqual(readFindings('{"metadata":{"status":"failed"}}'), { status: 'failed', findings: [], reason: 'the review exited non-zero' });
     assert.deepEqual(readFindings('not json'), { status: 'failed', findings: [], reason: 'the findings file is not JSON' });
+  });
+});
+
+describe('unconfirmedFindings', () => {
+  it("names each of a failed review's findings by its file, line and title", () => {
+    assert.deepEqual(unconfirmedFindings([{ title: 't', file: ' src/a.ts ', line: 4 }, { description: 'd', path: 'src/b.ts' }, { title: '', description: 'e' }, {}]), [
+      { file: 'src/a.ts', line: 4, title: 't' },
+      { file: 'src/b.ts', line: null, title: 'd' },
+      { file: null, line: null, title: 'e' },
+      { file: null, line: null, title: '' },
+    ]);
   });
 });
 
@@ -395,6 +407,33 @@ describe('prSignals', () => {
     const result = await run(sys, ['7']);
     assert.deepEqual(parsed(result).findings, { status: 'failed', reason: 'the review exited 137' });
     assert.deepEqual(result.err, ["⚠ the local review failed (the review exited 137): its findings are missing, so lean on the bots' threads"]);
+    assert.ok(!sys.requests.some((r) => r.url.includes('/files')));
+  });
+
+  it("leaves a failed local review's findings out of signals, under findings.unconfirmed", async () => {
+    const sys = session();
+    sys.files.set(
+      `${ROOT}/.tmp/review/findings.json`,
+      JSON.stringify({ issues: [{ title: 'Off-by-one', file: 'src/a.ts', line: 3 }, { description: 'Stale cache', path: 'src/b.ts' }], metadata: { status: 'failed', failureReason: 'timed out' } }),
+    );
+    const result = await run(sys, ['7']);
+    const out = parsed(result);
+    assert.deepEqual(
+      out.signals.map((s) => [s.source, s.sources, s.thread]),
+      [['review-thread', ['review-thread'], 'PRRT_open']],
+    );
+    assert.equal(out.duplicates, 0);
+    assert.deepEqual(out.findings, {
+      status: 'failed',
+      reason: 'timed out',
+      unconfirmed: [
+        { file: 'src/a.ts', line: 3, title: 'Off-by-one' },
+        { file: 'src/b.ts', line: null, title: 'Stale cache' },
+      ],
+    });
+    assert.deepEqual(result.err, [
+      "⚠ the local review failed (timed out): its 2 finding(s) are left out of signals, under findings.unconfirmed; check whether each file and line changed since, and lean on the bots' threads",
+    ]);
     assert.ok(!sys.requests.some((r) => r.url.includes('/files')));
   });
 
