@@ -2679,3 +2679,25 @@
     (above).
   - Not changed: Cubic still reviews, and an open review thread still holds
     the merge. veda's side is veda-hq/veda#559.
+- **2026-11-24 — Decision: `review-thread --batch` answers many threads
+  from one run (slice #590 of #394, D3).** athya-rules' lesson
+  `sync-many-threads-from-one-process` (read at `1d3ffa1`): each run took
+  one thread, so 20 threads cost 20 process starts and 20 `/user` checks.
+  - The file is a JSON list of `{ thread, reply | bodyFile, resolve,
+    reaction, comment }`, each entry read by the rules one run's options
+    are, so the batch adds no second meaning: a `bodyFile` reply resolves
+    unless `"resolve": false`, an inline `reply` only with `"resolve":
+    true`.
+  - Every entry, id and reply file is checked before any request, then the
+    token once; the threads are answered in order and the run stops at the
+    first refusal, printing the threads done and not done. Rejected: going
+    on past a refusal, which would leave a reader to sort out a mixed
+    result; a rerun is safe instead, as a reply already there is not posted
+    again and a resolved thread is left alone.
+  - A list or reply file is read only after its links are followed and
+    lead inside the git toplevel (`Sys.confine`), so a link in the
+    repository cannot post a file from outside it.
+  - The list must be in the repository, as `--body-file` must: the allow
+    rule runs the command without a prompt.
+  - One thread per run is as before, on a machine and in a Claude cloud
+    session. Cost: one more input format to keep.

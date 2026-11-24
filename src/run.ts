@@ -22,7 +22,7 @@ import { keepGoing } from './keep-going.ts';
 import { prAutocreate } from './pr-autocreate.ts';
 import { prSignals, signalArgs } from './pr-signals.ts';
 import { reviewsDue } from './reviews.ts';
-import { reviewThread, threadArgs } from './review-thread.ts';
+import { reviewArgs, reviewThread } from './review-thread.ts';
 import { onboard, onboardArgs } from './onboard.ts';
 import { ownerStep, ownerStepArgs } from './owner-step.ts';
 import { sessionStart } from './session-start.ts';
@@ -83,6 +83,9 @@ Commands:
                 [--reaction <+1|-1> --comment-id <id>]
                    As the agent: answer a review thread on one of its own pull requests here; a reply
                    from --body-file resolves it unless --no-resolve, and a reply already there is not posted again
+  review-thread --batch <file>
+                   The same for each thread a JSON list in the file names, in order, with the token checked
+                   once; it stops at the first refusal and says which threads were done
   pr-signals <pr> [--ci-only]
                    A pull request's open review threads, failing checks (error lines only) and local
                    review findings, as one JSON list without duplicates; exit 3 merged, 4 closed
@@ -170,7 +173,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
   if (command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit') {
     // Their options are checked here, so a bad one is bad usage (exit 2).
     try {
-      (command === 'board-audit' ? auditArgs : command === 'cloud-key' ? cloudKeyArgs : command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : threadArgs)(rest);
+      (command === 'board-audit' ? auditArgs : command === 'cloud-key' ? cloudKeyArgs : command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : reviewArgs)(rest);
     } catch (error) {
       io.err(`niyam: ${error instanceof Error ? error.message : String(error)}`);
       io.err(USAGE);

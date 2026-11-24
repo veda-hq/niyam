@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { AGENT, FakeSys, ROOT, capture } from './fake.test.ts';
-import { idProblem, reviewThread, threadArgs, withoutFooter } from './review-thread.ts';
+import { batchEntries, idProblem, reviewArgs, reviewThread, threadArgs, withoutFooter } from './review-thread.ts';
 
 const THREAD = 'PRRT_kwDOabc123';
 const COMMENT = 'PRRC_kwDOfirst';
@@ -263,6 +263,248 @@ describe('reviewThread', () => {
   });
 });
 
+const THREAD2 = 'PRRT_kwDOsecond';
+const THREAD3 = 'PRRT_kwDOthird';
+const BATCH = '.tmp/batch.json';
+
+/** An agent session with BATCH holding `entries`, written as JSON unless given as text. */
+function batchSession(entries: unknown, pull: Record<string, unknown> = {}): FakeSys {
+  const sys = session(pull);
+  sys.files.set(`${ROOT}/${BATCH}`, typeof entries === 'string' ? entries : JSON.stringify(entries));
+  return sys;
+}
+
+const userChecks = (sys: FakeSys): number => sys.requests.filter((r) => r.url.endsWith('/user')).length;
+
+describe('reviewArgs', () => {
+  it('reads --batch with its file, and one thread as threadArgs does', () => {
+    assert.deepEqual(reviewArgs(['--batch', BATCH]), { batch: BATCH });
+    assert.deepEqual(reviewArgs([THREAD, '--resolve']), { thread: THREAD, resolve: true });
+  });
+
+  for (const [args, message] of [
+    [['--batch'], /--batch needs the path of a JSON file listing the threads/],
+    [['--batch', ' '], /--batch needs the path/],
+    [['--batch', '--resolve'], /--batch needs the path/],
+    [['--batch', BATCH, '--resolve'], /unexpected argument "--resolve": --batch takes every thread's options from its file/],
+    [[THREAD, '--batch', BATCH], /unexpected argument "--batch"/],
+  ] as const) {
+    it(`refuses ${JSON.stringify(args)}`, () => {
+      assert.throws(() => reviewArgs(args), message);
+    });
+  }
+});
+
+describe('batchEntries', () => {
+  it('reads each entry by the rules one run takes', () => {
+    assert.deepEqual(
+      batchEntries(
+        JSON.stringify([
+          { thread: THREAD, bodyFile: 'a.md' },
+          { thread: THREAD2, bodyFile: 'b.md', resolve: false },
+          { thread: THREAD3, reply: 'Fixed.', resolve: true, reaction: '+1', comment: COMMENT },
+          { thread: '123', reply: 'Not changed.' },
+          { thread: THREAD, resolve: true },
+        ]),
+      ),
+      [
+        { thread: THREAD, bodyFile: 'a.md', resolve: true },
+        { thread: THREAD2, bodyFile: 'b.md', resolve: false },
+        { thread: THREAD3, reply: 'Fixed.', resolve: true, reaction: '+1', comment: COMMENT },
+        { thread: '123', reply: 'Not changed.', resolve: false },
+        { thread: THREAD, resolve: true },
+      ],
+    );
+  });
+
+  for (const [text, message] of [
+    ['{', /^it is not JSON \(/],
+    ['{}', /^it must be a JSON list of threads, with at least one$/],
+    ['[]', /^it must be a JSON list of threads, with at least one$/],
+    ['[null]', /^entry 1 is not an object$/],
+    [JSON.stringify([{ thread: THREAD, resolve: true }, [THREAD]]), /^entry 2 is not an object$/],
+    [JSON.stringify([{ thread: THREAD, resolve: true, delete: true }]), /^entry 1 has "delete", which is not one of thread, reply, bodyFile, resolve, reaction, comment$/],
+    [JSON.stringify([{ thread: THREAD, resolve: 'yes' }]), /^entry 1's "resolve" must be a boolean$/],
+    [JSON.stringify([{ thread: 12, resolve: true }]), /^entry 1's "thread" must be a string$/],
+    [JSON.stringify([{ resolve: true }]), /^entry 1: review-thread needs a review thread id/],
+    [JSON.stringify([{ thread: THREAD, resolve: true }, { thread: THREAD2 }]), /^entry 2 \(PRRT_kwDOsecond\): review-thread needs --reply <text>, --body-file <path>, --resolve, or --reaction$/],
+    [JSON.stringify([{ thread: THREAD, reply: 'a', bodyFile: 'b' }]), /^entry 1 \(PRRT_kwDOabc123\): review-thread takes --reply or --body-file, not both$/],
+    [JSON.stringify([{ thread: THREAD, reaction: '+1' }]), /^entry 1 \(PRRT_kwDOabc123\): --reaction and --comment-id go together/],
+  ] as const) {
+    it(`refuses ${text}`, () => {
+      assert.throws(() => batchEntries(text), { message });
+    });
+  }
+});
+
+describe('reviewThread --batch', () => {
+  it('answers every thread in order, checking the token once', async () => {
+    const sys = batchSession([
+      { thread: THREAD, bodyFile: '.tmp/a.md' },
+      { thread: THREAD2, reply: 'Not changed: the reason.' },
+      { thread: THREAD3, reaction: '+1', comment: COMMENT, resolve: true },
+    ]);
+    sys.files.set(`${ROOT}/.tmp/a.md`, 'Fixed in `abc123`.\n');
+    assert.deepEqual(await run(sys, ['--batch', BATCH]), {
+      code: 0,
+      out: [
+        `✓ replied on ${THREAD} (#40)`,
+        `✓ resolved ${THREAD} (#40)`,
+        `✓ replied on ${THREAD2} (#40)`,
+        `✓ reacted +1 on ${COMMENT}`,
+        `✓ resolved ${THREAD3} (#40)`,
+        `✓ answered 3 threads from ${BATCH}`,
+      ],
+      err: [],
+    });
+    assert.equal(userChecks(sys), 1);
+    assert.deepEqual(
+      mutations(sys).map((m) => [m.query.match(/(\w+)\(input/)?.[1], m.variables.id]),
+      [
+        ['addPullRequestReviewThreadReply', THREAD],
+        ['resolveReviewThread', THREAD],
+        ['addPullRequestReviewThreadReply', THREAD2],
+        ['addReaction', COMMENT],
+        ['resolveReviewThread', THREAD3],
+      ],
+    );
+    assert.equal(mutations(sys)[0]?.variables.body, 'Fixed in `abc123`.');
+  });
+
+  it('stops at the first refusal from GitHub, saying which threads were done', async () => {
+    const sys = batchSession([
+      { thread: THREAD, resolve: true },
+      { thread: THREAD2, reply: 'Fixed.', resolve: true },
+      { thread: THREAD3, resolve: true },
+    ]);
+    const answer = sys.routes.get('POST https://api.github.com/graphql') as () => { status: number; json: unknown };
+    sys.route('POST', '/graphql', () => {
+      const { query, variables } = sys.requests.at(-1)?.body as { query: string; variables: { id?: string } };
+      if (query.startsWith('mutation') && variables.id === THREAD2) return { status: 403, json: null };
+      return answer();
+    });
+    const { io, out, err } = capture();
+    await assert.rejects(reviewThread(sys, io, ['--batch', BATCH]), /^Error: GitHub refused to reply on PRRT_kwDOsecond \(HTTP 403\)$/);
+    assert.deepEqual(out, [`✓ resolved ${THREAD} (#40)`]);
+    assert.deepEqual(err, [`review-thread: stopped at ${THREAD2} (2 of 3); done: ${THREAD}; not done: ${THREAD2}, ${THREAD3}`]);
+    assert.ok(sys.requests.every((r) => !JSON.stringify(r.body ?? null).includes(THREAD3)));
+  });
+
+  it("stops at a thread on a pull request the agent did not open, before posting on it", async () => {
+    const sys = batchSession([{ thread: THREAD, resolve: true }], { author: { login: 'example-owner' } });
+    assert.deepEqual(await run(sys, ['--batch', BATCH]), {
+      code: 1,
+      out: [],
+      err: [`✗ ${THREAD} is on #40, which example-owner opened, not ${AGENT}`, `review-thread: stopped at ${THREAD} (1 of 1); done: none; not done: ${THREAD}`],
+    });
+    assert.equal(mutations(sys).length, 0);
+  });
+
+  it('a rerun after a stop posts no reply twice and leaves resolved threads alone', async () => {
+    const sys = batchSession([
+      { thread: THREAD, reply: 'Fixed in abc123.', resolve: true },
+      { thread: THREAD2, reply: 'Fixed in def456.', resolve: true },
+    ]);
+    // GitHub as it stands: each thread's replies and whether it is resolved, changed by what the run posts.
+    const threads = new Map([THREAD, THREAD2].map((id) => [id, { bodies: ['Use a constant.'], resolved: false }]));
+    let refuseResolve = true;
+    sys.route('POST', '/graphql', () => {
+      const { query, variables } = sys.requests.at(-1)?.body as { query: string; variables: { id: string; body?: string } };
+      const thread = threads.get(variables.id) as { bodies: string[]; resolved: boolean };
+      if (query.startsWith('query')) {
+        const nodes = thread.bodies.map((body, i) => ({ id: `PRRC_${i}`, body }));
+        return { status: 200, json: { data: { node: { isResolved: thread.resolved, pullRequest: { number: 40, author: { login: AGENT }, repository: { nameWithOwner: 'example-org/example-app' } }, comments: { nodes, pageInfo: { hasNextPage: false } } } } } };
+      }
+      if (query.includes('addPullRequestReviewThreadReply')) thread.bodies.push(variables.body as string);
+      if (query.includes('resolveReviewThread')) {
+        if (variables.id === THREAD2 && refuseResolve) return { status: 502, json: null };
+        thread.resolved = true;
+      }
+      return { status: 200, json: { data: { done: true } } };
+    });
+    const first = capture();
+    await assert.rejects(reviewThread(sys, first.io, ['--batch', BATCH]), /GitHub refused to resolve PRRT_kwDOsecond \(HTTP 502\)/);
+    assert.deepEqual(first.err, [`review-thread: stopped at ${THREAD2} (2 of 2); done: ${THREAD}; not done: ${THREAD2}`]);
+
+    refuseResolve = false;
+    const before = mutations(sys).length;
+    assert.deepEqual(await run(sys, ['--batch', BATCH]), {
+      code: 0,
+      out: [`✓ ${THREAD} (#40) has this reply already`, `✓ ${THREAD} (#40) was already resolved`, `✓ ${THREAD2} (#40) has this reply already`, `✓ resolved ${THREAD2} (#40)`, `✓ answered 2 threads from ${BATCH}`],
+      err: [],
+    });
+    assert.deepEqual(
+      mutations(sys).slice(before).map((m) => [m.query.match(/(\w+)\(input/)?.[1], m.variables.id]),
+      [['resolveReviewThread', THREAD2]],
+    );
+    assert.deepEqual([...threads.values()], [
+      { bodies: ['Use a constant.', 'Fixed in abc123.'], resolved: true },
+      { bodies: ['Use a constant.', 'Fixed in def456.'], resolved: true },
+    ]);
+  });
+
+  it('refuses a reply file whose link leads out of the repository, before any request', async () => {
+    const sys = batchSession([{ thread: THREAD, bodyFile: '.tmp/link.md' }]);
+    sys.files.set(`${ROOT}/.tmp/link.md`, 'secret');
+    sys.confine = (root, path) => {
+      if (path === `${ROOT}/.tmp/link.md`) throw new Error(`refused to write ${path}: it leads to /elsewhere/secret.md, outside the git toplevel ${root}`);
+    };
+    await assert.rejects(run(sys, ['--batch', BATCH]), /^Error: \.tmp\/link\.md may not be posted: refused to write .*: it leads to \/elsewhere\/secret\.md, outside the git toplevel/);
+    assert.equal(sys.requests.length, 0);
+    const single = session();
+    single.files.set(`${ROOT}/.tmp/link.md`, 'secret');
+    single.confine = sys.confine;
+    await assert.rejects(run(single, [THREAD, '--body-file', '.tmp/link.md']), /may not be posted/);
+    assert.equal(single.requests.length, 0);
+  });
+
+  for (const [name, text, problem] of [
+    ['a file that is not JSON', '[{', /^Error: \.tmp\/batch\.json: it is not JSON \(/],
+    ['an empty list', '[]', /^Error: \.tmp\/batch\.json: it must be a JSON list of threads, with at least one$/],
+    ['an entry with a key no run takes', JSON.stringify([{ thread: THREAD, resolve: true }, { thread: THREAD2, merge: true }]), /^Error: \.tmp\/batch\.json: entry 2 has "merge"/],
+  ] as const) {
+    it(`throws on ${name}, naming the file, before any request`, async () => {
+      const sys = batchSession(text);
+      await assert.rejects(run(sys, ['--batch', BATCH]), problem);
+      assert.equal(sys.requests.length, 0);
+    });
+  }
+
+  for (const [name, files, problem] of [
+    ['a cloud id on this machine', { [BATCH]: JSON.stringify([{ thread: THREAD, resolve: true }, { thread: '123', resolve: true }]) }, /^✗ on this machine a thread is named by its node id \(PRRT_…\), as pr-signals prints it, not the number 123$/],
+    ['a reply file that is missing', { [BATCH]: JSON.stringify([{ thread: THREAD, resolve: true }, { thread: THREAD2, bodyFile: '.tmp/b.md' }]) }, /^✗ \.tmp\/b\.md is not there$/],
+    ['a reply file outside the repository', { [BATCH]: JSON.stringify([{ thread: THREAD, bodyFile: '../b.md' }]) }, /^✗ \.\.\/b\.md is outside the repository at .*; write the reply in it, such as in \.tmp\/$/],
+    ['a reply file that is empty', { [BATCH]: JSON.stringify([{ thread: THREAD, bodyFile: '.tmp/b.md' }]), '.tmp/b.md': ' \n' }, /^✗ \.tmp\/b\.md is empty: there is no reply in it$/],
+  ] as const) {
+    it(`refuses ${name}, before any request`, async () => {
+      const sys = session();
+      for (const [path, text] of Object.entries(files)) sys.files.set(`${ROOT}/${path}`, text);
+      const result = await run(sys, ['--batch', BATCH]);
+      assert.equal(result.code, 1);
+      assert.match(result.err[0] ?? '', problem);
+      assert.deepEqual(result.err.slice(1), ['review-thread: refused']);
+      assert.equal(sys.requests.length, 0);
+    });
+  }
+
+  it('refuses a batch file that is missing or outside the repository, before any request', async () => {
+    const missing = session();
+    assert.deepEqual((await run(missing, ['--batch', BATCH])).err, [`✗ ${BATCH} is not there`, 'review-thread: refused']);
+    const outside = session();
+    outside.files.set('/elsewhere/batch.json', JSON.stringify([{ thread: THREAD, resolve: true }]));
+    assert.deepEqual((await run(outside, ['--batch', '/elsewhere/batch.json'])).err, [`✗ /elsewhere/batch.json is outside the repository at ${ROOT}; write the list in it, such as in .tmp/`, 'review-thread: refused']);
+    assert.equal(missing.requests.length + outside.requests.length, 0);
+  });
+
+  it("refuses a token that is not the agent's, before any thread is read", async () => {
+    const sys = batchSession([{ thread: THREAD, resolve: true }]);
+    sys.env.GH_TOKEN = 'ghp_owner';
+    sys.acceptToken('ghp_owner', 'example-owner');
+    assert.deepEqual((await run(sys, ['--batch', BATCH])).err, [`✗ review-thread answers as ${AGENT}, but this session's token is example-owner`, 'review-thread: refused']);
+    assert.equal(sys.requests.filter((r) => r.url.endsWith('/graphql')).length, 0);
+  });
+});
+
 describe('idProblem', () => {
   it('takes node ids on a machine and numbers in a Claude cloud session', () => {
     assert.equal(idProblem(false, THREAD, COMMENT), undefined);
@@ -333,6 +575,22 @@ describe('reviewThread in a Claude cloud session', () => {
     });
     assert.deepEqual(posts(sys), ['pulls/40/comments/123/replies {"body":"Fixed in abc123."}', 'pulls/comments/123/reactions {"content":"+1"}', 'pulls/40/ccr/comments/123/resolve null']);
     assert.ok(sys.requests.every((r) => !r.url.endsWith('/graphql')));
+  });
+
+  it("answers a batch over the proxy's REST routes, checking the token once", async () => {
+    const sys = cloud();
+    // 999 opens a second thread on #40, with routes of its own.
+    sys.route('GET', `${REPO}/pulls/comments/999`, { status: 200, json: { pull_request_url: 'https://api.github.com/repos/example-org/example-app/pulls/40', in_reply_to_id: null } });
+    sys.route('POST', `${REPO}/pulls/comments/999/reactions`, { status: 201, json: { content: '+1' } });
+    sys.route('POST', `${REPO}/pulls/40/ccr/comments/999/resolve`, { status: 200, json: { comment_ids: [999], resolved: true } });
+    sys.files.set(`${ROOT}/${BATCH}`, JSON.stringify([{ thread: '123', reply: 'Fixed in abc123.' }, { thread: '999', reaction: '+1', comment: '999', resolve: true }]));
+    assert.deepEqual(await run(sys, ['--batch', BATCH]), {
+      code: 0,
+      out: ['✓ replied on 123 (#40)', '✓ reacted +1 on 999', '✓ resolved 999 (#40)', `✓ answered 2 threads from ${BATCH}`],
+      err: [],
+    });
+    assert.deepEqual(posts(sys), ['pulls/40/comments/123/replies {"body":"Fixed in abc123."}', 'pulls/comments/999/reactions {"content":"+1"}', 'pulls/40/ccr/comments/999/resolve null']);
+    assert.equal(userChecks(sys), 1);
   });
 
   it("does not post a reply again that is there with the proxy's footer", async () => {

@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from 'node:path';
 
 import { API, anyLogin, either, loadSettings, repoAt } from './agent.ts';
+import { schema } from './doc-numbers.ts';
 import { connection, type Page } from './pages.ts';
 import { proxyThreads, restComments } from './pr-signals.ts';
 import type { Output, Sys } from './types.ts';
@@ -72,6 +73,64 @@ export function threadArgs(args: readonly string[]): ThreadArgs {
     ...(reaction === undefined ? {} : { reaction: reaction as '+1' | '-1', comment: comment as string }),
   };
 }
+
+/** What `review-thread` was asked to do: one thread from its arguments, or many from a batch file. */
+export type ReviewArgs = ThreadArgs | { batch: string };
+
+/** Reads `--batch <file>`, or else one thread's arguments as {@link threadArgs} does. */
+export function reviewArgs(args: readonly string[]): ReviewArgs {
+  if (args[0] !== '--batch') return threadArgs(args);
+  const [, batch, extra] = args;
+  if (batch === undefined || !batch.trim() || batch.startsWith('--')) throw new Error('--batch needs the path of a JSON file listing the threads');
+  if (extra !== undefined) throw new Error(`unexpected argument "${extra}": --batch takes every thread's options from its file`);
+  return { batch };
+}
+
+/** The keys a batch entry takes, each the option one run takes for it, with the type of its value. */
+const ENTRY_KEYS = { thread: 'string', reply: 'string', bodyFile: 'string', resolve: 'boolean', reaction: 'string', comment: 'string' } as const;
+
+/**
+ * The threads a batch file lists, in its order: a JSON list of `{ "thread", "reply" | "bodyFile", "resolve",
+ * "reaction", "comment" }`. Each entry is read by the rules one run's options are, so a reply from `bodyFile`
+ * resolves unless `"resolve": false`, and an inline `reply` resolves only with `"resolve": true`. Throws, naming
+ * the entry, on anything else.
+ */
+export function batchEntries(text: string): ThreadArgs[] {
+  try {
+    return BatchSchema.parse(JSON.parse(text));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`it is not JSON (${error.message})`);
+    throw error;
+  }
+}
+
+const BatchSchema = schema((list): ThreadArgs[] => {
+  if (!Array.isArray(list) || list.length === 0) throw new Error('it must be a JSON list of threads, with at least one');
+  return list.map((entry: unknown, index) => {
+    const where = `entry ${index + 1}`;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error(`${where} is not an object`);
+    const fields = entry as Record<string, unknown>;
+    for (const [key, value] of Object.entries(fields)) {
+      if (!Object.hasOwn(ENTRY_KEYS, key)) throw new Error(`${where} has "${key}", which is not one of ${Object.keys(ENTRY_KEYS).join(', ')}`);
+      const type = ENTRY_KEYS[key as keyof typeof ENTRY_KEYS];
+      if (typeof value !== type) throw new Error(`${where}'s "${key}" must be a ${type}`);
+    }
+    const { thread, reply, bodyFile, resolve, reaction, comment } = fields as { thread?: string; reply?: string; bodyFile?: string; resolve?: boolean; reaction?: string; comment?: string };
+    const args = [
+      thread ?? '',
+      ...(reply === undefined ? [] : ['--reply', reply]),
+      ...(bodyFile === undefined ? [] : ['--body-file', bodyFile]),
+      ...(resolve === true ? ['--resolve'] : resolve === false && bodyFile !== undefined ? ['--no-resolve'] : []),
+      ...(reaction === undefined ? [] : ['--reaction', reaction]),
+      ...(comment === undefined ? [] : ['--comment-id', comment]),
+    ];
+    try {
+      return threadArgs(args);
+    } catch (error) {
+      throw new Error(`${where}${thread ? ` (${thread})` : ''}: ${why(error)}`);
+    }
+  });
+});
 
 /** Why the ids cannot be used where this session reaches GitHub, or undefined: each transport names a thread its own way. */
 export function idProblem(cloud: boolean, thread: string, comment?: string): string | undefined {
@@ -196,48 +255,34 @@ function cloudTransport(sys: Sys, token: string, slug: string, thread: string): 
   };
 }
 
-/**
- * Answers one review thread on a pull request an agent opened in the repository here, as the session's agent: a
- * reply, a reaction on one of its comments, resolving it, or any of them. Only this, so the client's Claude Code
- * settings can allow it without a prompt: answering review findings is routine agent work, like pushing to its
- * branch. Refused unless the session's token is an agent's and the thread is on a pull request any of the agents
- * opened in this repository. A reply already on the thread is not posted again, so a rerun is safe. In a Claude
- * cloud session, whose proxy refuses GraphQL, it uses the proxy's REST routes.
- */
-export async function reviewThread(sys: Sys, io: Output, args: readonly string[]): Promise<number> {
-  const { thread, reply, bodyFile, resolve, reaction, comment } = threadArgs(args);
-  const { root, slug } = repoAt(sys);
-  const { agents } = loadSettings(sys, root);
-  const agent = either(agents);
-  const refused = (problem: string): number => {
-    io.err(`✗ ${problem}`);
-    io.err('review-thread: refused');
-    return 1;
-  };
-  const cloud = sys.env.CLAUDE_CODE_REMOTE === 'true';
-  const wrongId = idProblem(cloud, thread, comment);
-  if (wrongId) return refused(wrongId);
-  let body = reply;
-  if (bodyFile !== undefined) {
-    // Only a file in the repository: an allow rule runs this without a prompt, so it must not post a file from elsewhere.
-    const path = resolvePath(sys.cwd, bodyFile);
-    if (!path.startsWith(`${root}/`)) return refused(`${bodyFile} is outside the repository at ${root}; write the reply in it, such as in .tmp/`);
-    if (!sys.exists(path)) return refused(`${bodyFile} is not there`);
-    body = sys.read(path).trim();
-    if (!body) return refused(`${bodyFile} is empty: there is no reply in it`);
-  }
-  const token = sessionToken(sys);
-  if (!token) return refused('this session has no token; run niyam doctor');
-  const user = await sys.http(`${API}/user`, { token });
-  const login = (user.json as { login?: string } | null)?.login;
-  if (user.status !== 200 || !anyLogin(agents, login)) return refused(`review-thread answers as ${agent}, but this session's token is ${login ?? 'refused'}`);
+/** What every thread of one run shares: the session, checked once. */
+interface Session {
+  sys: Sys;
+  io: Output;
+  token: string;
+  slug: string;
+  agents: readonly string[];
+  agent: string;
+  cloud: boolean;
+}
 
+/** Why a step failed, as one line. */
+function why(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Answers one thread, whose ids and reply were checked already. Returns why it is refused, before anything is
+ * posted on it, or undefined once it is answered; throws when GitHub refuses a request.
+ */
+async function answer(session: Session, { thread, resolve, reaction, comment }: ThreadArgs, body: string | undefined): Promise<string | undefined> {
+  const { sys, io, token, slug, agents, agent, cloud } = session;
   const transport = cloud ? cloudTransport(sys, token, slug, thread) : graphTransport(sys, token, thread, agent);
   const found = await transport.find();
-  if (typeof found === 'string') return refused(found);
-  if (found.repository.toLowerCase() !== slug.toLowerCase()) return refused(`${thread} is on ${found.repository}#${found.pull}, not a pull request in ${slug}`);
-  if (!anyLogin(agents, found.author)) return refused(`${thread} is on #${found.pull}, which ${found.author ?? 'a deleted account'} opened, not ${agent}`);
-  if (comment !== undefined && !found.comments.some((one) => one.id === comment)) return refused(`${comment} is not a comment of ${thread}`);
+  if (typeof found === 'string') return found;
+  if (found.repository.toLowerCase() !== slug.toLowerCase()) return `${thread} is on ${found.repository}#${found.pull}, not a pull request in ${slug}`;
+  if (!anyLogin(agents, found.author)) return `${thread} is on #${found.pull}, which ${found.author ?? 'a deleted account'} opened, not ${agent}`;
+  if (comment !== undefined && !found.comments.some((one) => one.id === comment)) return `${comment} is not a comment of ${thread}`;
 
   if (body !== undefined) {
     const wanted = body.trim();
@@ -254,7 +299,7 @@ export async function reviewThread(sys: Sys, io: Output, args: readonly string[]
       await transport.react(found, comment, reaction);
       io.out(`✓ reacted ${reaction} on ${comment}`);
     } catch (error) {
-      io.err(`⚠ the ${reaction} on ${comment} failed (${error instanceof Error ? error.message : String(error)}); going on`);
+      io.err(`⚠ the ${reaction} on ${comment} failed (${why(error)}); going on`);
     }
   }
   if (resolve) {
@@ -265,5 +310,100 @@ export async function reviewThread(sys: Sys, io: Output, args: readonly string[]
       io.out(`✓ resolved ${thread} (#${found.pull})`);
     }
   }
+  return undefined;
+}
+
+/**
+ * Answers one review thread on a pull request an agent opened in the repository here, or each thread a batch file
+ * lists, in order, as the session's agent: a reply, a reaction on one of its comments, resolving it, or any of them.
+ * Only this, so the client's Claude Code settings can allow it without a prompt: answering review findings is
+ * routine agent work, like pushing to its branch. Refused unless the session's token is an agent's and each thread
+ * is on a pull request any of the agents opened in this repository. Every thread's ids and reply are checked, and the
+ * token once, before any request on a thread; a batch stops at the first refusal, saying which threads were done. A
+ * reply already on a thread is not posted again, so a rerun is safe. In a Claude cloud session, whose proxy refuses
+ * GraphQL, it uses the proxy's REST routes.
+ */
+export async function reviewThread(sys: Sys, io: Output, args: readonly string[]): Promise<number> {
+  const asked = reviewArgs(args);
+  const batch = 'batch' in asked ? asked.batch : undefined;
+  const { root, slug } = repoAt(sys);
+  const { agents } = loadSettings(sys, root);
+  const agent = either(agents);
+  const refused = (problem: string): number => {
+    io.err(`✗ ${problem}`);
+    io.err('review-thread: refused');
+    return 1;
+  };
+  // Only a file in the repository: an allow rule runs this without a prompt, so it must not post a file from elsewhere.
+  const readHere = (file: string, what: string): string | { problem: string } => {
+    const path = resolvePath(sys.cwd, file);
+    if (!path.startsWith(`${root}/`)) return { problem: `${file} is outside the repository at ${root}; write ${what} in it, such as in .tmp/` };
+    if (!sys.exists(path)) return { problem: `${file} is not there` };
+    // A link in the repository may lead out of it: follow it before reading.
+    try {
+      sys.confine(root, path);
+    } catch (error) {
+      throw new Error(`${file} may not be posted: ${why(error)}`, { cause: error });
+    }
+    return sys.read(path);
+  };
+  let threads: ThreadArgs[];
+  if (batch === undefined) {
+    threads = [asked as ThreadArgs];
+  } else {
+    const text = readHere(batch, 'the list');
+    if (typeof text !== 'string') return refused(text.problem);
+    try {
+      threads = batchEntries(text);
+    } catch (error) {
+      throw new Error(`${batch}: ${why(error)}`, { cause: error });
+    }
+  }
+  const cloud = sys.env.CLAUDE_CODE_REMOTE === 'true';
+  const bodies: (string | undefined)[] = [];
+  for (const { thread, reply, bodyFile, comment } of threads) {
+    const wrongId = idProblem(cloud, thread, comment);
+    if (wrongId) return refused(wrongId);
+    let body = reply;
+    if (bodyFile !== undefined) {
+      const text = readHere(bodyFile, 'the reply');
+      if (typeof text !== 'string') return refused(text.problem);
+      body = text.trim();
+      if (!body) return refused(`${bodyFile} is empty: there is no reply in it`);
+    }
+    bodies.push(body);
+  }
+  const token = sessionToken(sys);
+  if (!token) return refused('this session has no token; run niyam doctor');
+  const user = await sys.http(`${API}/user`, { token });
+  const login = (user.json as { login?: string } | null)?.login;
+  if (user.status !== 200 || !anyLogin(agents, login)) return refused(`review-thread answers as ${agent}, but this session's token is ${login ?? 'refused'}`);
+  const session: Session = { sys, io, token, slug, agents, agent, cloud };
+
+  if (batch === undefined) {
+    const problem = await answer(session, threads[0] as ThreadArgs, bodies[0]);
+    return problem === undefined ? 0 : refused(problem);
+  }
+  const done: string[] = [];
+  const stopped = (index: number): void => {
+    io.err(`review-thread: stopped at ${threads[index]?.thread} (${index + 1} of ${threads.length}); done: ${done.join(', ') || 'none'}; not done: ${threads.slice(index).map((t) => t.thread).join(', ')}`);
+  };
+  for (const [index, one] of threads.entries()) {
+    let problem: string | undefined;
+    try {
+      problem = await answer(session, one, bodies[index]);
+    } catch (error) {
+      // GitHub refused a request: say how far the batch got, then let the refusal end the run as it ends one thread's.
+      stopped(index);
+      throw error;
+    }
+    if (problem !== undefined) {
+      io.err(`✗ ${problem}`);
+      stopped(index);
+      return 1;
+    }
+    done.push(one.thread);
+  }
+  io.out(`✓ answered ${done.length} thread${done.length === 1 ? '' : 's'} from ${batch}`);
   return 0;
 }

@@ -364,7 +364,7 @@
   },
   "src/review-thread.ts": {
     "shuddhi/no-raw-error-string": {
-      "count": 2
+      "count": 1
     },
     "shuddhi/no-swallowed-catch": {
       "count": 1
