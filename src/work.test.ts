@@ -995,6 +995,32 @@ describe('prWorkRules', () => {
     });
   }
 
+  // The `closed` event runs after the merge has closed the slice (#649: #598, run 45394953619).
+  for (const [merged, said] of [
+    [true, 'merged'],
+    [false, 'closed'],
+  ] as const) {
+    it(`passes a pull request already ${said}, its slice closed, reading no slice`, async () => {
+      const sys = actions({ ...agentPull('Slice: #12'), state: 'closed', merged });
+      github(sys, fixed().issue);
+      assert.deepEqual(await check(sys), { code: 0, out: [`pr-work-rules: #40 is ${said}; nothing to judge`], err: [] });
+      assert.deepEqual(
+        sys.requests.filter((request) => request.url.includes('/issues/')),
+        [],
+      );
+    });
+  }
+
+  it('judges an open pull request as before: a closed slice it names with no State is a fix still owed', async () => {
+    const sys = actions({ ...agentPull('Slice: #12'), state: 'open', merged: false });
+    github(sys, fixed().issue);
+    assert.deepEqual(await check(sys), {
+      code: 1,
+      out: [],
+      err: ['✗ #12 is closed, so this pull request is a fix: file it as a State under #12 with niyam state 12 --title "…" and name it with a line "State: #N"', 'pr-work-rules: refused by the work rules'],
+    });
+  });
+
   it('refuses a "State:" line naming anything but a State under the slice', async () => {
     const g = graph();
     g.states.push({ number: 33, title: 'A note', type: { name: 'Task' }, state: 'open', state_reason: null, closed_at: null, comments: [] });

@@ -606,7 +606,8 @@ async function notDependabots(
  * changing only the files onboard writes and deleting none but the cloud
  * setup file under its name before P-56 (MOVED_FILES), only where the new
  * one is written or is on the base branch, which the owner confirmed at the
- * terminal and merges.
+ * terminal and merges. A pull request already merged or closed passes
+ * unjudged (#649).
  */
 export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
   const { GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: slug, GH_TOKEN: token } = sys.env;
@@ -614,7 +615,15 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
     throw new Error('pr-work-rules runs in GitHub Actions: GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set');
   }
   const event = JSON.parse(sys.read(eventPath)) as {
-    pull_request?: { number: number; body: string | null; user: { login: string }; base?: { sha: string }; head: { ref: string; repo?: { full_name: string } | null } };
+    pull_request?: {
+      number: number;
+      state?: string;
+      merged?: boolean;
+      body: string | null;
+      user: { login: string };
+      base?: { sha: string };
+      head: { ref: string; repo?: { full_name: string } | null };
+    };
   };
   const pull = event.pull_request;
   if (!pull) {
@@ -633,6 +642,12 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
   }
   if (await isPersonal(sys, slug, token)) {
     io.out(offLine('pr-work-rules', 'work-rules', PERSONAL_REPO));
+    return 0;
+  }
+  // A closed pull request merges nothing more, so no rule has anything to hold. Its `closed` event runs after the
+  // merge has closed its slice, where an open one's run would read the slice as closed and call it a fix (#649).
+  if (pull.state === 'closed') {
+    io.out(`pr-work-rules: #${pull.number} is ${pull.merged === true ? 'merged' : 'closed'}; nothing to judge`);
     return 0;
   }
   // A review may skip dependabot/ branches as Dependabot's, matching the branch alone (niyam's cubic.yaml, #579), so
