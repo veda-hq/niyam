@@ -7,6 +7,7 @@ import { after, describe, it } from 'node:test';
 
 import {
   ACCOUNT_WAITS_MS,
+  API,
   BASE_ENV,
   NO_SSH,
   NO_TOKEN,
@@ -19,18 +20,24 @@ import {
   anyLogin,
   checkToken,
   either,
+  githubSlug,
   hasSettings,
+  isLogin,
   isNoToken,
   keyBody,
   keyPairProblem,
   launcherPath,
   launcherScript,
   loadSettings,
+  NOT_AGENTS,
   pinnedCloudKeys,
   lockScript,
   noreplyEmail,
   pathsFor,
+  publicRead,
+  quote,
   rateLimited,
+  readToken,
   repoAt,
   sameLogin,
   sessionEnv,
@@ -41,7 +48,7 @@ import {
   signingKeys,
   tokenInfo,
 } from './agent.ts';
-import { AGENT, AGENT_ID, CLASSIC, FakeSys, HOME, KEY, NOW, PRIVATE_KEY, PUBLIC_KEY, ROOT, TOKEN } from './fake.test.ts';
+import { AGENT, AGENT_ID, CLASSIC, CLI, FakeSys, HOME, KEY, NODE, NOW, PRIVATE_KEY, PUBLIC_KEY, ROOT, TOKEN } from './fake.test.ts';
 import { LOCK_069, SESSION_0610, SESSION_069, SESSION_BEFORE_P50 } from './older-texts.test.ts';
 import { KEYCHAIN } from './token-store.ts';
 
@@ -585,5 +592,172 @@ describe('GitHub reads', () => {
 
   it('reduces a key line to type and body', () => {
     assert.equal(keyBody('  ssh-ed25519 AAAA comment here\n'), 'ssh-ed25519 AAAA');
+    assert.equal(keyBody('ssh-ed25519  AAAA\tcomment'), 'ssh-ed25519 AAAA', 'any run of spaces');
+  });
+});
+
+describe('every edge of the settings, the scripts and the GitHub reads (#616)', () => {
+  const refuses = (raw: string, message: RegExp): void => {
+    const sys = new FakeSys();
+    sys.files.set(`${ROOT}/.github/niyam.json`, raw);
+    assert.throws(() => loadSettings(sys, ROOT), message, raw);
+  };
+
+  it('takes a one-letter login and the first issue, and refuses a file that holds no object', () => {
+    assert.deepEqual(loadSettings(withSettings({ owner: 'a', agent: 'b', approvals: 1 }), ROOT), { owners: ['a'], agents: ['b'], approvals: 1 });
+    assert.equal(isLogin('a'), true);
+    assert.equal(isLogin('-a'), false);
+    for (const raw of ['7', '"me"', 'true', '[]']) refuses(raw, /^Error: \.github\/niyam\.json: "owner" must be a GitHub login or a non-empty list of them$/);
+  });
+
+  it('refuses pinned keys of any other shape, one bad entry beside a good one, and a key not at the start', () => {
+    const pins = /"cloudSigningKeys" must map each agent's login to a list of OpenSSH public keys/;
+    for (const value of ['7', 'true', '{"bot":[["ssh-ed25519 AAAA"]]}', '{"bot":["ssh-ed25519 AAAA"],"a b":[]}', '{"bot":["x ssh-ed25519 AAAA"]}', '{"bot":["xssh-ed25519 AAAA"]}']) {
+      refuses(`{"owner":"me","agent":"bot","cloudSigningKeys":${value}}`, pins);
+    }
+  });
+
+  it("reads a GitHub remote's owner and name, trimmed, and nothing from any other host", () => {
+    assert.equal(githubSlug(' https://github.com/example-org/example-app.git\n'), 'example-org/example-app');
+    assert.equal(githubSlug('https://gitlab.com/example-org/example-app.git'), undefined);
+  });
+
+  it('finds each agent set up once, past folders that are no agent and a session file that names none', () => {
+    const sys = new FakeSys();
+    const dir = `${HOME}/.config/niyam`;
+    const script = sessionScript(AGENT, AGENT_ID, pathsFor(HOME, AGENT));
+    sys.files.set(`${dir}/examplebot/session.sh`, script);
+    sys.files.set(`${dir}/ExampleBot/session.sh`, script);
+    sys.files.set(`${dir}/junk/session.sh`, '# nothing\n');
+    sys.files.set(launcherPath(HOME), launcherScript(NODE, CLI));
+    assert.deepEqual(agentsSetUp(sys), [AGENT]);
+    assert.deepEqual(NOT_AGENTS, ['bin', 'sessions', 'locked']);
+  });
+
+  it('asks git for the toplevel from the working directory, and origin from the toplevel', () => {
+    const sys = new FakeSys();
+    sys.cwd = `${ROOT}/sub`;
+    assert.equal(agentFrom(sys, undefined), AGENT);
+    assert.deepEqual(sys.calls[0], { command: 'git', args: ['rev-parse', '--show-toplevel'], cwd: `${ROOT}/sub` });
+    const repo = new FakeSys();
+    repo.cwd = `${ROOT}/sub`;
+    repoAt(repo);
+    assert.deepEqual(repo.calls, [
+      { command: 'git', args: ['rev-parse', '--show-toplevel'], cwd: `${ROOT}/sub` },
+      { command: 'git', args: ['remote', 'get-url', 'origin'], cwd: ROOT },
+    ]);
+    // Outside a repository, a settings file at the filesystem's root is not read.
+    const outside = new FakeSys();
+    outside.inRepo = false;
+    outside.files.set('/.github/niyam.json', JSON.stringify({ owner: 'example-owner', agent: AGENT }));
+    assert.throws(() => agentFrom(outside, undefined), /name the agent account after the command, or run it in a repo/);
+  });
+
+  it('locks a shell out of GitHub, and leaves the owner nothing to bring back', () => {
+    assert.deepEqual([BASE_ENV.GIT_CONFIG_PARAMETERS, BASE_ENV.GIT_ASKPASS, BASE_ENV.SSH_ASKPASS, BASE_ENV.GIT_TERMINAL_PROMPT], ['', '', '', '0']);
+    const lines = lockScript(HOME).split('\n');
+    assert.deepEqual(lines.slice(1, 6), [
+      'export GH_TOKEN=niyam-no-agent-token',
+      'unset GITHUB_TOKEN GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_ASKPASS SSH_ASKPASS',
+      `export GH_CONFIG_DIR='${HOME}/.config/niyam/locked/gh'`,
+      "export GIT_TERMINAL_PROMPT='0'",
+      `export GIT_SSH_COMMAND=${quote(NO_SSH)}`,
+    ]);
+    assert.equal(lines.at(-1), '');
+    assert.match(lines.at(-2) ?? '', /^export GIT_CONFIG_VALUE_\d+=/);
+  });
+
+  it('writes the launcher with the node it names, running the CLI script or the command given', () => {
+    const head = `#!/bin/sh\n# Written by niyam machine: the CLI for hooks, with the node that ran machine, so they need no node on PATH.\nPATH='/opt/node/bin':"$PATH"\nexport PATH\n`;
+    assert.equal(launcherScript('/opt/node/bin/node', '/c/cli.js'), `${head}exec '/opt/node/bin/node' '/c/cli.js' "$@"\n`);
+    assert.equal(launcherScript('/opt/node/bin/node', '/c/cli.js', '/p/niyam'), `${head}exec '/p/niyam' "$@"\n`);
+  });
+
+  it('keeps a session record to one plain id', () => {
+    assert.equal(sessionRecord(HOME, 'a'.repeat(128)), `${HOME}/.config/niyam/sessions/${'a'.repeat(128)}.json`);
+    for (const id of ['a'.repeat(129), 'ok/../x', '']) assert.equal(sessionRecord(HOME, id), undefined, id);
+  });
+
+  it('reads no id from a session file without one, or with one not at the start of a line', () => {
+    assert.equal(sessionNames("export NIYAM_AGENT='ExampleBot'\n"), undefined);
+    assert.equal(sessionNames("export NIYAM_AGENT='ExampleBot'\n# export GIT_AUTHOR_EMAIL='42+ExampleBot@users.noreply.github.com'\n"), undefined);
+  });
+
+  it("counts an older session file as older by any of the store's older reads, and none for a store with none", () => {
+    const now = pathsFor(HOME, AGENT);
+    const two = { ...KEYCHAIN, olderReadCommands: (agent: string) => ['other-read', ...(KEYCHAIN.olderReadCommands?.(agent) ?? [])] };
+    assert.equal(sessionFileIs(SESSION_0610, AGENT, AGENT_ID, now, two), 'older');
+    const { olderReadCommands: _older, ...plain } = KEYCHAIN;
+    assert.equal(sessionFileIs(SESSION_0610, AGENT, AGENT_ID, now, plain), undefined);
+  });
+
+  it("reads the agent's token from this machine's store, and none where there is no store", () => {
+    const sys = new FakeSys().setToken(AGENT, TOKEN);
+    assert.equal(readToken(sys, AGENT), TOKEN);
+    sys.platform = 'plan9';
+    assert.equal(readToken(sys, AGENT), undefined);
+  });
+
+  it('names a reset only when it is a whole positive time', () => {
+    for (const reset of ['1.5', '0', '-5']) {
+      assert.equal(rateLimited({ status: 403, json: null, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': reset } }, 'tok'), "GitHub's rate limit for the token has run out (HTTP 403)", reset);
+    }
+  });
+
+  it('asks a public read once with no token, and again with none in the time the first left', async () => {
+    const unauth = new FakeSys().route('GET', '/users/x', { status: 401, json: null });
+    assert.deepEqual(await publicRead(unauth, `${API}/users/x`, undefined), { answer: { status: 401, json: null }, token: undefined });
+    assert.equal(unauth.requests.length, 1);
+    let clock = NOW.getTime();
+    const slow = new FakeSys().route('GET', '/users/x', () => {
+      clock += 400;
+      return { status: 401, json: null };
+    });
+    slow.now = () => new Date(clock);
+    assert.deepEqual(await publicRead(slow, `${API}/users/x`, 'tok', { timeoutMs: 1000 }), { answer: { status: 401, json: null }, token: undefined });
+    assert.deepEqual(slow.requests.map((request) => [request.token, request.timeoutMs]), [['tok', 1000], [undefined, 600]]);
+    const spent = new FakeSys().route('GET', '/users/x', () => {
+      clock += 400;
+      return { status: 401, json: null };
+    });
+    spent.now = () => new Date(clock);
+    assert.deepEqual(await publicRead(spent, `${API}/users/x`, 'tok', { timeoutMs: 400 }), { answer: { status: 401, json: null }, token: 'tok' });
+    assert.equal(spent.requests.length, 1);
+  });
+
+  it('asks again on a 500, and says GitHub did not answer for anything but a 200 naming the account', async () => {
+    const answers = [{ status: 500, json: null }, { status: 200, json: { id: AGENT_ID, login: AGENT } }];
+    const failing = new FakeSys().route('GET', '/users/ExampleBot', () => answers.shift() ?? { status: 500, json: null });
+    assert.deepEqual(await account(failing, 'ExampleBot'), { id: AGENT_ID, login: AGENT });
+    for (const [status, json] of [[201, { id: AGENT_ID, login: AGENT }], [200, null], [200, { id: AGENT_ID }]] as const) {
+      const sys = new FakeSys().route('GET', '/users/ExampleBot', { status, json });
+      await assert.rejects(account(sys, 'ExampleBot'), { message: `GitHub did not answer who account "ExampleBot" is (HTTP ${status})` }, JSON.stringify(json));
+    }
+  });
+
+  it("reads no token from anything but a 200 naming its login, and an empty scope list as none", async () => {
+    for (const [status, json] of [[401, { login: AGENT }], [200, {}]] as const) {
+      assert.equal(await tokenInfo(new FakeSys().route('GET', '/user', { status, json }), TOKEN), undefined, String(status));
+    }
+    const empty = new FakeSys().acceptToken(TOKEN, AGENT, { 'x-oauth-scopes': '' });
+    assert.deepEqual(await tokenInfo(empty, TOKEN), { login: AGENT, scopes: [], expires: undefined });
+  });
+
+  it('takes write:org for read:org, and no token but a classic one', () => {
+    const info = { login: AGENT, scopes: ['repo', 'workflow', 'write:org', 'project', 'write:ssh_signing_key'], expires: new Date('2027-01-28T12:00:00Z') };
+    assert.deepEqual(checkToken(TOKEN, info, AGENT, NOW), { problem: undefined, days: 90 });
+    assert.equal(checkToken('gho_x', info, AGENT, NOW).problem, 'it is not a classic token, which niyam needs (see its docs/decisions.md)');
+  });
+
+  it("refuses signing keys GitHub lists badly or not at all, and derives a key's public half from the key", async () => {
+    for (const [status, json] of [[200, {}], [500, []]] as const) {
+      const sys = new FakeSys().route('GET', '/users/ExampleBot/ssh_signing_keys', { status, json });
+      await assert.rejects(signingKeys(sys, AGENT), { message: `cannot list ExampleBot's signing keys (HTTP ${status})` });
+    }
+    const sys = new FakeSys();
+    sys.files.set(KEY, PRIVATE_KEY);
+    sys.files.set(`${KEY}.pub`, PUBLIC_KEY);
+    assert.equal(keyPairProblem(sys, KEY), undefined);
+    assert.deepEqual(sys.calls, [{ command: 'ssh-keygen', args: ['-y', '-f', KEY] }]);
   });
 });

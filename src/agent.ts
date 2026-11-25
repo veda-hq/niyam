@@ -103,8 +103,10 @@ export function settingsIn(text: string): Settings {
   if (both) {
     throw new Error(`${name}: ${both} is named as both owner and agent; they must be different accounts`);
   }
-  const approvals = approvalsIn(raw, name);
-  const cloudSigningKeys = cloudSigningKeysIn(raw, name);
+  // `logins` threw unless the file holds an object.
+  const { approvals: approvalsGiven, [CLOUD_SIGNING_KEYS]: pinsGiven } = raw as Record<string, unknown>;
+  const approvals = approvalsIn(approvalsGiven, name);
+  const cloudSigningKeys = cloudSigningKeysIn(pinsGiven, name);
   return { owners, agents, ...(approvals === undefined ? {} : { approvals }), ...(cloudSigningKeys === undefined ? {} : { cloudSigningKeys }) };
 }
 
@@ -112,8 +114,7 @@ export function settingsIn(text: string): Settings {
 const PUBLIC_KEY = /^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,2}$/;
 
 /** The cloud signing keys the settings pin, by agent, or undefined when they pin none; anything else is refused. */
-function cloudSigningKeysIn(raw: unknown, file: string): Record<string, string[]> | undefined {
-  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)[CLOUD_SIGNING_KEYS] : undefined;
+function cloudSigningKeysIn(value: unknown, file: string): Record<string, string[]> | undefined {
   if (value === undefined) return undefined;
   const refused = `${file}: "${CLOUD_SIGNING_KEYS}" must map each agent's login to a list of OpenSSH public keys, "type body", as niyam onboard writes it`;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(refused);
@@ -128,13 +129,13 @@ function cloudSigningKeysIn(raw: unknown, file: string): Record<string, string[]
 }
 
 /** The Approvals issue the settings name as `"approvals": N`, or undefined when they name none; anything but an issue number is refused. */
-function approvalsIn(raw: unknown, file: string): number | undefined {
-  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).approvals : undefined;
+function approvalsIn(value: unknown, file: string): number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+  // Number.isSafeInteger is false for anything but a number.
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
     throw new Error(`${file}: "approvals" must be the number of the repository's Approvals issue, such as 42`);
   }
-  return value;
+  return value as number;
 }
 
 function logins(raw: unknown, name: string, file: string): string[] {
@@ -415,7 +416,7 @@ function sessionText(agent: string, id: number, paths: Paths, read: string, agen
  */
 export function sessionFileIs(script: string, agent: string, id: number, paths: Paths, store: TokenStore = KEYCHAIN): 'current' | 'older' | undefined {
   if (script === sessionScript(agent, id, paths, store)) return 'current';
-  const older = (store.olderReadCommands?.(agent) ?? []).some((read) => script === sessionText(agent, id, paths, read, AGENT_VARS_0610));
+  const older = store.olderReadCommands?.(agent).some((read) => script === sessionText(agent, id, paths, read, AGENT_VARS_0610));
   return older ? 'older' : undefined;
 }
 
@@ -553,12 +554,12 @@ export async function tokenInfo(sys: Sys, token: string): Promise<TokenInfo | un
   const login = (json as { login?: unknown } | null)?.login;
   if (status !== 200 || typeof login !== 'string') return undefined;
   const scopes = headers['x-oauth-scopes'];
-  const expiry = headers['github-authentication-token-expiration'];
-  const expires = expiry === undefined ? undefined : new Date(expiry);
+  // No header gives an invalid date, as a header that is no date does.
+  const expires = new Date(headers['github-authentication-token-expiration'] ?? NaN);
   return {
     login,
     scopes: scopes === undefined ? undefined : scopes.split(',').map((scope) => scope.trim()).filter(Boolean),
-    expires: expires && !Number.isNaN(expires.getTime()) ? expires : undefined,
+    expires: Number.isNaN(expires.getTime()) ? undefined : expires,
   };
 }
 
@@ -573,7 +574,7 @@ export function checkToken(token: string, info: TokenInfo | undefined, agent: st
   }
   const { scopes } = info;
   const missing = TOKEN_SCOPES.filter(
-    (scope) => !scopes.includes(scope) && !(INCLUDED_BY[scope] ?? []).some((wider) => scopes.includes(wider)),
+    (scope) => !scopes.includes(scope) && INCLUDED_BY[scope]?.some((wider) => scopes.includes(wider)) !== true,
   );
   if (missing.length > 0) return { problem: `the token lacks the scopes ${missing.join(', ')}` };
   if (!info.expires) return { problem: 'the token never expires; create one with an expiry (90 days recommended)' };
