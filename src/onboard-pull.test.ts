@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { pathsFor, sessionEnv } from './agent.ts';
 import { AGENT, AGENT_ID, blobName, capture, FakeSys, HOME, PULL_URL, TOKEN } from './fake.test.ts';
 import type { Call } from './fake.test.ts';
-import { HOOKS_PATH, LEFTOVER_CLOUD_SETUP_PATH, MOVED_FILES, ONBOARD_BRANCH, ONBOARD_FILES, WORKFLOW_PATH, mergeQueue, openPull, pullTitle, remoteFile } from './onboard-pull.ts';
+import { HOOKS_PATH, LEFTOVER_CLOUD_SETUP_PATH, MOVED_FILES, ONBOARD_BRANCH, ONBOARD_FILES, WORKFLOW_PATH, autoMerge, mergeQueue, openPull, pullTitle, remoteFile } from './onboard-pull.ts';
 import type { Change, PullTarget } from './onboard-pull.ts';
 
 describe("onboard's files", () => {
@@ -28,6 +28,7 @@ describe('pullTitle', () => {
   const plain = 'chore(niyam): onboard at v1.2.3';
 
   it('is plain Conventional Commits when the history gives no emoji style, or none', () => {
+    assert.equal(pullTitle('1.2.3', undefined), plain, 'GitHub did not say');
     assert.equal(pullTitle('1.2.3', []), plain);
     assert.equal(pullTitle('1.2.3', ['feat: a thing', 'fix(api): b', '✨ feat: c']), plain, 'most subjects lead with no emoji');
     assert.equal(pullTitle('1.2.3', ['✨ feat: a', 'fix: b']), plain, 'half is not most');
@@ -263,6 +264,7 @@ describe('openPull', () => {
       ['write-tree', 'git write-tree failed: boom'],
       ['commit-tree', 'signing the commit failed: boom'],
       ['commit-tree', 'signing the commit failed: ', { code: 0, stdout: '\n', stderr: '' }],
+      ['commit-tree', 'signing the commit failed: boom', { code: 1, stdout: 'abc123\n', stderr: ' boom\n' }],
       ['push', 'pushing as ExampleBot failed: boom'],
     ];
     for (const [step, said, result] of cases) {
@@ -274,5 +276,143 @@ describe('openPull', () => {
       assert.ok(!sys.requests.some((request) => request.method === 'POST'), step);
       assert.deepEqual(sys.removed, [DIR], step);
     }
+  });
+
+  const PULLS = '/repos/example-org/example-app/pulls';
+  const OPEN = `${PULLS}?state=open&head=example-org:niyam/onboard`;
+  const OPEN_URL = 'https://github.com/example-org/example-app/pull/5';
+  const titleOf = (sys: FakeSys): unknown => (sys.requests.find((request) => request.method === 'POST')?.body as { title?: unknown } | undefined)?.title;
+
+  it("titles the pull request in the style of the default branch's recent subjects, read as the agent", async () => {
+    const { sys, io } = on();
+    const commits = `/repos/example-org/example-app/commits?sha=release%2F1&per_page=20`;
+    sys.route('GET', commits, {
+      status: 200,
+      json: [null, {}, { commit: {} }, { commit: { message: 5 } }, { commit: { message: '✨ feat: a\n\nits body' } }, { commit: { message: '🐛 fix: b' } }],
+    });
+    assert.deepEqual(await openPull(sys, io, { ...target, branch: 'release/1' }, changes), { url: PULL_URL, id: 'PR_7' });
+    assert.equal(titleOf(sys), '🔧 chore(niyam): onboard at v1.2.3');
+    assert.ok(sys.calls.some((call) => call.args.join(' ') === 'commit-tree -S tree1 -p FETCH_HEAD -m 🔧 chore(niyam): onboard at v1.2.3'));
+    assert.deepEqual(
+      sys.requests.filter((request) => request.url.includes('/commits?')).map((request) => [request.url, request.token]),
+      [[`https://api.github.com${commits}`, TOKEN]],
+    );
+  });
+
+  it('takes no style when GitHub does not list the commits', async () => {
+    const styled = { status: 200, json: [{ commit: { message: '✨ feat: a' } }, { commit: { message: '🐛 fix: b' } }] };
+    for (const answer of [{ ...styled, status: 500 }, { status: 200, json: {} }, undefined]) {
+      const { sys, io } = on();
+      if (answer) sys.route('GET', '/repos/example-org/example-app/commits?sha=main&per_page=20', answer);
+      else {
+        const http = sys.http.bind(sys);
+        sys.http = (url, options) => (url.includes('/commits?') ? Promise.reject(new Error('ECONNRESET')) : http(url, options));
+      }
+      assert.deepEqual(await openPull(sys, io, target, changes), { url: PULL_URL, id: 'PR_7' }, JSON.stringify(answer));
+      assert.equal(titleOf(sys), 'chore(niyam): onboard at v1.2.3', JSON.stringify(answer));
+    }
+  });
+
+  it('gives no id for a pull request GitHub opened without a text one', async () => {
+    const { sys, io } = on();
+    sys.route('POST', PULLS, { status: 201, json: { number: 7, html_url: PULL_URL, node_id: 7 } });
+    assert.deepEqual(await openPull(sys, io, target, changes), { url: PULL_URL, id: undefined });
+  });
+
+  it('updates the pull request open on its branch already, its title and description', async () => {
+    for (const [patched, node, said] of [
+      [200, 'PR_5', []],
+      [500, 5, [`onboard: could not update the description of ${OPEN_URL} (HTTP 500)`]],
+    ] as [number, unknown, string[]][]) {
+      const { sys, io, err } = on();
+      sys.route('POST', PULLS, { status: 422, json: { message: 'Validation Failed' } });
+      sys.route('GET', OPEN, { status: 200, json: [{ number: 5, html_url: OPEN_URL, node_id: node }] });
+      sys.route('PATCH', `${PULLS}/5`, { status: patched, json: {} });
+      assert.deepEqual(await openPull(sys, io, target, changes), { url: OPEN_URL, id: typeof node === 'string' ? node : undefined });
+      assert.deepEqual(err, said);
+      assert.deepEqual(
+        sys.requests.filter((request) => request.method !== 'GET' || request.url.includes('state=open')),
+        [
+          { url: `https://api.github.com${PULLS}`, method: 'POST', token: TOKEN, body: { title: 'chore(niyam): onboard at v1.2.3', head: 'niyam/onboard', base: 'main', body: description([]) } },
+          { url: `https://api.github.com${OPEN}`, method: 'GET', token: TOKEN },
+          { url: `https://api.github.com${PULLS}/5`, method: 'PATCH', token: TOKEN, body: { title: 'chore(niyam): onboard at v1.2.3', body: description([]) } },
+        ],
+      );
+    }
+  });
+
+  it('says why GitHub did not open the pull request, the changes left on its branch', async () => {
+    const someone = [{ number: 5, html_url: OPEN_URL, node_id: 'PR_5' }];
+    const cases: [{ status: number; json: unknown }, { status: number; json: unknown }, string][] = [
+      [{ status: 500, json: { message: 'boom' } }, { status: 200, json: someone }, 'HTTP 500: boom'],
+      [{ status: 500, json: null }, { status: 200, json: [] }, 'HTTP 500'],
+      [{ status: 422, json: { message: 5 } }, { status: 200, json: [] }, 'HTTP 422'],
+      [{ status: 422, json: { message: 'Validation Failed' } }, { status: 200, json: {} }, 'HTTP 422: Validation Failed'],
+    ];
+    for (const [opened, open, why] of cases) {
+      const { sys, io, err } = on();
+      sys.route('POST', PULLS, opened);
+      sys.route('GET', OPEN, open);
+      assert.equal(await openPull(sys, io, target, changes), 1, why);
+      assert.deepEqual(err, [`onboard: GitHub did not open the pull request (${why}); the changes are on niyam/onboard`]);
+      assert.ok(!sys.requests.some((request) => request.method === 'PATCH'), why);
+      assert.deepEqual(sys.removed, [DIR]);
+    }
+  });
+});
+
+describe('autoMerge', () => {
+  const REPO = '/repos/example-org/example-app';
+  const GRAPHQL = 'https://api.github.com/graphql';
+  const QUERY = 'mutation($id: ID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: $method }) { pullRequest { id } } }';
+  const DONE = { status: 200, json: { data: { enablePullRequestAutoMerge: { pullRequest: { id: 'PR_7' } } } } };
+  const merging = (settings: unknown, reply: { status: number; json: unknown } = DONE): FakeSys => new FakeSys().route('GET', REPO, { status: 200, json: settings }).route('POST', GRAPHQL, reply);
+  const ask = (sys: FakeSys, id: string | undefined) => autoMerge(sys, 'example-org/example-app', TOKEN, id);
+
+  it('turns it on with the first merge method the repository allows, as the agent', async () => {
+    for (const [settings, method] of [
+      [{}, 'SQUASH'],
+      [null, 'SQUASH'],
+      [{ allow_auto_merge: true, allow_squash_merge: true }, 'SQUASH'],
+      [{ allow_squash_merge: false }, 'REBASE'],
+      [{ allow_squash_merge: false, allow_rebase_merge: false }, 'MERGE'],
+    ] as [unknown, string][]) {
+      const sys = merging(settings);
+      assert.equal(await ask(sys, 'PR_7'), undefined, JSON.stringify(settings));
+      assert.deepEqual(sys.requests, [
+        { url: `https://api.github.com${REPO}`, method: 'GET', token: TOKEN },
+        { url: GRAPHQL, method: 'POST', token: TOKEN, body: { query: QUERY, variables: { id: 'PR_7', method } } },
+      ]);
+    }
+  });
+
+  it('says why not before asking GitHub, where the repository or the pull request rules it out', async () => {
+    const cases: [unknown, string | undefined, object][] = [
+      [{ allow_auto_merge: false }, 'PR_7', { problem: 'example-org/example-app does not allow auto-merge', notAllowed: true }],
+      [{ allow_squash_merge: false, allow_rebase_merge: false, allow_merge_commit: false }, 'PR_7', { problem: 'example-org/example-app allows no merge method' }],
+      [{}, undefined, { problem: 'GitHub gave no id for the pull request' }],
+      [{}, '', { problem: 'GitHub gave no id for the pull request' }],
+    ];
+    for (const [settings, id, why] of cases) {
+      const sys = merging(settings);
+      assert.deepEqual(await ask(sys, id), why);
+      assert.ok(!sys.requests.some((request) => request.url === GRAPHQL));
+    }
+  });
+
+  it('says what GitHub said when it refused, and whether auto-merge is not allowed', async () => {
+    const data = DONE.json.data;
+    const cases: [{ status: number; json: unknown }, object | undefined][] = [
+      [{ status: 200, json: { errors: [], data } }, undefined],
+      [{ status: 200, json: { errors: [{ message: 'Pull request is in clean status' }], data } }, { problem: 'Pull request is in clean status' }],
+      [{ status: 200, json: { errors: [{ message: 'one' }, { message: 'two' }] } }, { problem: 'one; two' }],
+      [{ status: 200, json: { errors: [{ message: 'Auto merge is not allowed for this repository' }] } }, { problem: 'Auto merge is not allowed for this repository', notAllowed: true }],
+      [{ status: 200, json: { errors: [{ message: 'Auto-merge is NOT ENABLED here' }] } }, { problem: 'Auto-merge is NOT ENABLED here', notAllowed: true }],
+      [{ status: 200, json: { errors: [{}] } }, { problem: 'HTTP 200' }],
+      [{ status: 200, json: {} }, { problem: 'HTTP 200' }],
+      [{ status: 200, json: null }, { problem: 'HTTP 200' }],
+      [{ status: 500, json: { data } }, { problem: 'HTTP 500' }],
+    ];
+    for (const [reply, why] of cases) assert.deepEqual(await ask(merging({}, reply), 'PR_7'), why, JSON.stringify(reply));
   });
 });
