@@ -293,8 +293,12 @@ export async function setUpBoard(
   // A field made before an option joined it, such as Step's Done, gains the option.
   const short = FIELDS.flatMap((field) => {
     const held = had(field.name);
-    const absent = field.options?.filter((name) => held?.options && !held.options.some((option) => option.name.toLowerCase() === name.toLowerCase())) ?? [];
-    return held?.id && held.options && absent.length > 0 ? [{ id: held.id, name: field.name, options: held.options, absent }] : [];
+    // A field made in this run gains no option, and neither does one the work model gives none, such as Review date.
+    if (!held?.options || !field.options) return [];
+    const options = held.options;
+    const absent = field.options.filter((name) => !options.some((option) => option.name.toLowerCase() === name.toLowerCase()));
+    // A field GitHub lists with options has an id.
+    return absent.length > 0 ? [{ id: held.id as string, name: field.name, options, absent }] : [];
   });
   if (short.length > 0) {
     const what = short.map((field) => `${field.absent.join(', ')} to the field ${field.name}`).join(' and ');
@@ -438,7 +442,6 @@ const MOVABLE = ['SINGLE_SELECT', 'DATE', 'TEXT', 'NUMBER'];
 /** A Project's open items (drafts, and issues and pull requests not closed or merged) with their field values, and the names of its fields whose values could move. */
 async function itemsOf(sys: Sys, token: string, projectId: string): Promise<{ items: Item[]; fields: string[] }> {
   const items: Item[] = [];
-  let fields: string[] = [];
   for (let after: string | null = null; ; ) {
     const field = '... on ProjectV2FieldCommon { name }';
     const page = (await graphql(
@@ -459,15 +462,18 @@ async function itemsOf(sys: Sys, token: string, projectId: string): Promise<{ it
         };
       };
     };
-    fields = page.node.fields.nodes.filter((f) => MOVABLE.includes(f.dataType ?? '')).map((f) => f.name ?? '');
+    // A field with a dataType is a ProjectV2FieldCommon, which has a name.
+    const fields = page.node.fields.nodes.filter((f) => MOVABLE.includes(f.dataType as string)).map((f) => f.name as string);
     for (const node of page.node.items.nodes) {
       if (node.isArchived || !node.content || (node.content.state ?? 'OPEN') !== 'OPEN') continue;
+      // A value kept is one of a movable field, which has a name.
       const values = node.fieldValues.nodes
-        .filter((value) => fields.includes(value.field?.name ?? ''))
-        .map((value) => ({ field: value.field?.name ?? '', option: value.name, date: value.date, text: value.text, number: value.number }));
+        .filter((value) => fields.includes(value.field?.name as string))
+        .map((value) => ({ field: (value.field as { name: string }).name, option: value.name, date: value.date, text: value.text, number: value.number }));
       items.push(
+        // A draft's title and body are never null in GitHub's schema.
         node.content.__typename === 'DraftIssue'
-          ? { draft: { title: node.content.title ?? '', body: node.content.body ?? '' }, values }
+          ? { draft: { title: node.content.title as string, body: node.content.body as string }, values }
           : { content: node.content.id, values },
       );
     }
@@ -577,7 +583,7 @@ export async function setUpViews(
         `mutation($project: ID!, $name: String!, $layout: ProjectV2ViewLayout!) { createProjectV2View(input: { projectId: $project, name: $name, layout: $layout }) { projectV2View { ${VIEW} } } }`,
         { project: projectId, name: spec.name, layout: spec.layout },
       )) as { createProjectV2View: { projectV2View: View } }).createProjectV2View.projectV2View;
-    if (settled(view, spec, fieldIds)) continue;
+    // A view just made has no filter, and every spec has one, so it is never settled yet.
     const visible = columns(view, spec, fieldIds);
     await graphql(
       sys,
@@ -596,8 +602,9 @@ export async function setUpViews(
   return sent;
 }
 
-function visibleNames(view: View): string[] {
-  return view.configuration.visibleFields.nodes.map((field) => field.name).filter((name) => name !== undefined);
+/** A view's visible fields by name; a field with none maps to no id, so `columns` drops it. */
+function visibleNames(view: View): (string | undefined)[] {
+  return view.configuration.visibleFields.nodes.map((field) => field.name);
 }
 
 /**
@@ -611,12 +618,12 @@ function columns(view: View, spec: ViewSpec, fieldIds: Map<string | undefined, s
   const visible = visibleNames(view);
   const show = spec.show.filter((name) => fieldIds.has(name) && !visible.includes(name));
   if (show.length === 0 && !spec.hide.some((name) => visible.includes(name))) return undefined;
-  return [...visible.filter((name) => !spec.hide.includes(name)), ...show].map((name) => fieldIds.get(name)).filter((id) => id !== undefined);
+  return [...visible.filter((name) => !spec.hide.includes(name as string)), ...show].map((name) => fieldIds.get(name)).filter((id) => id !== undefined);
 }
 
 /** Whether the view already is what the spec asks for. */
 function settled(view: View, spec: ViewSpec, fieldIds: Map<string | undefined, string | undefined>): boolean {
-  return view.name === spec.name && view.layout === spec.layout && (view.filter ?? '') === spec.filter && columns(view, spec, fieldIds) === undefined;
+  return view.name === spec.name && view.layout === spec.layout && view.filter === spec.filter && columns(view, spec, fieldIds) === undefined;
 }
 
 /**
@@ -630,7 +637,7 @@ async function rest(sys: Sys, token: string, url: string, options: { method?: st
     const message = (json as { message?: unknown } | null)?.message;
     throw new Error(`GitHub's REST API refused ${options.method ?? 'GET'} ${url.replace(API, '')}: HTTP ${status}${typeof message === 'string' ? ` ${message}` : ''}`);
   }
-  return { json, next: /<([^>]+)>;\s*rel="next"/.exec(headers?.link ?? '')?.[1] };
+  return { json, next: /<([^>]+)>;\s*rel="next"/.exec(String(headers?.link))?.[1] };
 }
 
 /** Every entry of a REST list at `url`, following its pages. */
@@ -726,8 +733,8 @@ async function projectItems(sys: Sys, token: string, slug: string): Promise<{ st
     }>(sys, token, `${url}/items?per_page=100&fields=${wanted}`);
     for (const item of items) {
       const content = item.content;
-      const number = content?.number;
-      if (item.archived_at || item.content_type !== 'Issue' || !number || !content?.repository_url?.toLowerCase().endsWith(repoUrl)) continue;
+      if (item.archived_at || item.content_type !== 'Issue' || !content?.number || !content.repository_url?.toLowerCase().endsWith(repoUrl)) continue;
+      const number = content.number;
       const of = (field: ProjectField): BoardItem => ({
         url: `${url}/items/${item.id}`,
         project: project.title,
@@ -760,7 +767,8 @@ export function stepDue(item: Pick<BoardItem, 'value' | 'state' | 'subIssues'>, 
   if (item.value !== undefined && now < 0) return undefined;
   if (item.state === 'closed') return now === rank('Done') ? undefined : 'Done';
   const due = building || item.subIssues.completed > 0 ? 'Build' : item.subIssues.total > 0 ? 'Slice' : 'Frame';
-  return item.value === undefined || now === rank('Done') || now < rank(due) ? due : undefined;
+  // A work item with no Step ranks -1, below every Step it can be due.
+  return now === rank('Done') || now < rank(due) ? due : undefined;
 }
 
 type Move = { item: BoardItem; option: string; name: string; what: string };
