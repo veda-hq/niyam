@@ -20,7 +20,7 @@ describe('reachesGitHub', () => {
   for (const command of ['/usr/local/bin/gh pr list', '~/bin/git push', 'git -c a=b fetch', 'git --git-dir=.git push', 'gh pr list', 'cd x && gh api user', 'git push', 'git -C /repo fetch origin', 'git pull --rebase', 'git clone url', 'git ls-remote origin', 'git remote update', 'git submodule update', 'echo; git push -u origin HEAD', '(gh issue view 1)']) {
     it(`finds ${command}`, () => assert.equal(reachesGitHub(command), true));
   }
-  for (const command of ['git commit -m "fix push"', 'git log --grep pull', 'ls', 'git status', 'git commit -m fix', 'git log --oneline', 'cat .github/x', 'pnpm check', 'node gh.js', 'ghq list', '/usr/bin/sigh now']) {
+  for (const command of ['git commit -m "fix push"', 'git log --grep pull', 'ls', 'git status', 'git commit -m fix', 'git log --oneline', 'cat .github/x', 'pnpm check', 'node gh.js', 'ghq list', '/usr/bin/sigh now', 'pnpm update', 'git show HEAD']) {
     it(`passes ${command}`, () => assert.equal(reachesGitHub(command), false));
   }
 
@@ -66,6 +66,9 @@ describe('guard', () => {
   it('lets commands that do not reach GitHub through, with no record', () => {
     assert.deepEqual(check(new FakeSys(), 'git status'), { code: 0, err: [] });
     assert.deepEqual(check(new FakeSys(), undefined), { code: 0, err: [] });
+    // A hook input with no tool input at all is no command to check either.
+    const { io, err } = capture();
+    assert.deepEqual([guard(new FakeSys(), io, '{}'), err], [0, []]);
   });
 
   it('lets GitHub commands through in a session session-start gave the agent identity', () => {
@@ -80,7 +83,10 @@ describe('guard', () => {
       err: [`${REFUSED} session-start did not run for this session, so it was not given the agent identity. Do not work around it; tell the owner.`],
     });
     assert.equal(check(new FakeSys(), 'gh pr list', '../x').code, 2, 'a session id that is not one');
-    assert.equal(check(new FakeSys(), 'gh pr list', 7).code, 2);
+    // A session id that is not a string names no record, even where one of its digits' name is there.
+    const numbered = new FakeSys();
+    numbered.files.set(sessionRecord(HOME, '7') as string, '{"agent":"ExampleBot"}\n');
+    assert.equal(check(numbered, 'gh pr list', 7).code, 2);
   });
 
   it('refuses them where session-start locked GitHub out, repeating why', () => {
@@ -94,6 +100,8 @@ describe('guard', () => {
   it('refuses them when the record is not what session-start writes', () => {
     const sys = new FakeSys();
     sys.files.set(RECORD, 'nonsense');
+    assert.equal(check(sys, 'git push').err[0], `${REFUSED} ${RECORD} is not what session-start writes. Do not work around it; tell the owner.`);
+    sys.files.set(RECORD, '7');
     assert.equal(check(sys, 'git push').err[0], `${REFUSED} ${RECORD} is not what session-start writes. Do not work around it; tell the owner.`);
     sys.files.set(RECORD, '{}');
     assert.equal(check(sys, 'git push').err[0], `${REFUSED} ${RECORD} names no agent. Do not work around it; tell the owner.`);
@@ -151,6 +159,9 @@ describe('guard on comments that ask the owner', () => {
     assert.match(run(sys, 'gh issue comment 1 --body-file ask.md', '/repo/sub').err[0] ?? '', /links no published page/, 'the file was read');
     // A cwd that is not a path is not used, so ask.md is looked for in the checkout, where there is none to read.
     assert.match(run(sys, 'gh issue comment 1 --body-file ask.md', 'relative').err[0] ?? '', /cannot see how this comment opens/);
+    sys.files.set('/repo/ask.md', 'Merged at abc');
+    sys.files.set('relative/ask.md', 'Needs you: pick one');
+    assert.deepEqual(run(sys, 'gh issue comment 1 --body-file ask.md', 'relative'), { code: 0, err: [] }, 'the checkout\'s ask.md is read, not one under the relative cwd');
     assert.equal(run(sys, 'gh api repos/o/r/issues/1/comments -f body="@example-owner please look"').code, 2);
   });
 
