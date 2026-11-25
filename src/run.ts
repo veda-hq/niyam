@@ -179,7 +179,8 @@ export function stateArgs(args: readonly string[]): { slice: number; title: stri
     }
     if (title !== undefined) throw new Error('state takes one --title');
     const value = inline ?? args[++at];
-    if (value === undefined || !value.trim()) throw new Error('state --title needs what the State builds, as text');
+    // A flag in the title's place is a missing title, as propose's --page refuses one.
+    if (value === undefined || !value.trim() || value.startsWith('-')) throw new Error('state --title needs what the State builds, as text');
     title = value.trim();
   }
   // An unquoted #12 is a comment in bash, so the slice goes missing there.

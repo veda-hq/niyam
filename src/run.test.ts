@@ -181,6 +181,8 @@ describe('run', () => {
       [['12', '--title'], 'state --title needs what the State builds, as text'],
       [['12', '--title', ' '], 'state --title needs what the State builds, as text'],
       [['12', '--title=', 'x'], 'state --title needs what the State builds, as text'],
+      [['12', '--title', '--foo'], 'state --title needs what the State builds, as text'],
+      [['12', '--title=--foo'], 'state --title needs what the State builds, as text'],
       [['12', '--title', 'a', '--title', 'b'], 'state takes one --title'],
     ];
     for (const [args, message] of bad) {
