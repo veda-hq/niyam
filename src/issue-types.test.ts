@@ -1,12 +1,95 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { ISSUE_TYPES, OPENER_WAIT_MS, applyTypes, issueType, typeFor, typesChange, typesDetail, typesLines, typesPlan, typesQuestion, withinApproved } from './issue-types.ts';
+import {
+  ISSUE_TYPES,
+  OPENER_WAIT_MS,
+  type OrgType,
+  Refused,
+  type Retype,
+  type TypesPlan,
+  applyTypes,
+  approvalsOf,
+  issueType,
+  orgTypes,
+  pages,
+  typeFor,
+  typesChange,
+  typesDetail,
+  typesDrift,
+  typesLines,
+  typesPlan,
+  typesQuestion,
+  withinApproved,
+} from './issue-types.ts';
 import { Board, OWNER_TOKEN, SLUG } from './fake-board.test.ts';
 import { FakeSys, ROOT, capture } from './fake.test.ts';
 
 const MODEL = ISSUE_TYPES.map((type) => type.name);
 const OTHER = 'example-org/example-site';
+
+/** A plan built by hand: nothing to do but what `parts` says. */
+function planOf(parts: Partial<TypesPlan>): TypesPlan {
+  return { org: 'example-org', others: [], unlisted: [], add: [], enable: [], retype: [], held: [], disable: [], kept: [], late: [], exempt: [], ...parts };
+}
+
+/** An issue the plan types, as typesPlan writes one. */
+function retyped(repo: string, number: number, from = 'Task', to = 'Brief', why = 'it has no parent and no sub-issues'): Retype {
+  return { repo, number, from, to, why };
+}
+
+/** An organisation's issue type, as GitHub lists it. */
+function orgType(id: number, name: string, enabled = true): OrgType {
+  return { id, name, description: `${name} issues`, color: 'gray', is_enabled: enabled };
+}
+
+describe('pages', () => {
+  const LIST = `https://api.github.com/repos/${SLUG}/things`;
+  const at = (page: number): string => `/repos/${SLUG}/things?per_page=100&page=${page}`;
+
+  it('reads every page of a list, and none past a 410 Gone only when told to', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', at(1), { status: 200, json: Array.from({ length: 100 }, (_, index) => index) });
+    sys.route('GET', at(2), { status: 200, json: [100] });
+    assert.deepEqual(await pages(sys, 'ghs_read', `${LIST}`), Array.from({ length: 101 }, (_, index) => index));
+    assert.deepEqual(
+      sys.requests.map((request) => [request.url, request.token]),
+      [
+        [`${LIST}?per_page=100&page=1`, 'ghs_read'],
+        [`${LIST}?per_page=100&page=2`, 'ghs_read'],
+      ],
+    );
+    sys.route('GET', at(2), { status: 410, json: null });
+    assert.equal((await pages(sys, 'ghs_read', LIST, true)).length, 100);
+    sys.route('GET', at(1), { status: 410, json: null });
+    assert.deepEqual(await pages(sys, 'ghs_read', LIST, true), []);
+    await assert.rejects(pages(sys, 'ghs_read', LIST), (error: unknown) => error instanceof Refused && error.status === 410 && error.json === null);
+  });
+
+  it('refuses an answer that is not 200, or not a list', async () => {
+    for (const [status, json] of [
+      [200, { message: 'not a list' }],
+      [500, []],
+    ] as const) {
+      const sys = new FakeSys();
+      sys.route('GET', at(1), { status, json });
+      await assert.rejects(pages(sys, 'ghs_read', LIST), (error: unknown) => {
+        assert.ok(error instanceof Refused);
+        assert.equal(error.message, `cannot read ${LIST} (HTTP ${status})`);
+        assert.deepEqual([error.status, error.json], [status, json]);
+        return true;
+      });
+    }
+  });
+});
+
+describe('orgTypes', () => {
+  it('keeps only the entries with a name', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', '/orgs/example-org/issue-types?per_page=100&page=1', { status: 200, json: [null, { id: 9 }, orgType(1, 'Task')] });
+    assert.deepEqual(await orgTypes(sys, OWNER_TOKEN, 'example-org'), [orgType(1, 'Task')]);
+  });
+});
 
 /** An organisation with the work model's types, GitHub's Task, Bug and Feature, and a second repository. */
 function org(): { sys: FakeSys; board: Board } {
@@ -43,10 +126,51 @@ describe('typesPlan', () => {
       { repo: OTHER, number: 8, from: 'task', to: 'Slice', why: 'its parent #7 is a Work item' },
     ]);
     assert.deepEqual(plan.disable.map((type) => type.name), ['Task', 'Bug', 'Feature']);
+    assert.deepEqual(plan.others, ['Task', 'Bug', 'Feature']);
     assert.deepEqual([plan.add, plan.enable, plan.held, plan.kept], [[], [], [], []]);
     assert.ok(sys.requests.every((request) => request.token === OWNER_TOKEN));
     assert.equal(sys.requests.filter((request) => request.url.endsWith('/issues/1')).length, 1, 'a parent is read once');
     assert.ok(!sys.requests.some((request) => request.method !== 'GET'), 'it changes nothing');
+    assert.ok(!sys.requests.some((request) => request.url.includes('/contents/')), 'with no open issue lacking a type, no settings are read');
+  });
+
+  it('asks GitHub once for a parent two issues share, and reads a parent with no type it can read as neither', async () => {
+    const { sys, board } = org();
+    board.issues = [
+      { repo: SLUG, number: 1, type: 'Work item', subIssues: 2 },
+      { repo: SLUG, number: 2, type: 'Task', parent: 1 },
+      { repo: SLUG, number: 3, type: 'Task', parent: 1 },
+      { repo: SLUG, number: 4, type: 'Task', parent: 90 },
+      { repo: SLUG, number: 5, type: 'Task', parent: 91 },
+    ];
+    sys.route('GET', `/repos/${SLUG}/issues/90`, { status: 200, json: null });
+    sys.route('GET', `/repos/${SLUG}/issues/91`, { status: 200, json: { type: { name: 5 } } });
+    const plan = await typesPlan(sys, OWNER_TOKEN, 'example-org');
+    assert.deepEqual(
+      plan.retype.map((issue) => `#${issue.number} ${issue.to}: ${issue.why}`),
+      [
+        '#2 Slice: its parent #1 is a Work item',
+        '#3 Slice: its parent #1 is a Work item',
+        '#4 Brief: its parent #90 is neither a Work item nor a Slice, and it has no sub-issues',
+        '#5 Brief: its parent #91 is neither a Work item nor a Slice, and it has no sub-issues',
+      ],
+    );
+    assert.equal(sys.requests.filter((request) => request.url.endsWith('/issues/1')).length, 1, 'a parent is read once');
+  });
+
+  it('reads past rows and repositories it cannot use, and a parent link that is not text as none', async () => {
+    const { sys, board } = org();
+    board.orgRepos = [{ full_name: SLUG }, {} as { full_name: string }];
+    sys.route('GET', `/repos/${SLUG}/issues?type=Task&state=all&per_page=100&page=1`, {
+      status: 200,
+      json: [
+        null,
+        { url: `https://api.github.com/repos/${SLUG}/issues/4`, type: { name: 'Task' } },
+        { number: 5, url: `https://api.github.com/repos/${SLUG}/issues/5`, type: { name: 'Task' }, parent_issue_url: 42 },
+      ],
+    });
+    sys.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, { status: 200, json: [null] });
+    assert.deepEqual((await typesPlan(sys, OWNER_TOKEN, 'example-org')).retype, [retyped(SLUG, 5)]);
   });
 
   it('retypes nothing GitHub lists that does not hold the type, as when it ignores the filter', async () => {
@@ -67,6 +191,7 @@ describe('typesPlan', () => {
     board.orgRepos = [{ full_name: SLUG }, { full_name: OTHER, has_issues: false }, { full_name: 'example-org/example-fork' }];
     board.issues = [{ repo: SLUG, number: 4, type: 'Task' }];
     for (const type of ['Task', 'Bug', 'Feature']) sys.route('GET', `/repos/example-org/example-fork/issues?type=${type}&state=all&per_page=100&page=1`, { status: 410, json: null });
+    sys.route('GET', '/repos/example-org/example-fork/issues?type=none&state=open&per_page=100&page=1', { status: 410, json: null });
     const plan = await typesPlan(sys, OWNER_TOKEN, 'example-org');
     assert.deepEqual(plan.retype.map((issue) => issue.number), [4]);
     assert.ok(!sys.requests.some((request) => request.url.includes(OTHER)), 'a repository with issues off is not read');
@@ -238,6 +363,40 @@ describe('disabled types GitHub will not list issues by', () => {
     board.disabledTypes = ['Task'];
     sys.route('GET', `/repos/${SLUG}/issues?type=Task&state=all&per_page=100&page=1`, { status: 403, json: null });
     await assert.rejects(typesPlan(sys, OWNER_TOKEN, 'example-org'), /cannot read .*issues\?type=Task&state=all \(HTTP 403\)/);
+    // Only a 422 is GitHub's refusal of the filter, whatever another answer's body says.
+    sys.route('GET', `/repos/${SLUG}/issues?type=Task&state=all&per_page=100&page=1`, { status: 400, json: refused('Task').json });
+    await assert.rejects(typesPlan(sys, OWNER_TOKEN, 'example-org'), /cannot read .*issues\?type=Task&state=all \(HTTP 400\)/);
+  });
+
+  it('stops on a 422 for a disabled type unless every error it names is the type filter', async () => {
+    for (const json of [null, { errors: [] }, { errors: [null] }, { errors: [{ field: 'type' }, { field: 'data' }] }]) {
+      const { sys, board } = org();
+      board.disabledTypes = ['Task'];
+      sys.route('GET', `/repos/${SLUG}/issues?type=Task&state=all&per_page=100&page=1`, { status: 422, json });
+      await assert.rejects(
+        typesPlan(sys, OWNER_TOKEN, 'example-org'),
+        /^Error: cannot read https:\/\/api\.github\.com\/repos\/example-org\/example-app\/issues\?type=Task&state=all \(HTTP 422\)$/,
+        JSON.stringify(json),
+      );
+    }
+  });
+
+  it('stops on a failure that is not GitHub answering, whatever it carries', async () => {
+    const { sys, board } = org();
+    board.disabledTypes = ['Task'];
+    sys.handlers.unshift((_method, url) => {
+      if (url.includes('type=Task')) throw Object.assign(new Error('connection dropped'), refused('Task'));
+      return undefined;
+    });
+    await assert.rejects(typesPlan(sys, OWNER_TOKEN, 'example-org'), /connection dropped/);
+  });
+
+  it("stops doctor's check on a 422 for an enabled type", async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.issueTypes = [...MODEL, 'Task'];
+    sys.route('GET', `/repos/${SLUG}/issues?type=Task&state=all&per_page=100&page=1`, refused('Task'));
+    await assert.rejects(typesDrift(sys, OWNER_TOKEN, 'example-org', SLUG), /^Error: cannot read .*issues\?type=Task&state=all \(HTTP 422\)$/);
   });
 });
 
@@ -259,6 +418,19 @@ describe('withinApproved', () => {
     assert.ok(!sys.requests.some((request) => request.method === 'PATCH'));
     assert.ok(out.includes(`- ${OTHER}#2 keeps Task: onboard found it after showing its plan`));
     assert.deepEqual(byHand, [`Once: run niyam onboard again, so it retypes ${SLUG}#1, ${OTHER}#2, ${OTHER}#3, which it found after showing its plan.`]);
+  });
+
+  it('keeps an issue the approved plan types alike in the same repository, and disables only a type it named', () => {
+    const approved = planOf({ retype: [retyped(SLUG, 1), retyped(SLUG, 3, 'Feature')], disable: [orgType(6, 'Task')] });
+    const fresh = planOf({
+      retype: [retyped(SLUG, 1), retyped(OTHER, 1, 'Feature'), retyped(SLUG, 2, 'Feature'), retyped(SLUG, 3, 'Feature', 'Slice')],
+      disable: [orgType(6, 'Task'), orgType(7, 'Bug')],
+    });
+    const plan = withinApproved(fresh, approved);
+    assert.deepEqual(plan.retype, [retyped(SLUG, 1)]);
+    assert.deepEqual(plan.late, [retyped(OTHER, 1, 'Feature'), retyped(SLUG, 2, 'Feature'), retyped(SLUG, 3, 'Feature', 'Slice')]);
+    assert.deepEqual(plan.disable, [orgType(6, 'Task')]);
+    assert.deepEqual(plan.kept, [orgType(7, 'Bug')]);
   });
 
   it('rejects as GitHub does when a call fails', async () => {
@@ -307,7 +479,12 @@ describe('applyTypes', () => {
   });
 
   it('stops, disabling nothing, when GitHub does not retype an issue', async () => {
-    for (const refusal of [{ status: 403, json: null }, { status: 200, json: { type: { name: 'Task' } } }]) {
+    for (const refusal of [
+      { status: 403, json: null },
+      { status: 403, json: { type: { name: 'Brief' } } },
+      { status: 200, json: { type: { name: 'Task' } } },
+      { status: 200, json: { type: null } },
+    ]) {
       const { sys, board } = org();
       board.issues = [{ repo: SLUG, number: 4, type: 'Task' }];
       const plan = await typesPlan(sys, OWNER_TOKEN, 'example-org');
@@ -324,6 +501,138 @@ describe('applyTypes', () => {
     await assert.rejects(applyTypes(sys, capture().io, OWNER_TOKEN, plan), /GitHub did not disable the issue type Task \(HTTP 422\)/);
     const enabling = { ...plan, disable: [], enable: [{ id: 6, name: 'Task', description: null, color: null, is_enabled: false }] };
     await assert.rejects(applyTypes(sys, capture().io, OWNER_TOKEN, enabling), /GitHub did not enable the issue type Task \(HTTP 422\)/);
+  });
+
+  it("adds each work model type whole and enabled, taking GitHub's 200 or 201, and says which it would not add", async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.issueTypes = [];
+    const plan = await typesPlan(sys, OWNER_TOKEN, 'example-org');
+    await applyTypes(sys, capture().io, OWNER_TOKEN, plan);
+    assert.deepEqual(board.issueTypes, MODEL);
+    assert.deepEqual(
+      sys.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/issue-types')).map((request) => request.body),
+      [
+        { name: 'Work item', color: 'blue', description: 'A piece of work: its frame and spec, approved by the owner', is_enabled: true },
+        { name: 'Slice', color: 'green', description: 'One shippable part of a work item, built in one pull request', is_enabled: true },
+        { name: 'State', color: 'purple', description: 'An experience state of a slice, linking its design frame', is_enabled: true },
+        { name: 'Decision', color: 'orange', description: 'A watched decision with a review date', is_enabled: true },
+        { name: 'Brief', color: 'gray', description: 'A small request, closed by the pull request that fixes it', is_enabled: true },
+      ],
+    );
+    sys.route('POST', '/orgs/example-org/issue-types', { status: 200, json: {} });
+    await applyTypes(sys, capture().io, OWNER_TOKEN, plan);
+    sys.route('POST', '/orgs/example-org/issue-types', { status: 422, json: null });
+    await assert.rejects(applyTypes(sys, capture().io, OWNER_TOKEN, plan), /^Error: GitHub did not add the issue type Work item \(HTTP 422\)$/);
+  });
+
+  it('names every type it leaves enabled, and every archived repository and issue to retype by hand', async () => {
+    const { io, out } = capture();
+    const plan = planOf({ kept: [orgType(6, 'Task'), orgType(7, 'Bug')], held: [retyped(SLUG, 1), retyped(OTHER, 2, 'Bug')] });
+    assert.deepEqual(await applyTypes(new FakeSys(), io, OWNER_TOKEN, plan), [`Once: unarchive ${SLUG}, ${OTHER}, then run niyam onboard again, so it retypes ${SLUG}#1, ${OTHER}#2.`]);
+    assert.ok(out.includes('- left Task, Bug enabled in example-org, since an issue onboard did not retype holds them'));
+  });
+});
+
+describe('typesChange, typesLines and typesQuestion', () => {
+  it('counts a plan that adds one type and enables another as a change', () => {
+    assert.equal(typesChange(planOf({ add: ISSUE_TYPES.slice(0, 1), enable: [orgType(2, 'Slice', false)] })), true);
+  });
+
+  it('lists the issues it types by repository, then number', () => {
+    const plan = planOf({ retype: [retyped(OTHER, 1), retyped(SLUG, 9), retyped(SLUG, 5, 'Bug'), retyped(SLUG, 7, 'Feature')] });
+    assert.deepEqual(typesLines(plan), [
+      { label: '  example-app#5', detail: 'Bug → Brief' },
+      { label: '  example-app#7', detail: 'Feature → Brief' },
+      { label: '  example-app#9', detail: 'Task → Brief' },
+      { label: '  example-site#1', detail: 'Task → Brief' },
+    ]);
+  });
+
+  it('joins consecutive issues in one row only when the repository, from, to and why all match', () => {
+    const labels = (retype: Retype[]): string[] => typesLines(planOf({ retype })).map((line) => line.label);
+    assert.deepEqual(labels([retyped(SLUG, 1), retyped(SLUG, 2)]), ['  example-app#1–#2']);
+    assert.deepEqual(labels([retyped(SLUG, 1), retyped(OTHER, 2)]), ['  example-app#1', '  example-site#2']);
+    assert.deepEqual(labels([retyped(SLUG, 1), retyped(SLUG, 3)]), ['  example-app#1', '  example-app#3']);
+    assert.deepEqual(labels([retyped(SLUG, 1), retyped(SLUG, 2, 'Bug')]), ['  example-app#1', '  example-app#2']);
+    assert.deepEqual(labels([retyped(SLUG, 1), retyped(SLUG, 2, 'Task', 'Slice')]), ['  example-app#1', '  example-app#2']);
+    assert.deepEqual(labels([retyped(SLUG, 1, 'no type', 'Brief', 'a'), retyped(SLUG, 2, 'no type', 'Brief', 'b')]), ['  example-app#1', '  example-app#2', '  closed, no type']);
+  });
+
+  it('says closed issues with no type are left when only an Approvals issue keeps none', () => {
+    assert.deepEqual(typesLines(planOf({ exempt: [{ repo: SLUG, number: 3 }] })), [
+      { label: '  example-app#3', detail: 'keeps no type: its repository’s Approvals issue, a standing record no work model type fits' },
+      { label: '  closed, no type', detail: 'left as they are' },
+    ]);
+  });
+
+  it('counts each kind of issue it types in its question, and names ten', () => {
+    const one = planOf({ retype: [retyped(SLUG, 1)] });
+    assert.equal(
+      typesQuestion(one, 'example-app'),
+      'Issue types are an organisation-wide setting, so they apply to every repository in example-org, not only example-app. In the example-org organisation, give 1 issue holding another type a work model type (example-org/example-app#1 Task → Brief)?',
+    );
+    const mixed = planOf({ retype: [retyped(SLUG, 1), retyped(SLUG, 2, 'Bug'), retyped(SLUG, 3, 'no type')] });
+    assert.match(typesQuestion(mixed, 'example-app') ?? '', /give 2 issues holding another type and 1 open issue with no type a work model type/);
+    const ten = planOf({ retype: Array.from({ length: 10 }, (_, index) => retyped(SLUG, index + 1)) });
+    assert.match(typesQuestion(ten, 'example-app') ?? '', /; example-org\/example-app#10 Task → Brief\)\?$/);
+  });
+});
+
+describe('approvalsOf', () => {
+  async function approvals(content: string, status = 200): Promise<number | undefined> {
+    const sys = new FakeSys();
+    sys.route('GET', `/repos/${SLUG}/contents/.github/niyam.json`, { status, json: { content: Buffer.from(content).toString('base64') } });
+    const found = await approvalsOf(sys, OWNER_TOKEN, SLUG);
+    assert.deepEqual(sys.requests.map((request) => request.token), [OWNER_TOKEN]);
+    return found;
+  }
+
+  it('reads a whole number above 0 as the Approvals issue, and anything else as none', async () => {
+    assert.equal(await approvals(JSON.stringify({ approvals: 7 })), 7);
+    for (const settings of [{ approvals: 0 }, { approvals: -3 }, { approvals: 2.5 }, { approvals: '7' }, {}, null]) {
+      assert.equal(await approvals(JSON.stringify(settings)), undefined, JSON.stringify(settings));
+    }
+    assert.equal(await approvals('{'), undefined, 'settings that do not parse');
+    assert.equal(await approvalsOf(new FakeSys(), OWNER_TOKEN, SLUG), undefined, 'a repository with no settings');
+  });
+
+  it('says why it cannot read the settings', async () => {
+    await assert.rejects(approvals(JSON.stringify({ approvals: 7 }), 403), /^Error: cannot read \.github\/niyam\.json in example-org\/example-app \(HTTP 403\)$/);
+    const sys = new FakeSys();
+    sys.route('GET', `/repos/${SLUG}/contents/.github/niyam.json`, { status: 200, json: {} });
+    await assert.rejects(approvalsOf(sys, OWNER_TOKEN, SLUG), /^Error: cannot read \.github\/niyam\.json in example-org\/example-app \(HTTP 200\)$/);
+  });
+});
+
+describe('typesDrift', () => {
+  it('passes when the enabled types are the work model’s and every open issue here has one', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.issueTypes = [...MODEL, 'Task'];
+    board.disabledTypes = ['Task'];
+    assert.deepEqual(await typesDrift(sys, OWNER_TOKEN, 'example-org', SLUG), {
+      mark: '✓',
+      text: 'issue types in example-org: the work model’s alone, and every open issue here has one',
+    });
+  });
+
+  it('names a work model type disabled, each other type enabled, the issues here holding one, and those with none', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.issueTypes = [...MODEL, 'Task', 'Bug'];
+    board.disabledTypes = ['Slice'];
+    board.issues = [
+      { repo: SLUG, number: 4, type: 'Task' },
+      { repo: SLUG, number: 6, type: 'Task' },
+      { repo: SLUG, number: 5, type: null },
+      { repo: SLUG, number: 3, type: null },
+    ];
+    assert.deepEqual(await typesDrift(sys, OWNER_TOKEN, 'example-org', SLUG, 3), {
+      mark: '▲',
+      text: "example-org lacks the work model's Slice; example-org has issue types outside the work model: Task, Bug; 2 issues here hold one (#4 Task, #6 Task); 1 open issue here has no type (#5)",
+      fix: 'the owner reruns niyam onboard, which gives those issues work model types and disables the other types',
+    });
   });
 });
 
@@ -666,6 +975,16 @@ describe('issueType', () => {
     personal.ownerType = 'User';
     assert.deepEqual(await run(personal), { code: 0, out: ['issue-type: GitHub has issue types for organisations only; nothing to do'] });
     assert.deepEqual((await run(job({ schedule: '17 6 * * 1' }, undefined, 'schedule'))).out, ['issue-type: nothing to do on a schedule event']);
+  });
+
+  it('reads, hourly, a changed time GitHub does not give as text as no time, and types the issue', async () => {
+    const sys = job({ schedule: '41 * * * *' }, undefined, 'schedule');
+    const now = `${sys.now().toISOString().slice(0, 19)}Z`;
+    const row = { number: 9, url: `https://api.github.com/repos/${SLUG}/issues/9`, state: 'open', type: null };
+    sys.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, { status: 200, json: [{ ...row, updated_at: [now] }] });
+    sys.route('GET', `/repos/${SLUG}/issues/9`, { status: 200, json: row });
+    sys.route('PATCH', `/repos/${SLUG}/issues/9`, { status: 200, json: { type: { name: 'Brief' } } });
+    assert.deepEqual((await run(sys)).out, ['issue-type: #9 had no type; now a Brief: it has no parent and no sub-issues', 'issue-type: 1 open issue with no type typed']);
   });
 
   it('fails, saying why, when GitHub does not set the type or cannot be read', async () => {
