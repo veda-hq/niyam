@@ -22,6 +22,7 @@ const other = (statuses) =>
 export function tally(plan, records, sha) {
   const byFile = new Map(records.map((found) => [found.file, found]));
   const faults = [];
+  const unjudged = [];
   const rows = [];
   for (const { lane, file } of plan.judged) {
     const found = byFile.get(file);
@@ -29,8 +30,10 @@ export function tally(plan, records, sha) {
       faults.push({ lane, file, why: 'no record: its job did not finish' });
       continue;
     }
-    if ((found.exit !== 0 && found.exit !== 1) || !found.verdict) {
-      faults.push({ lane, file, why: `agnipariksha exit ${found.exit}${found.verdict ? '' : ', no verdict line'}` });
+    const refusals = found.refusals ?? [];
+    if (!found.verdict || found.verdict.mutants === 0) {
+      // Never counted as zero: the file's mutants were not judged.
+      unjudged.push({ lane, file, why: refusals.length ? refusals.join('; ') : `agnipariksha exit ${found.exit} with no verdict line` });
       continue;
     }
     rows.push({
@@ -43,12 +46,14 @@ export function tally(plan, records, sha) {
       survived: found.survived,
       noCoverage: found.noCoverage,
       blocking: found.verdict.blocking,
-      timeout: found.statuses.Timeout ?? 0,
+      timeout: found.verdict.statuses.Timeout ?? 0,
       retried: found.verdict.retried,
-      errors: other(found.statuses),
+      errors: other(found.verdict.statuses),
+      partly: refusals,
     });
-    if (found.survived + found.noCoverage !== found.verdict.blocking) {
-      faults.push({ lane, file, why: `${found.survived + found.noCoverage} blocking mutants listed, verdict says ${found.verdict.blocking}` });
+    const listed = found.blocking.length;
+    if (found.verdict.outcome === 'blocking' && listed !== found.verdict.blocking) {
+      faults.push({ lane, file, why: `${listed} blocking mutants listed, verdict says ${found.verdict.blocking}` });
     }
   }
   const control = rows.find(({ file }) => file === CONTROL.file);
@@ -70,10 +75,10 @@ export function tally(plan, records, sha) {
       blocking: sum(mine, 'blocking'),
     };
   });
-  return { sha, lanes, rows, unmeasured: plan.unmeasured, faults };
+  return { sha, lanes, rows, unjudged, unmeasured: plan.unmeasured, faults };
 }
 
-export function markdown({ sha, lanes, rows, unmeasured, faults }) {
+export function markdown({ sha, lanes, rows, unjudged, unmeasured, faults }) {
   const out = [`**Mutant inventory** of \`${sha}\`, one agnipariksha run per file (\`--files <file> --no-reuse\`).`, ''];
   out.push('| Lane | Files | Lines | Run time (s) | s/line | Mutants | Survived | NoCoverage | Blocking |', '|---|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const lane of lanes) {
@@ -82,7 +87,17 @@ export function markdown({ sha, lanes, rows, unmeasured, faults }) {
   }
   out.push('', '| File | Lines | s | Mutants | Killed | Survived | NoCoverage | Timeout (retried) | Errors |', '|---|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const row of rows) {
-    out.push(`| \`${row.file}\` | ${row.lines} | ${row.seconds} | ${row.mutants} | ${row.killed} | ${row.survived} | ${row.noCoverage} | ${row.timeout} (${row.retried}) | ${row.errors} |`);
+    const mark = row.partly.length ? ' ¹' : '';
+    out.push(`| \`${row.file}\`${mark} | ${row.lines} | ${row.seconds} | ${row.mutants} | ${row.killed} | ${row.survived} | ${row.noCoverage} | ${row.timeout} (${row.retried}) | ${row.errors} |`);
+  }
+  const partly = rows.filter((row) => row.partly.length);
+  if (partly.length) {
+    out.push('', '¹ **Partly judged:** every mutant ran, but agnipariksha refused part of the timeout retry pass, so those timeouts are unsettled and may hide survivors:');
+    for (const row of partly) out.push(`- \`${row.file}\`: ${row.partly.join('; ')}`);
+  }
+  if (unjudged.length) {
+    out.push('', '**Could not judge** (never counted as zero; each needs its cause fixed first):');
+    for (const { file, why } of unjudged) out.push(`- \`${file}\`: ${why}`);
   }
   if (unmeasured.length) {
     out.push('', '**Not measured:**');

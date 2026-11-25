@@ -29,30 +29,37 @@ const strip = (text) => text.replace(/\u001b\[[0-9;]*m/g, '');
 export function verdictIn(output, lane) {
   const text = strip(output);
   const escaped = lane.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const line = new RegExp(`^${escaped}: (\\d+) killed of (\\d+) in (\\d+) file\\(s\\) \\((.*)\\) - (\\d+) blocking$`, 'm').exec(text);
+  // The lane line ends in "- N blocking", "- pass" or "- REFUSED".
+  const line = new RegExp(`^${escaped}: (\\d+) killed of (\\d+) in (\\d+) file\\(s\\) \\((.*)\\) - (\\d+ blocking|pass|REFUSED)$`, 'm').exec(text);
   const blocking = [...text.matchAll(/^ {2}(Survived|NoCoverage) (\S+):(\d+) \(([^)]+)\)$/gm)].map(([, status, path, at, mutator]) => ({
     status,
     file: path,
     line: Number(at),
     mutator,
   }));
-  if (!line) return { verdict: null, blocking };
-  const retried = /(\d+) timeout\(s\) retried/.exec(line[4]);
+  const refusals = [...text.matchAll(new RegExp(`^ {2}REFUSED ${escaped}: (.+)$`, 'gm'))].map(([, why]) => why);
+  if (!line) return { verdict: null, blocking, refusals };
+  const [counts, retriedPart = ''] = line[4].split(';');
+  const statuses = Object.fromEntries([...counts.matchAll(/(\d+) ([A-Za-z]+)/g)].map(([, count, status]) => [status, Number(count)]));
+  const retried = /(\d+) timeout\(s\) retried/.exec(retriedPart);
   return {
     verdict: {
       killed: Number(line[1]),
       mutants: Number(line[2]),
       files: Number(line[3]),
       detail: line[4],
+      statuses,
       retried: retried ? Number(retried[1]) : 0,
-      blocking: Number(line[5]),
+      blocking: (statuses.Survived ?? 0) + (statuses.NoCoverage ?? 0),
+      outcome: line[5] === 'pass' || line[5] === 'REFUSED' ? line[5] : 'blocking',
     },
     blocking,
+    refusals,
   };
 }
 
 export function record({ lane, file, exit, seconds, output, report, source }) {
-  const { verdict, blocking } = verdictIn(output, lane);
+  const { verdict, blocking, refusals } = verdictIn(output, lane);
   return {
     lane,
     file,
@@ -60,9 +67,10 @@ export function record({ lane, file, exit, seconds, output, report, source }) {
     seconds,
     exit,
     verdict,
+    refusals,
     statuses: statusesIn(report, file),
-    survived: blocking.filter(({ status }) => status === 'Survived').length,
-    noCoverage: blocking.filter(({ status }) => status === 'NoCoverage').length,
+    survived: verdict?.statuses.Survived ?? 0,
+    noCoverage: verdict?.statuses.NoCoverage ?? 0,
     blocking,
   };
 }

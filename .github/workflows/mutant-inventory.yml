@@ -29,7 +29,9 @@ concurrency:
 
 env:
   # smoke: the control file alone, to read its cost. full: every lane file.
-  SCOPE: full
+  # Run 45576500016 measured every file at full; this rerun checks the fixed
+  # verdict parser on the control alone.
+  SCOPE: smoke
 
 jobs:
   plan:
