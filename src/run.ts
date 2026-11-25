@@ -335,8 +335,9 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         if (command === 'pr-started') return await prStarted(await sys(), io);
         if (command === 'pre-push') {
           const real = await sys();
-          // git runs the hook with the remote's name, then its URL.
-          return await prePush(real, io, real.readStdin(), rest[1] ?? '', rest[0] ?? '');
+          // git runs the hook with the remote's name, then its URL. With no name there is no URL either, and the
+          // push is refused before the name is read.
+          return await prePush(real, io, real.readStdin(), rest[1] ?? '', String(rest[0]));
         }
         if (command === 'onboard') return await onboard(await sys(), io, rest);
         if (command === 'machine') return await machine(await sys(), io, rest);

@@ -4,7 +4,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { FakeSys } from './fake.test.ts';
+import { LOCKED } from './as-agent.ts';
+import { AGENT, FakeSys, TOKEN } from './fake.test.ts';
 import { USAGE, packageVersion, proposeArgs, run, stateArgs, versionOf } from './run.ts';
 
 const manifest: unknown = JSON.parse(
@@ -282,6 +283,125 @@ describe('run', () => {
       out: [],
       err: ['niyam: unexpected argument "now"', USAGE],
     });
+  });
+});
+
+describe('each command reaches its own code (#628)', () => {
+  const first = ({ out, err }: { out: string[]; err: string[] }): string => [...out, ...err][0] ?? '';
+
+  it('starts its usage with the command line and the commands', () => {
+    assert.match(USAGE, /^Usage: niyam <command>\n\nCommands:\n {2}machine /);
+  });
+
+  for (const [args, code, line] of [
+    [['onboard', '--dry-run'], 1, /^niyam onboard: GitHub has no account "example-owner"/],
+    [['machine', '--dry-run'], 0, /^◆ {2}niyam machine {3}ExampleBot$/],
+    [['cloud-key', '--yes'], 1, /^cloud-key: this Mac's keychain has no ExampleBot token/],
+    [['review-thread', 'PRRT_x', '--resolve'], 1, /^✗ this session has no token; run niyam doctor$/],
+    [['as-agent', '--session', 's', '--', 'ls'], LOCKED, /^niyam: refused, because this session does not work as the agent on GitHub/],
+    [['env', '--', 'ls'], 1, /^niyam: GitHub is locked out of this shell: /],
+    [['propose', '12'], 1, /^✗ this session has no token; run niyam doctor$/],
+    [['state', '12', '--title', 'x'], 1, /^✗ this session has no token; run niyam doctor$/],
+    [['owner-step', 'issue-types', 'example-org'], 1, /^owner-step issue-types: the work model's issue types in example-org$/],
+    [['handoff', '--detect'], 1, /^niyam handoff: \.github\/niyam\.json names no "handoff"/],
+    [['brief', 'b.md'], 1, /^niyam brief: \.github\/niyam\.json names no "handoff"/],
+    [['cubic-dismiss', '--decision', '#1', '--title', 'T', '--reason', 'r'], 1, /^niyam cubic-dismiss: git status failed/],
+    [['pr-autocreate', 'claude-hook'], 0, /^pr-autocreate: hook input is not a JSON object; nothing done$/],
+    [['keep-going', '--stop', 'x'], 1, /^Not on a branch of a git checkout\.$/],
+    [['doc-number', 'adr'], 1, /^niyam doc-number: \.github\/niyam\.json has no "docNumbers"/],
+    [['renumber-doc', 'adr', '0001', '0002'], 1, /^niyam renumber-doc: \.github\/niyam\.json has no "docNumbers"/],
+    [['work-item-number', '--issue', '5'], 1, /^niyam work-item-number: \.github\/niyam\.json has no "docNumbers"/],
+    [['board-audit', 'example-org/example-app'], 1, /^niyam board-audit: board-audit needs GH_TOKEN/],
+    [['ssh-sign', '-Y', 'find-principals'], 1, /^niyam ssh-sign: signs only, as ssh-keygen -Y sign does; asked for -Y find-principals$/],
+    [['pr-signals', '7'], 1, /^✗ this session has no token; run niyam doctor$/],
+    [['upgrade'], 0, /^upgrade: niyam \S+ is the newest release$/],
+    [['reviews-due'], 1, /^niyam reviews-due: reviews-due needs GH_TOKEN/],
+    [['decisions-weekly'], 1, /^niyam decisions-weekly: decisions-weekly runs in GitHub Actions/],
+    [['needs-owner'], 1, /^niyam needs-owner: needs-owner runs in GitHub Actions/],
+    [['issue-type'], 1, /^niyam issue-type: issue-type runs in GitHub Actions/],
+    [['pr-design'], 1, /^niyam pr-design: pr-design runs in GitHub Actions/],
+    [['pr-identity'], 1, /^niyam pr-identity: pr-identity runs in GitHub Actions/],
+  ] as const) {
+    it(`runs ${args.join(' ')} as that command`, async () => {
+      const got = await capture(args, () => new FakeSys());
+      assert.equal(got.code, code);
+      assert.match(first(got), line);
+    });
+  }
+
+  it('lets keep-going through with nothing said when it has nothing to say', async () => {
+    assert.deepEqual(await capture(['keep-going'], () => new FakeSys()), { code: 0, out: [], err: [] });
+  });
+
+  it("keeps each command's own answer when the machine cannot be read", async () => {
+    const lost = 'this command must not touch the machine';
+    assert.deepEqual(await capture(['pr-autocreate', 'claude-hook']), { code: 0, out: [], err: [`pr-autocreate: unexpected error (${lost}); nothing done`] });
+    assert.deepEqual(await capture(['keep-going', '--stop', 'x']), { code: 1, out: [], err: [`niyam keep-going: ${lost}`] });
+    assert.deepEqual(await capture(['keep-going']), { code: 0, out: [], err: [`niyam keep-going: ${lost}`] });
+    assert.deepEqual(await capture(['as-agent', '--session', 's', '--', 'ls']), { code: LOCKED, out: [], err: [`niyam as-agent: ran nothing, because the check failed: ${lost}`] });
+    assert.deepEqual(await capture(['env', '--', 'ls']), { code: LOCKED, out: [], err: [`niyam env: ran nothing, because the check failed: ${lost}`] });
+    const locked = await capture(['env']);
+    assert.equal(locked.code, LOCKED);
+    assert.deepEqual(locked.err, [`niyam: GitHub is locked out of this shell, because the check failed: ${lost}`]);
+    assert.match(locked.out[0] ?? '', /^export GH_TOKEN=niyam-no-agent-token;/);
+  });
+
+  for (const [args, message] of [
+    [['onboard', '--force'], 'unknown option --force'],
+    [['machine', '--force'], 'unknown option --force'],
+    [['cloud-key', '--nope'], 'unknown option --nope'],
+    [['review-thread', 'PRRT_x'], 'review-thread needs --reply <text>, --body-file <path>, --resolve, or --reaction'],
+    [['as-agent'], 'as-agent needs --session <session_id> first'],
+    [['env', 'x'], 'env takes no options; to run a command under it, put -- before the command, not "x"'],
+    [['propose', 'twelve'], 'propose needs an issue number, not "twelve"'],
+    [['state', '12'], 'state needs --title "<what the State builds>"'],
+    [['pr-signals'], 'pr-signals needs a pull request number'],
+    [['handoff'], 'handoff takes one of --detect, --record or --assert-fresh'],
+    [['brief', '--lint'], 'brief takes one draft file: niyam brief [--lint] <draft.md>'],
+    [['cubic-dismiss', '--title'], '--title needs a value'],
+    [['doc-number'], 'doc-number needs one document kind, such as adr'],
+    [['renumber-doc'], 'renumber-doc needs a document kind and two four-digit numbers: renumber-doc <kind> <from> <to> [--apply]'],
+    [['work-item-number', '--nope'], 'work-item-number: unexpected argument "--nope"'],
+    [['board-audit', '--nope'], 'board-audit takes [owner/repo] [--project <title>], not "--nope"'],
+  ] as const) {
+    it(`refuses ${args.join(' ')} as bad usage before touching the machine`, async () => {
+      assert.deepEqual(await capture(args), { code: 2, out: [], err: [`niyam: ${message}`, USAGE] });
+    });
+  }
+
+  it('refuses owner-step with no such step as bad usage', async () => {
+    const got = await capture(['owner-step', 'nope']);
+    assert.equal(got.code, 2);
+    assert.match(got.err[0] ?? '', /^niyam: owner-step has no step "nope"/);
+  });
+
+  it("hands pre-push git's remote and URL: an agent's push of a branch a merged pull request retired is refused", async () => {
+    const pushing = (): FakeSys => {
+      const sys = new FakeSys().acceptToken(TOKEN, AGENT);
+      sys.env = { NIYAM_AGENT: AGENT, GH_TOKEN: TOKEN };
+      sys.stdin = `refs/heads/work ${'a'.repeat(40)} refs/heads/work ${'b'.repeat(40)}\n`;
+      sys.route('GET', '/repos/example-org/example-app/pulls?head=example-org%3Awork&state=all&per_page=20', {
+        status: 200,
+        json: [{ number: 9, html_url: 'https://github.com/example-org/example-app/pull/9', state: 'closed', merged_at: '2026-11-01T00:00:00Z', head: { ref: 'work' } }],
+      });
+      return sys;
+    };
+    const retired = await capture(['pre-push', 'origin', 'https://github.com/example-org/example-app.git'], pushing);
+    assert.equal(retired.code, 1);
+    assert.equal(retired.err.at(-1), 'pre-push: refused; a merged pull request retired this branch');
+    const bare = await capture(['pre-push'], pushing);
+    assert.equal(bare.code, 1);
+    assert.equal(bare.err[0], '✗ git gave the pre-push hook no remote URL, so this push cannot be checked');
+  });
+
+  it('takes an issue number of any length, and nothing around it', () => {
+    assert.deepEqual(proposeArgs(['123']), { numbers: [123] });
+    assert.deepEqual(stateArgs(['123', '--title', 'x']), { slice: 123, title: 'x' });
+    // '#' anywhere but first would be dropped as the first one is: '1#2' would read as 12.
+    for (const bad of ['12x', 'x12', '1#2', '12#3']) {
+      assert.throws(() => proposeArgs([bad]), { message: `propose needs an issue number, not "${bad}"` });
+      assert.throws(() => stateArgs([bad, '--title', 'x']), { message: `state needs the slice's number, not "${bad}"` });
+    }
   });
 });
 

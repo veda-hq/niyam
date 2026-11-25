@@ -55,16 +55,26 @@ class Reader {
   }
 }
 
-function field(value: Buffer | string): Buffer {
-  const bytes = typeof value === 'string' ? Buffer.from(value, 'latin1') : value;
+function field(bytes: Buffer): Buffer {
   const length = Buffer.alloc(4);
   length.writeUInt32BE(bytes.length);
   return Buffer.concat([length, bytes]);
 }
 
+/** A text field, in the latin1 that `Reader.text` reads back. */
+function textField(value: string): Buffer {
+  return field(Buffer.from(value, 'latin1'));
+}
+
+/** `bytes` in base64, between `begin` and `end`, in lines of 70 as OpenSSH writes them. */
+function armor(begin: string, bytes: Buffer, end: string): string {
+  // A non-empty text always matches.
+  return `${begin}\n${(bytes.toString('base64').match(/.{1,70}/g) as string[]).join('\n')}\n${end}\n`;
+}
+
 /** The key's public blob, as SSH writes it: its type, then the 32 bytes. */
 function publicBlob(publicKey: Buffer): Buffer {
-  return Buffer.concat([field(ED25519), field(publicKey)]);
+  return Buffer.concat([textField(ED25519), field(publicKey)]);
 }
 
 /**
@@ -75,7 +85,7 @@ function publicBlob(publicKey: Buffer): Buffer {
 export function readPrivateKey(text: string): Ed25519Key | { problem: string } {
   const trimmed = text.trim();
   if (!trimmed.startsWith(PEM_BEGIN) || !trimmed.endsWith(PEM_END)) return { problem: 'it is not an OpenSSH private key' };
-  const data = Buffer.from(trimmed.slice(PEM_BEGIN.length, -PEM_END.length).replace(/\s+/g, ''), 'base64');
+  const data = Buffer.from(trimmed.slice(PEM_BEGIN.length, -PEM_END.length).replace(/\s/g, ''), 'base64');
   try {
     if (data.subarray(0, KEY_MAGIC.length).toString('latin1') !== KEY_MAGIC) return { problem: 'it is not an OpenSSH private key' };
     const reader = new Reader(data.subarray(KEY_MAGIC.length));
@@ -91,7 +101,8 @@ export function readPrivateKey(text: string): Ed25519Key | { problem: string } {
     if (type !== ED25519) return { problem: `it is a ${type} key, and niyam signs with ed25519 alone` };
     const publicKey = secret.string();
     const both = secret.string();
-    if (publicKey.length !== 32 || both.length !== 64 || !both.subarray(32).equals(publicKey)) return { problem: 'its ed25519 halves do not match' };
+    // A public half equal to the second 32 of 64 bytes is 32 bytes itself.
+    if (both.length !== 64 || !both.subarray(32).equals(publicKey)) return { problem: 'its ed25519 halves do not match' };
     return { seed: Buffer.from(both.subarray(0, 32)), publicKey: Buffer.from(publicKey) };
   } catch (error) {
     // fail-open: a key niyam cannot read is a problem the caller reports, never a crash.
@@ -124,11 +135,13 @@ function uint32(value: number): Buffer {
  */
 export function privateKeyText(key: Ed25519Key, comment: string): string {
   const check = randomBytes(4);
-  const secret = Buffer.concat([check, check, field(ED25519), field(key.publicKey), field(Buffer.concat([key.seed, key.publicKey])), field(Buffer.from(comment, 'utf8'))]);
+  // The comment in UTF-8, Buffer's default.
+  const secret = Buffer.concat([check, check, textField(ED25519), field(key.publicKey), field(Buffer.concat([key.seed, key.publicKey])), field(Buffer.from(comment))]);
   // Padded to the cipher's block size, 8 with none, by the bytes 1, 2, 3, … as OpenSSH pads it.
   const padding = Buffer.from(Array.from({ length: (8 - (secret.length % 8)) % 8 }, (_, i) => i + 1));
-  const body = Buffer.concat([Buffer.from(KEY_MAGIC, 'latin1'), field('none'), field('none'), field(''), uint32(1), field(publicBlob(key.publicKey)), field(Buffer.concat([secret, padding]))]).toString('base64');
-  return `${PEM_BEGIN}\n${body.match(/.{1,70}/g)?.join('\n') ?? ''}\n${PEM_END}\n`;
+  // The magic is ASCII, the same bytes in any encoding.
+  const body = Buffer.concat([Buffer.from(KEY_MAGIC), textField('none'), textField('none'), textField(''), uint32(1), field(publicBlob(key.publicKey)), field(Buffer.concat([secret, padding]))]);
+  return armor(PEM_BEGIN, body, PEM_END);
 }
 
 function base64url(bytes: Buffer): string {
@@ -137,7 +150,7 @@ function base64url(bytes: Buffer): string {
 
 /** What SSHSIG signs: its preamble, the namespace, and the message's sha512. */
 function signedData(message: Buffer, namespace: string): Buffer {
-  return Buffer.concat([Buffer.from(SIG_MAGIC, 'latin1'), field(namespace), field(''), field(HASH), field(createHash(HASH).update(message).digest())]);
+  return Buffer.concat([Buffer.from(SIG_MAGIC), textField(namespace), textField(''), textField(HASH), field(createHash(HASH).update(message).digest())]);
 }
 
 /** An armored SSHSIG signature of `message` by `key`, in `namespace`, as `ssh-keygen -Y sign` writes it. */
@@ -147,15 +160,15 @@ export function signMessage(key: Ed25519Key, message: Buffer, namespace: string)
   const version = Buffer.alloc(4);
   version.writeUInt32BE(1);
   const blob = Buffer.concat([
-    Buffer.from(SIG_MAGIC, 'latin1'),
+    Buffer.from(SIG_MAGIC),
     version,
     field(publicBlob(key.publicKey)),
-    field(namespace),
-    field(''),
-    field(HASH),
-    field(Buffer.concat([field(ED25519), field(signature)])),
-  ]).toString('base64');
-  return `${SIG_BEGIN}\n${blob.match(/.{1,70}/g)?.join('\n') ?? ''}\n${SIG_END}\n`;
+    textField(namespace),
+    textField(''),
+    textField(HASH),
+    field(Buffer.concat([textField(ED25519), field(signature)])),
+  ]);
+  return armor(SIG_BEGIN, blob, SIG_END);
 }
 
 /**
@@ -166,7 +179,7 @@ export function signatureProblem(armored: string, message: Buffer, namespace: st
   const trimmed = armored.trim();
   if (!trimmed.startsWith(SIG_BEGIN) || !trimmed.endsWith(SIG_END)) return 'it is not an SSH signature';
   try {
-    const data = Buffer.from(trimmed.slice(SIG_BEGIN.length, -SIG_END.length).replace(/\s+/g, ''), 'base64');
+    const data = Buffer.from(trimmed.slice(SIG_BEGIN.length, -SIG_END.length).replace(/\s/g, ''), 'base64');
     if (data.subarray(0, SIG_MAGIC.length).toString('latin1') !== SIG_MAGIC) return 'it is not an SSH signature';
     const reader = new Reader(data.subarray(SIG_MAGIC.length));
     if (reader.uint32() !== 1) return 'its version is not 1';
@@ -214,5 +227,6 @@ export function commitSignature(raw: string): { payload: Buffer; signature: stri
     }
   }
   if (signature.length === 0) return undefined;
-  return { payload: Buffer.from(`${kept.join('\n')}${rest}`, 'utf8'), signature: `${signature.join('\n')}\n` };
+  // The commit's text in UTF-8, Buffer's default.
+  return { payload: Buffer.from(`${kept.join('\n')}${rest}`), signature: `${signature.join('\n')}\n` };
 }
