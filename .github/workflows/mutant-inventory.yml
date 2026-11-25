@@ -29,7 +29,7 @@ concurrency:
 
 env:
   # smoke: the control file alone, to read its cost. full: every lane file.
-  SCOPE: smoke
+  SCOPE: full
 
 jobs:
   plan:
