@@ -38,6 +38,7 @@ describe('handoffSettings', () => {
   it('reads none as the gate off, and fills the defaults', () => {
     assert.equal(handoffSettings({ owner: 'o' }), undefined);
     assert.equal(handoffSettings(null), undefined);
+    assert.equal(handoffSettings('text'), undefined);
     assert.deepEqual(handoffSettings({ handoff: { plumbing: ['.github/workflows/', 'package.json'] } }), { plumbing: ['.github/workflows/', 'package.json'], ignoreStages: [], base: 'origin/main' });
     assert.deepEqual(handoffSettings({ handoff: { plumbing: ['a/'], history: '.tmp/h.jsonl', ignoreStages: ['gate'], template: 'docs/brief.md', base: 'origin/trunk' } }), {
       plumbing: ['a/'],
@@ -51,9 +52,13 @@ describe('handoffSettings', () => {
   for (const [handoff, message] of [
     [[], /"handoff" must be an object/],
     [null, /"handoff" must be an object/],
+    [5, /"handoff" must be an object/],
     [{ plumbing: ['a/'], extra: 1 }, /unknown key "extra"/],
     [{ plumbing: [] }, /plumbing must be a non-empty list/],
     [{ plumbing: ['/etc/'] }, /plumbing must be a non-empty list/],
+    [{ plumbing: ['a/', '/etc/'] }, /plumbing must be a non-empty list/],
+    [{ plumbing: [3] }, /plumbing must be a non-empty list/],
+    [{ plumbing: ['a/'], base: 3 }, /base must be a ref/],
     [{ plumbing: ['a/'], history: '../h' }, /handoff"\.history must be a path in the repository/],
     [{ plumbing: ['a/'], template: 3 }, /handoff"\.template must be a path/],
     [{ plumbing: ['a/'], ignoreStages: [1] }, /ignoreStages must be a list of stage names/],
@@ -71,6 +76,9 @@ describe('isPlumbing', () => {
     assert.equal(isPlumbing('./package.json', plumbing), true);
     assert.equal(isPlumbing('.github/workflows-old/ci.yml', plumbing), false);
     assert.equal(isPlumbing('apps/web/package.json', plumbing), false);
+    assert.equal(isPlumbing('package.json.bak', plumbing), false);
+    // Only a leading ./ is dropped.
+    assert.equal(isPlumbing('docs/./package.json', ['docs/package.json']), false);
   });
 });
 
@@ -97,6 +105,30 @@ describe('parseHistory', () => {
     const parsed = parseHistory(lines(run(), '', 'not json', 'null', run({ id: 3 }), run({ stages: [{ name: 'x' }] }), run({ branch: null, fingerprint: undefined }), run({ branch: 4 })));
     assert.equal(parsed.runs.length, 2);
     assert.equal(parsed.malformed, 5);
+  });
+
+  it('keeps a run only when every field its writer writes has its type, each checked on its own', () => {
+    const stage = { name: 'test', startMs: 0, durationMs: 1, status: 'failed' };
+    const good = [run({ id: 'a' }), run({ id: 'b', branch: null, fingerprint: null }), run({ id: 'c', branch: undefined, fingerprint: undefined }), run({ id: 'd', stages: [] })];
+    const bad = [
+      'not json',
+      'null',
+      '5',
+      '"text"',
+      ...['schema', 'durationMs', 'exitCode'].map((field) => run({ [field]: '1' })),
+      ...['id', 'invocation', 'startedAt', 'kind'].map((field) => run({ [field]: 1 })),
+      run({ branch: 4 }),
+      run({ fingerprint: 4 }),
+      run({ stages: 'test' }),
+      run({ stages: [null] }),
+      run({ stages: [stage, { ...stage, status: 1 }] }),
+      ...['startMs', 'durationMs'].map((field) => run({ stages: [{ ...stage, [field]: '1' }] })),
+      run({ stages: [{ ...stage, name: 1 }] }),
+    ];
+    // Blank lines, spaces only included, are no line at all.
+    const parsed = parseHistory(lines(...good, '', '   ', ...bad));
+    assert.deepEqual([parsed.runs.map((one) => (one as unknown as { id: string }).id), parsed.malformed], [['a', 'b', 'c', 'd'], bad.length]);
+    assert.deepEqual(parseHistory(undefined), { runs: [], malformed: 0 });
   });
 });
 
@@ -148,6 +180,24 @@ describe('repeatedFailure', () => {
     assert.deepEqual(repeatedFailure(runs(both), 'feature/a', []), { fired: true, stage: 'lint', failures: 4, trees: 4, threshold });
   });
 
+  it('counts a stage that timed out as one that failed', () => {
+    const timedOut = { stages: [{ name: 'test', startMs: 0, durationMs: 1, status: 'timed_out' }] };
+    assert.deepEqual(repeatedFailure(runs([run(timedOut), run({ ...timedOut, fingerprint: 'f2' }), run(timedOut)]), 'feature/a', []), { fired: true, stage: 'test', failures: 3, trees: 2, threshold });
+  });
+
+  it('names the stage that fired most whatever the order, and the first seen of two that fired as often', () => {
+    const tests = [run(), run({ fingerprint: 'f2' }), run({ fingerprint: 'f3' })];
+    const lints = [run({ ...lint }), run({ ...lint, fingerprint: 'f2' }), run({ ...lint, fingerprint: 'f3' })];
+    assert.equal(repeatedFailure(runs([...lints, run({ ...lint, fingerprint: 'f4' }), ...tests]), 'feature/a', []).stage, 'lint');
+    assert.equal(repeatedFailure(runs([...lints, ...tests]), 'feature/a', []).stage, 'lint');
+    assert.equal(repeatedFailure(runs([...tests, ...lints]), 'feature/a', []).stage, 'test');
+  });
+
+  it('names the stage with more failures as nearest, before one on more trees', () => {
+    const near = repeatedFailure(runs([run(), run(), run(), run({ ...lint }), run({ ...lint, fingerprint: 'f2' })]), 'feature/a', []);
+    assert.deepEqual(near, { fired: false, stage: 'test', failures: 3, trees: 1, threshold });
+  });
+
   it('names a stage that fired over one that failed more without firing', () => {
     const near = [run(), run(), run(), run(), run()];
     const fires = [run({ ...lint }), run({ ...lint, fingerprint: 'f2' }), run({ ...lint })];
@@ -177,8 +227,22 @@ describe('parseRunLog and citesAuthority', () => {
     assert.deepEqual([parsed.entries.length, parsed.malformed], [1, 4]);
   });
 
+  it('keeps a declaration only when every field has its type, each checked on its own', () => {
+    const good = [entry({ ts: 'a' }), entry({ ts: 'b', disposition: 'gate-pass', callSite: 'hook-verify', spawned: 'chip', triggers: [], briefs: ['#1'] })];
+    const bad = [
+      'null',
+      '5',
+      ...['ts', 'branch', 'baseRef', 'baseSha', 'headSha', 'reason'].map((field) => entry({ [field]: 1 } as unknown as Partial<Entry>)),
+      ...['callSite', 'disposition', 'spawned'].map((field) => entry({ [field]: 1 } as unknown as Partial<Entry>)),
+      entry({ triggers: 'plumbing-edit' as unknown as string[] }),
+      entry({ triggers: [1] as unknown as string[] }),
+    ];
+    const parsed = parseRunLog(lines(...good, '   ', ...bad));
+    assert.deepEqual([parsed.entries.map((one) => one.ts), parsed.malformed], [['a', 'b'], bad.length]);
+  });
+
   it('accepts an issue, a link, an id, an ADR or a commit as where the owner decided', () => {
-    for (const reason of ['per #12', 'https://x.test/a', 'see ABC-12', 'ADR-0001', 'in abc1234']) assert.equal(citesAuthority(reason), true, reason);
+    for (const reason of ['per #12', '#12', 'https://x.test/a', 'http://x.test/a', 'see ABC-12', 'ADR-0001', 'in abc1234']) assert.equal(citesAuthority(reason), true, reason);
     assert.equal(citesAuthority('Alok said so'), false);
     assert.equal(citesAuthority('a#12'), false);
   });
@@ -244,7 +308,36 @@ describe('assertDeclared', () => {
         readIssue: async (n) => (read.push(n), brief({ body: briefToIssue(draft({}, '## What I verified\nx\n## Why I did not hand off\ny'), 'T').body })),
       }),
     );
-    assert.deepEqual([carrying.ok, carrying.detail.endsWith('declared "carrying" with #9, #10'), read], [true, true, [9, 10]]);
+    assert.deepEqual([carrying.ok, carrying.reason, carrying.detail.endsWith('declared "carrying" with #9, #10'), read], [true, 'declared', true, [9, 10]]);
+  });
+
+  it('says why a push that fired nothing goes, and names each trigger that fired', async () => {
+    const none = await assertDeclared(input({ triggers: { plumbing: { fired: false, paths: [] }, repeated: plumbing.repeated }, entries: [] }));
+    assert.equal(none.detail, 'this push changes no shared plumbing and shows no stage failing again and again');
+    const five: Triggers = { ...plumbing, plumbing: { fired: true, paths: ['a/1', 'a/2', 'a/3', 'a/4', 'a/5'] } };
+    assert.match((await assertDeclared(input({ triggers: five, entries: [] }))).detail, /^this branch changes 5 shared-plumbing file\(s\) \(a\/1, a\/2, a\/3, a\/4, a\/5\), and /);
+    const repeated: Triggers = { plumbing: { fired: false, paths: [] }, repeated: both.repeated };
+    assert.match((await assertDeclared(input({ triggers: repeated, entries: [] }))).detail, /^the push has failed 3 times at stage "test" across 2 working trees, and /);
+    assert.match((await assertDeclared(input({ triggers: both, entries: [] }))).detail, /^this branch changes 6 .*, …\) and the push has failed 3 times/);
+  });
+
+  it('names a declaration with no head as none, and every trigger it covered or missed', async () => {
+    assert.match((await assertDeclared(input({ entries: [entry({ headSha: '' })] }))).detail, /covered head \(none\), but/);
+    const partial = await assertDeclared(input({ triggers: both, entries: [entry({ triggers: ['x', 'y'] })] }));
+    assert.match(partial.detail, /covered only \[x, y\]; plumbing-edit, repeated-stage-failure fired after it/);
+  });
+
+  for (const ref of ['x#9', '#9x', '#09']) {
+    it(`refuses a brief "${ref}" that is not #N`, async () => {
+      const verdict = await assertDeclared(input({ entries: [entry({ disposition: 'handed-off', briefs: [ref] })] }));
+      assert.deepEqual([verdict.ok, verdict.reason], [false, 'brief-not-an-issue']);
+    });
+  }
+
+  it('judges a carried brief as carried: blocking and open, blaming a file this branch changed', async () => {
+    const body = briefToIssue(draft({ blocking: 'yes' }, '## What I verified\nx\n## Why I did not hand off\ny'), 'T').body;
+    const verdict = await assertDeclared(input({ entries: [entry({ disposition: 'carrying', briefs: ['#9'] })], changedFiles: ['tools/lint.sh'], readIssue: async () => brief({ body }) }));
+    assert.deepEqual([verdict.ok, verdict.reason], [true, 'declared']);
   });
 });
 
@@ -262,6 +355,8 @@ describe('handoffArgs and briefArgs', () => {
       spawned: 'chip',
     });
     assert.deepEqual(handoffArgs(['--assert-fresh', '--call-site', 'hook-verify']), { mode: 'assert-fresh', reason: '', briefs: [], callSite: 'hook-verify', spawned: 'n/a' });
+    // An inline value runs from the first = to the end, lines included.
+    assert.equal(handoffArgs(['--record', '--disposition=own-work', '--reason=a=b\nc']).reason, 'a=b\nc');
   });
 
   for (const [args, message] of [
@@ -269,6 +364,9 @@ describe('handoffArgs and briefArgs', () => {
     [['--detect', '--record'], /takes one of/],
     [['--detect', '--detect'], /--detect is given twice/],
     [['--detect', 'x'], /unexpected argument "x"/],
+    [['--detect=x'], /unexpected argument "--detect=x"/],
+    [['--detect', 'x--base=origin/x'], /unexpected argument "x--base=origin\/x"/],
+    [['--record', '--disposition', 'own-work', '--reason', ' '], /--reason needs a value/],
     [['--detect', '--reason', 'r'], /--detect does not take --reason/],
     [['--assert-fresh', '--brief', '#1'], /--assert-fresh does not take --brief/],
     [['--record', '--reason'], /--reason needs a value/],
@@ -303,10 +401,12 @@ function repo(changed: string[], handoff: unknown = { plumbing: ['.github/workfl
     if (args === 'rev-parse --abbrev-ref HEAD') return ok('feature/a\n');
     if (args === 'rev-parse HEAD') return ok(`${HEAD}\n`);
     if (args.startsWith('rev-parse --symbolic-full-name ')) return ok(`${call.args[2]?.startsWith('origin/') ? `refs/remotes/${call.args[2]}` : call.args[2]}\n`);
-    if (args.startsWith('merge-base --is-ancestor')) return { code: call.args[2] === FIX ? 0 : 1, stdout: '', stderr: '' };
-    if (args.startsWith('merge-base ')) return ok(`${BASE}\n`);
+    // Only the exact questions are answered; any other git call fails, as an unexpected one.
+    if (args.startsWith('merge-base --is-ancestor ')) return { code: args === `merge-base --is-ancestor ${FIX} HEAD` ? 0 : 1, stdout: '', stderr: '' };
+    if (/^merge-base origin\/\S+ HEAD$/.test(args)) return ok(`${BASE}\n`);
     if (args.startsWith('diff --name-only')) return ok(changed.map((file) => `${file}\n`).join(''));
-    if (args.startsWith('cat-file -e')) return { code: ['HEAD:tools/lint.sh', 'HEAD:docs/brief.md'].includes(call.args[2] ?? '') ? 0 : 1, stdout: '', stderr: '' };
+    // gone.sh was there before FIX, which removed it.
+    if (args.startsWith('cat-file -e')) return { code: ['HEAD:tools/lint.sh', 'HEAD:docs/brief.md', `${FIX}^:gone.sh`].includes(call.args[2] ?? '') ? 0 : 1, stdout: '', stderr: '' };
     return undefined;
   };
   gits.set(sys, git);
@@ -500,6 +600,145 @@ describe('handoff', () => {
     assert.equal(await handoff(repo([]), io, ['--record', '--disposition', 'own-work', '--reason', 'r', '--open-brief', 'b.md']), 1);
     assert.match(err[0] ?? '', /--open-brief goes with --disposition handed-off or carrying, not "own-work"/);
   });
+
+  it('asks git in the repository, reading the base copy at the remote default', async () => {
+    const sys = repo(['.github/workflows/ci.yml']);
+    assert.equal(await handoff(sys, capture().io, ['--assert-fresh']), 1);
+    const git = sys.calls.filter((call) => call.command === 'git');
+    assert.deepEqual(git.find((call) => call.args[0] === 'symbolic-ref'), { command: 'git', args: ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], cwd: ROOT });
+    assert.deepEqual(git.find((call) => call.args[0] === 'show'), { command: 'git', args: ['show', 'origin/main:.github/niyam.json'], cwd: ROOT });
+    assert.deepEqual(git.find((call) => call.args[1] === '--abbrev-ref'), { command: 'git', args: ['rev-parse', '--abbrev-ref', 'HEAD'], cwd: ROOT });
+    // A remote default git cannot name, or names as nothing, is origin/main.
+    for (const head of [{ code: 1, stdout: 'origin/trunk\n', stderr: '' }, { code: 0, stdout: '\n', stderr: '' }]) {
+      const shows: string[] = [];
+      sys.execOverride = (call) => {
+        if (call.args[0] === 'symbolic-ref') return head;
+        if (call.args[0] === 'show') shows.push(call.args[1] ?? '');
+        return gits.get(sys)?.(call);
+      };
+      await handoff(sys, capture().io, ['--assert-fresh']);
+      assert.deepEqual([...new Set(shows)], ['origin/main:.github/niyam.json']);
+    }
+  });
+
+  it("reads no base copy git failed to show, even with text on its output", async () => {
+    const sys = repo(['src/a.ts'], { plumbing: ['.github/workflows/'] });
+    sys.execOverride = (call) => (call.args[0] === 'show' ? { code: 128, stdout: JSON.stringify({ handoff: { plumbing: ['src/'] } }), stderr: '' } : gits.get(sys)?.(call));
+    assert.equal(await handoff(sys, capture().io, ['--assert-fresh']), 0);
+    assert.deepEqual(logged(sys).map((one) => one.disposition), ['gate-skipped']);
+  });
+
+  for (const [name, failing, message] of [
+    ['the branch', 'rev-parse --abbrev-ref HEAD', 'git cannot tell the branch'],
+    ['where the branch left the base', 'merge-base origin/main HEAD', 'git cannot tell where this branch left origin/main'],
+    ['the head commit', 'rev-parse HEAD', 'git cannot tell the head commit'],
+  ] as const) {
+    it(`says git could not tell ${name}`, async () => {
+      const sys = repo([]);
+      sys.execOverride = (call) => (call.args.join(' ') === failing ? { code: 128, stdout: '', stderr: 'bad' } : gits.get(sys)?.(call));
+      await assert.rejects(handoff(sys, capture().io, ['--detect']), { message });
+    });
+  }
+
+  it('counts no changed file when the branch changes none', async () => {
+    const { out, io } = capture();
+    assert.equal(await handoff(repo([]), io, ['--detect']), 0);
+    assert.equal((JSON.parse(out.join('\n')) as { changedFiles: number }).changedFiles, 0);
+  });
+
+  it('records into .tmp/push, says what it recorded, and keeps every brief named', async () => {
+    const sys = repo(['.github/workflows/ci.yml']);
+    const { io, out } = capture();
+    assert.equal(await handoff(sys, io, ['--record', '--disposition', 'own-work', '--reason', 'r', '--brief', '#8']), 0);
+    assert.ok(sys.dirs.includes(`${ROOT}/.tmp/push`));
+    const [recorded] = logged(sys) as [Entry];
+    assert.deepEqual(recorded, { ts: recorded.ts, callSite: 'push-skill', branch: 'feature/a', baseRef: 'origin/main', baseSha: BASE, headSha: HEAD, triggers: ['plumbing-edit'], disposition: 'own-work', reason: 'r', briefs: ['#8'], spawned: 'n/a' });
+    assert.deepEqual(JSON.parse(out.join('\n')), { recorded, runLog: RUN_LOG });
+    sys.files.set(`${ROOT}/b.md`, draft());
+    sys.route('POST', `${REPO}/issues`, { status: 201, json: { number: 9, id: 900, html_url: 'u' } });
+    assert.equal(await handoff(sys, io, ['--record', '--disposition', 'handed-off', '--reason', 'r', '--brief', '#8', '--open-brief', 'b.md']), 0);
+    assert.deepEqual(logged(sys).at(-1)?.briefs, ['#8', '#9']);
+  });
+
+  it('refuses in full, naming the template, and records the refusal with no brief', async () => {
+    const sys = repo(['.github/workflows/ci.yml']);
+    const { io, err } = capture();
+    assert.equal(await handoff(sys, io, ['--record', '--disposition', 'handed-off', '--reason', 'r']), 0);
+    assert.equal(await handoff(sys, io, ['--assert-fresh']), 1);
+    assert.deepEqual(err, [
+      '✗ handoff: "handed-off" was declared with no --brief; write one from docs/brief.md and open it with --open-brief <draft.md>',
+      '  what fired: niyam handoff --detect --base origin/main',
+      '  then declare: niyam handoff --record --base origin/main --disposition <own-work|handed-off|carrying|dismissed> --reason "..."',
+    ]);
+    const refused = logged(sys).at(-1) as Entry;
+    assert.deepEqual({ ...refused, ts: '' }, { ts: '', callSite: 'pre-push-hook', branch: 'feature/a', baseRef: 'origin/main', baseSha: BASE, headSha: HEAD, triggers: ['plumbing-edit'], disposition: 'gate-refused', reason: err[0]?.slice('✗ handoff: '.length), briefs: [], spawned: 'n/a' });
+  });
+
+  it('refuses a blocking brief closed by a commit this branch does not have', async () => {
+    const sys = repo(['.github/workflows/ci.yml'], { plumbing: ['.github/workflows/'] });
+    const body = briefToIssue(draft({ blocking: 'yes' }), 'T').body;
+    sys.files.set(`${ROOT}/${RUN_LOG}`, `${JSON.stringify(entry({ disposition: 'handed-off', briefs: ['#9'] }))}\n`);
+    sys
+      .route('GET', `${REPO}/issues/9`, { status: 200, json: { number: 9, state: 'closed', state_reason: 'completed', type: { name: 'Brief' }, body } })
+      .route('GET', `${REPO}/issues/9/timeline?per_page=100&page=1`, {
+        status: 200,
+        json: [{ event: 'cross-referenced', source: { issue: { number: 10, repository_url: `https://api.github.com${REPO}`, pull_request: { merged_at: '2026-11-14' } } } }],
+      })
+      .route('GET', REPO, { status: 200, json: { owner: { login: 'example-org', type: 'Organization' }, default_branch: 'main' } })
+      .route('GET', `${REPO}/pulls/10`, { status: 200, json: { body: 'Fixes #9', merged_at: '2026-11-14', merge_commit_sha: 'd'.repeat(40), base: { ref: 'main' } } });
+    const { io, err } = capture();
+    assert.equal(await handoff(sys, io, ['--assert-fresh']), 1);
+    assert.match(err[0] ?? '', /#9 was closed by ddddddd, which is not in this branch's history/);
+  });
+
+  it("lints a resolved brief's missing path as removed when a commit in this history removed it", async () => {
+    const sys = repo(['src/a.ts']);
+    sys.files.set(`${ROOT}/b.md`, draft({ status: 'resolved', 'resolved-by': FIX, 'blamed-paths': '\n  - gone.sh' }));
+    const { io, err } = capture();
+    assert.equal(await brief(sys, io, ['--lint', 'b.md']), 1);
+    assert.deepEqual(err, ['✗ a new brief is `status: open`']);
+  });
+
+  it('lints a draft with no frontmatter naming the template, and every problem of one that does not lint', async () => {
+    const sys = repo(['.github/workflows/ci.yml']);
+    sys.files.set(`${ROOT}/b.md`, '# no frontmatter\n');
+    const { io, err } = capture();
+    assert.equal(await brief(sys, io, ['--lint', 'b.md']), 1);
+    assert.deepEqual(err, ['✗ no YAML frontmatter; start the file from docs/brief.md']);
+    err.length = 0;
+    assert.equal(await handoff(sys, io, ['--record', '--disposition', 'handed-off', '--reason', 'r', '--open-brief', 'b.md']), 1);
+    assert.deepEqual(err, ['✗ b.md: no YAML frontmatter; start the file from docs/brief.md', 'no issue was opened']);
+    err.length = 0;
+    sys.files.set(`${ROOT}/b.md`, draft({ slug: '', blocking: 'maybe' }));
+    assert.equal(await brief(sys, io, ['b.md']), 1);
+    assert.deepEqual(err, ['✗ b.md: frontmatter `slug` is empty; frontmatter `blocking` must be yes or no (got "maybe"): an unreadable value would quietly downgrade a blocker', 'no issue was opened']);
+  });
+
+  it('adds a brief to no board when the project named is not text', async () => {
+    const sys = repo(['.github/workflows/ci.yml'], { plumbing: ['.github/workflows/'] }, { project: 5 });
+    sys.files.set(`${ROOT}/b.md`, draft());
+    sys.route('POST', `${REPO}/issues`, { status: 201, json: { number: 9, id: 900, html_url: 'u' } });
+    const { io, out } = capture();
+    assert.equal(await brief(sys, io, ['b.md']), 0);
+    assert.deepEqual([out, sys.requests.map((one) => one.method)], [['✓ opened #9: u'], ['POST']]);
+  });
+
+  it('opens a carried brief that blames a file the branch changed, and no handed-off one', async () => {
+    const changed = ['.github/workflows/ci.yml', 'tools/lint.sh'];
+    const carried = repo(changed);
+    carried.files.set(`${ROOT}/b.md`, draft({}, '## What I verified\nx\n## Why I did not hand off\ny'));
+    carried.route('POST', `${REPO}/issues`, { status: 201, json: { number: 9, id: 900, html_url: 'u' } });
+    assert.equal(await handoff(carried, capture().io, ['--record', '--disposition', 'carrying', '--reason', 'r', '--open-brief', 'b.md']), 0);
+    assert.deepEqual(logged(carried).map((one) => [one.disposition, one.briefs]), [['carrying', ['#9']]]);
+    for (const args of [['handoff', '--record', '--disposition', 'handed-off', '--reason', 'r', '--open-brief', 'b.md'], ['brief', 'b.md']]) {
+      const sys = repo(changed);
+      sys.files.set(`${ROOT}/b.md`, draft());
+      const { io, err } = capture();
+      assert.equal(await (args[0] === 'brief' ? brief(sys, io, args.slice(1)) : handoff(sys, io, args.slice(1))), 1);
+      assert.match(err[0] ?? '', /blamed path is in this branch's own diff: tools\/lint.sh/);
+      assert.deepEqual(sys.requests, []);
+    }
+  });
 });
 
 describe('brief', () => {
@@ -515,6 +754,14 @@ describe('brief', () => {
     assert.equal(await brief(sys, io, ['--lint', '../b.md']), 1);
     assert.equal(await brief(sys, io, ['--lint', 'gone.md']), 1);
     assert.match(err.at(-1) ?? '', /no brief draft in the repository at gone.md/);
+  });
+
+  it('lints no file for a draft outside the repository, even one named like its absence', async () => {
+    const sys = repo(['src/a.ts']);
+    sys.files.set(`${ROOT}/null`, draft());
+    const { io, err } = capture();
+    assert.equal(await brief(sys, io, ['--lint', '../b.md']), 1);
+    assert.deepEqual(err, ['✗ no brief draft in the repository at ../b.md']);
   });
 });
 
