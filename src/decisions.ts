@@ -1,7 +1,7 @@
 import { CLI } from './names.ts';
 import { API, anyLogin, either, loadSettings } from './agent.ts';
 import { PERSONAL_REPO, isOn, isPersonal, offLine } from './features.ts';
-import { WORKFLOW_BOT, expireVetoes, watchReviews } from './reviews.ts';
+import { WORKFLOW_BOT, all, expireVetoes, watchReviews } from './reviews.ts';
 import type { Output, Sys } from './types.ts';
 
 /** How long one decision's check may run, in seconds. */
@@ -53,19 +53,8 @@ interface Issue {
   labels: { name: string }[];
 }
 
-/**
- * Every item of the list GitHub pages 100 at a time at `url` (which ends in `per_page=100&page=`), added to `got`
- * from `page` on; `refused` says why not.
- */
-async function everyPage<T>(sys: Sys, token: string, url: string, refused: (status: number) => string, page = 1, got: T[] = []): Promise<T[]> {
-  const { status, json } = await sys.http(`${url}${page}`, { token });
-  if (status !== 200 || !Array.isArray(json)) throw new Error(refused(status));
-  got.push(...(json as T[]));
-  return json.length < 100 ? got : everyPage(sys, token, url, refused, page + 1, got);
-}
-
 function openIssues(sys: Sys, token: string, slug: string, filter: string): Promise<Issue[]> {
-  return everyPage<Issue>(sys, token, `${API}/repos/${slug}/issues?state=open&${filter}&per_page=100&page=`, (status) => `cannot list open issues (HTTP ${status})`);
+  return all<Issue>(sys, token, `/repos/${slug}/issues?state=open&${filter}`, 'list open issues');
 }
 
 /**
@@ -175,12 +164,7 @@ export async function decisionsWeekly(sys: Sys, io: Output): Promise<number> {
     const open = undos.find((undo) => new RegExp(`^Undoes #${issue.number}\\b`, 'm').test(String(undo.body)));
     if (open) {
       // A run that opened the undo issue but failed to comment leaves the comment to this one.
-      const comments = await everyPage<{ body?: string; user?: { login?: string } | null }>(
-        sys,
-        token,
-        `${API}/repos/${slug}/issues/${issue.number}/comments?per_page=100&page=`,
-        (status) => `cannot read #${issue.number}'s comments (HTTP ${status})`,
-      );
+      const comments = await all<{ body?: string; user?: { login?: string } | null }>(sys, token, `/repos/${slug}/issues/${issue.number}/comments`, `read #${issue.number}'s comments`);
       const told = comments.some(
         // Only the workflow's comments can say an undo issue was opened.
         (comment) => comment.user?.login === WORKFLOW_BOT && comment.body?.includes(`Opened #${open.number} to undo it.`),

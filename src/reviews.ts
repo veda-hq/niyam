@@ -133,7 +133,7 @@ export async function reviewsDue(sys: Sys, io: Output): Promise<number> {
 }
 
 /** Every item a GitHub list gives, page by page. */
-async function all<T>(sys: Sys, token: string, path: string, what: string): Promise<T[]> {
+export async function all<T>(sys: Sys, token: string, path: string, what: string): Promise<T[]> {
   const items: T[] = [];
   for (let page = 1; ; page++) {
     const { status, json } = await sys.http(`${API}${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`, { token });
