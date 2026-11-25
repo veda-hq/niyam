@@ -23,8 +23,8 @@ export const ONBOARD_FILES = [SETTINGS_PATH, HOOKS_PATH, SARATHI_PATH, WORKFLOW_
 /** The files onboard's pull request may delete, each moved to its new name, which the pull request must write or its base hold (P-56, P-57). */
 export const MOVED_FILES: Readonly<Record<string, string>> = { [LEFTOVER_CLOUD_SETUP_PATH]: CLOUD_SETUP_PATH };
 
-/** A subject's leading emoji, or gitmoji shortcode, and the rest of it. */
-const LEADING_EMOJI = /^(\p{Regional_Indicator}{2}|\p{Extended_Pictographic}\p{Emoji_Modifier}?️?(?:‍\p{Extended_Pictographic}\p{Emoji_Modifier}?️?)*|:[a-z0-9_+-]+:)\s+(.*)$/u;
+/** A subject's leading emoji or else gitmoji shortcode, and the rest of it. */
+const LEADING_EMOJI = /^(?:(\p{Regional_Indicator}{2}|\p{Extended_Pictographic}\p{Emoji_Modifier}?️?(?:‍\p{Extended_Pictographic}\p{Emoji_Modifier}?️?)*)|(:[a-z0-9_+-]+:))\s+(.*)$/u;
 
 /**
  * onboard's commit header and pull request title: Conventional Commits,
@@ -34,12 +34,12 @@ const LEADING_EMOJI = /^(\p{Regional_Indicator}{2}|\p{Extended_Pictographic}\p{E
  * repository puts most on chores, else gitmoji's for configuration. Merge
  * commits are git's own words, so they count for neither style.
  */
-export function pullTitle(version: string, recent: readonly string[] = []): string {
+export function pullTitle(version: string, recent: readonly string[]): string {
   const title = `chore(niyam): onboard at v${version}`;
   const subjects = recent.filter((subject) => !subject.startsWith('Merge '));
   const led = subjects.flatMap((subject) => {
     const match = LEADING_EMOJI.exec(subject);
-    return match ? [{ emoji: match[1] as string, rest: match[2] as string }] : [];
+    return match ? [{ emoji: (match[1] ?? match[2]) as string, shortcode: match[2] !== undefined, rest: match[3] as string }] : [];
   });
   if (led.length * 2 <= subjects.length) return title;
   // An earlier onboard's commit.
@@ -47,7 +47,7 @@ export function pullTitle(version: string, recent: readonly string[] = []): stri
   const counts = new Map<string, number>();
   for (const { emoji, rest } of led) if (/^chore\b/.test(rest)) counts.set(emoji, (counts.get(emoji) ?? 0) + 1);
   const most = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
-  const shortcodes = led.filter((one) => one.emoji.startsWith(':')).length * 2 > led.length;
+  const shortcodes = led.filter((one) => one.shortcode).length * 2 > led.length;
   return `${before ?? most ?? (shortcodes ? ':wrench:' : '🔧')} ${title}`;
 }
 
@@ -86,20 +86,23 @@ export async function remoteFile(sys: Sys, slug: string, path: string, ref: stri
  */
 export async function mergeQueue(sys: Sys, slug: string, branch: string, token: string): Promise<string | undefined> {
   for (const path of MERGIFY_PATHS) {
-    const { status, json } = await sys.http(`${API}/repos/${slug}/contents/${path}?ref=${encodeURIComponent(branch)}`, { token }).catch(() => ({ status: 0, json: undefined }));
-    if (status === 404) continue;
-    const content = (json as { content?: unknown } | null)?.content;
-    if (status !== 200 || typeof content !== 'string') return undefined;
+    const file = await remoteFile(sys, slug, path, branch, token);
+    if ('problem' in file) return undefined;
+    if (file.text === undefined) continue;
     const { parse } = await import('yaml');
-    let config: { queue_rules?: unknown; pull_request_rules?: unknown; merge_protections_settings?: unknown; merge_protection_settings?: unknown } | null;
+    let config: { queue_rules?: unknown; pull_request_rules?: unknown; merge_protections_settings?: unknown; merge_protection_settings?: unknown } | null | undefined;
     try {
-      config = parse(Buffer.from(content, 'base64').toString('utf8')) as typeof config;
+      config = parse(file.text) as typeof config;
     } catch {
-      return undefined;
+      // A configuration that is not YAML queues nothing.
     }
     const queues = Array.isArray(config?.queue_rules) ? config.queue_rules : [];
-    const rules = Array.isArray(config?.pull_request_rules) ? (config.pull_request_rules as ({ conditions?: unknown; actions?: unknown } | null)[]) : [];
-    const queuing = rules.some((rule) => typeof rule?.actions === 'object' && rule.actions !== null && 'queue' in rule.actions && !asksForLabel(rule.conditions));
+    const rules = config?.pull_request_rules;
+    const queuing =
+      Array.isArray(rules) &&
+      (rules as ({ conditions?: unknown; actions?: unknown } | null)[]).some(
+        (rule) => typeof rule?.actions === 'object' && rule.actions !== null && 'queue' in rule.actions && !asksForLabel(rule.conditions),
+      );
     // Mergify's docs spell the key both ways.
     const protections = (config?.merge_protections_settings ?? config?.merge_protection_settings) as { auto_merge_conditions?: unknown } | null | undefined;
     const conditions = protections?.auto_merge_conditions;

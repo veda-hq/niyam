@@ -1,17 +1,42 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { isDeepStrictEqual } from 'node:util';
 
-import { FakeSys, TOKEN } from './fake.test.ts';
-import { mergeQueue, pullTitle } from './onboard-pull.ts';
+import { pathsFor, sessionEnv } from './agent.ts';
+import { AGENT, AGENT_ID, blobName, capture, FakeSys, HOME, PULL_URL, TOKEN } from './fake.test.ts';
+import type { Call } from './fake.test.ts';
+import { HOOKS_PATH, LEFTOVER_CLOUD_SETUP_PATH, MOVED_FILES, ONBOARD_BRANCH, ONBOARD_FILES, WORKFLOW_PATH, mergeQueue, openPull, pullTitle, remoteFile } from './onboard-pull.ts';
+import type { Change, PullTarget } from './onboard-pull.ts';
+
+describe("onboard's files", () => {
+  it('are where clients hold them, and its branch is the one a run again updates', () => {
+    assert.deepEqual(ONBOARD_FILES, [
+      '.github/niyam.json',
+      '.claude/settings.json',
+      '.claude/sarathi.json',
+      '.github/workflows/niyam.yml',
+      '.github/workflows/niyam-guard.yml',
+      '.github/niyam/cloud-setup.sh',
+      '.github/process-rules/cloud-setup.sh',
+    ]);
+    assert.deepEqual(MOVED_FILES, { '.github/process-rules/cloud-setup.sh': '.github/niyam/cloud-setup.sh' });
+    assert.equal(ONBOARD_BRANCH, 'niyam/onboard');
+  });
+});
 
 describe('pullTitle', () => {
   const plain = 'chore(niyam): onboard at v1.2.3';
 
   it('is plain Conventional Commits when the history gives no emoji style, or none', () => {
-    assert.equal(pullTitle('1.2.3'), plain);
     assert.equal(pullTitle('1.2.3', []), plain);
     assert.equal(pullTitle('1.2.3', ['feat: a thing', 'fix(api): b', '✨ feat: c']), plain, 'most subjects lead with no emoji');
     assert.equal(pullTitle('1.2.3', ['✨ feat: a', 'fix: b']), plain, 'half is not most');
+    assert.equal(pullTitle('1.2.3', ['feat: add ✨ sparkles', 'fix: 🐛 b']), plain, 'an emoji past the start leads nothing');
+    assert.equal(pullTitle('1.2.3', ['✨ feat: a\n\nits body', '🐛 fix: b\nmore']), plain, 'a whole message is not a subject');
+  });
+
+  it('reads the emoji and the rest of the subject apart, however many spaces part them', () => {
+    assert.equal(pullTitle('1.2.3', ['🔥  chore: a', '🔥   chore(x): b']), `🔥 ${plain}`);
   });
 
   it("leads with an emoji when most of the default branch's recent subjects do", () => {
@@ -24,11 +49,44 @@ describe('pullTitle', () => {
     assert.equal(pullTitle('1.2.3', ['🔥 chore(tooling): a', '🔥 chore: c', '📦 chore(process-rules): onboard at v1.2.2']), `🔥 ${plain}`, 'not an onboard before niyam (P-57)');
     assert.equal(pullTitle('1.2.3', ['♻️ refactor: a', '⬆️ chore(deps): b', '👨‍💻 feat: c']), `⬆️ ${plain}`, 'emoji of more than one code point');
     assert.equal(pullTitle('1.2.3', ['🇮🇳 chore(i18n): a', '👍🏽 feat: b', '🧑🏿‍💻 fix: c']), `🇮🇳 ${plain}`, 'flags, skin tones and joined emoji');
+    assert.equal(pullTitle('1.2.3', ['👨‍💻 chore: a', '👨‍💻 chore: b', 'fix: c']), `👨‍💻 ${plain}`, 'joined emoji alone');
+    assert.equal(pullTitle('1.2.3', ['🧑🏿‍🤝‍🧑🏻 chore: a', '🧑🏿‍🤝‍🧑🏻 chore: b']), `🧑🏿‍🤝‍🧑🏻 ${plain}`, 'skin tones on joined emoji');
+    assert.equal(pullTitle('1.2.3', ['📦 chore(niyam): onboard at v1.2.2', '🔥 chore: a', '🔥 chore: b']), `📦 ${plain}`, 'an earlier onboard wins over the most');
+    assert.equal(pullTitle('1.2.3', ['🎉 feat: undo chore(niyam) x', '🔥 chore: a']), `🔥 ${plain}`, 'an onboard is a subject that starts so');
+    assert.equal(pullTitle('1.2.3', ['🎉 feat: a chore b', '🧹 chore: c']), `🧹 ${plain}`, 'a chore is a subject that starts so');
+    assert.equal(pullTitle('1.2.3', ['🧹 chore: a', '🔥 chore: b', '🔥 chore: c']), `🔥 ${plain}`, 'the most, not the first');
   });
 
   it('writes a gitmoji shortcode when the repo does', () => {
     assert.equal(pullTitle('1.2.3', [':sparkles: feat: a', ':bug: fix: b']), `:wrench: ${plain}`);
     assert.equal(pullTitle('1.2.3', [':sparkles: feat: a', ':fire: chore: b']), `:fire: ${plain}`);
+    assert.equal(pullTitle('1.2.3', [':sparkles: feat: a', '✨ fix: b']), `🔧 ${plain}`, 'half is not most');
+  });
+});
+
+describe('remoteFile', () => {
+  const URL = 'https://api.github.com/repos/example-org/example-app/contents/a/b.yml?ref=feature%2Fx';
+  const at = (status: number, json: unknown): FakeSys => new FakeSys().route('GET', URL, { status, json });
+  const read = (sys: FakeSys) => remoteFile(sys, 'example-org/example-app', 'a/b.yml', 'feature/x', TOKEN);
+
+  it("reads a file's text on a ref, as the agent", async () => {
+    const sys = at(200, { content: Buffer.from('name: café\n').toString('base64'), encoding: 'base64' });
+    assert.deepEqual(await read(sys), { text: 'name: café\n' });
+    assert.deepEqual(sys.requests, [{ url: URL, method: 'GET', token: TOKEN }]);
+  });
+
+  it('reads none when GitHub says the file or ref is not there', async () => {
+    assert.deepEqual(await read(at(404, { message: 'Not Found' })), {});
+  });
+
+  it('says what went wrong when GitHub could not be asked or would not say', async () => {
+    const problem = (why: string) => ({ problem: `GitHub did not give a/b.yml on feature/x (${why})` });
+    assert.deepEqual(await read(at(500, { content: Buffer.from('x').toString('base64') })), problem('HTTP 500'));
+    assert.deepEqual(await read(at(200, null)), problem('HTTP 200'));
+    assert.deepEqual(await read(at(200, [{ name: 'c.yml' }])), problem('HTTP 200'), 'a folder');
+    const down = new FakeSys();
+    down.http = () => Promise.reject(new Error('ECONNRESET'));
+    assert.deepEqual(await read(down), problem('no answer'));
   });
 });
 
@@ -67,6 +125,26 @@ describe('mergeQueue', () => {
     assert.equal(await find(on({ '.mergify.yml': `${queueRule}merge_protections_settings:\n  auto_merge_conditions: [label=automerge]\n` })), undefined, 'auto-merge once labelled');
     assert.equal(await find(on({ '.mergify.yml': `${queueRule}merge_protections_settings:\n  auto_merge_conditions: null\n` })), undefined, 'auto-merge off');
     assert.equal(await find(on({ '.mergify.yml': 'pull_request_rules: []\n', '.github/mergify.yml': queueRule + autoQueue })), undefined, 'Mergify reads the first config only');
+    assert.equal(await find(on({ '.mergify.yml': '', '.github/mergify.yml': queueRule + autoQueue })), undefined, 'an empty first config');
+  });
+
+  it('finds a rule asking for a label only by a top-level condition that starts with one', async () => {
+    const rule = (conditions: string) => find(on({ '.mergify.yml': `${queueRule}pull_request_rules:\n  - conditions: ${conditions}\n    actions: { queue: {} }\n` }));
+    assert.equal(await rule('[base=main, label=queue]'), undefined, 'one label among other conditions');
+    assert.equal(await rule('[label = queue]'), undefined, 'spaces before the operator');
+    assert.equal(await rule('[label~=^queue]'), undefined, 'a label pattern');
+    assert.equal(await rule("['  label=queue']"), undefined, 'leading spaces');
+    assert.equal(await rule('[-label=wip]'), '.mergify.yml', 'a label it must not have');
+    assert.equal(await rule('[{ or: [label=a, label=b] }, base=main]'), '.mergify.yml', 'labels nested under or');
+  });
+
+  it("finds no queuing in a rule whose actions are not a map holding queue", async () => {
+    const rules = (yaml: string) => find(on({ '.mergify.yml': `${queueRule}pull_request_rules:\n${yaml}` }));
+    assert.equal(await rules('  - conditions: [base=main]\n    actions: queue\n'), undefined, 'actions as a word');
+    assert.equal(await rules('  - conditions: [base=main]\n    actions:\n'), undefined, 'no actions');
+    assert.equal(await rules('  - conditions: [base=main]\n    actions: { comment: { message: hi } }\n'), undefined, 'other actions');
+    assert.equal(await rules('  -\n  - conditions: [base=main]\n    actions: { merge: {} }\n'), undefined, 'an empty rule');
+    assert.equal(await rules('  -\n  - actions: { queue: {} }\n'), '.mergify.yml', 'an empty rule before one that queues');
   });
 
   it('finds none when GitHub does not say, or the config is not YAML', async () => {
@@ -75,5 +153,126 @@ describe('mergeQueue', () => {
     const down = on({});
     down.http = () => Promise.reject(new Error('ECONNRESET'));
     assert.equal(await find(down), undefined);
+  });
+});
+
+describe('openPull', () => {
+  const target: PullTarget = { agent: AGENT, id: AGENT_ID, token: TOKEN, slug: 'example-org/example-app', branch: 'main', version: '1.2.3' };
+  const DIR = '/tmp/niyam-1';
+  const REMOTE = 'https://github.com/example-org/example-app.git';
+  const workflow: Change = { path: WORKFLOW_PATH, before: 'old\n', text: 'new\n', what: 'runs v1.2.3' };
+  const leftover: Change = { path: LEFTOVER_CLOUD_SETUP_PATH, before: 'setup\n', text: undefined, what: 'deleted, moved' };
+  const hooks: Change = { path: HOOKS_PATH, before: undefined, text: '{}\n', what: 'added' };
+  const changes = [workflow, leftover, hooks];
+
+  /** GitHub's default branch holding what this checkout has before each change, and each exec's options. */
+  const on = (tip: Map<string, string> = new Map(changes.flatMap((c) => (c.before === undefined ? [] : [[c.path, c.before] as const])))) => {
+    const sys = new FakeSys();
+    sys.tip = tip;
+    const options: object[] = [];
+    const exec = sys.exec.bind(sys);
+    sys.exec = (command, args, given = {}) => {
+      options.push(given);
+      return exec(command, args, given);
+    };
+    return { sys, options, ...capture() };
+  };
+  /** A git step whose arguments start with `prefix` fails, as git says ` boom`. */
+  const failing = (prefix: string, result = { code: 1, stdout: '', stderr: ' boom\n' }) => (call: Call) => (call.args.join(' ').startsWith(prefix) ? result : undefined);
+  const gitSteps = (sys: FakeSys) => sys.calls.map((call) => [call.args.join(' '), call.input]);
+  const description = (notes: string[]) =>
+    [
+      '`niyam onboard` v1.2.3, run by the owner, sets this repository up. The owner approved the plan holding every change below at the terminal:',
+      '',
+      '- `.github/workflows/niyam.yml`: runs v1.2.3',
+      '- `.github/process-rules/cloud-setup.sh`: deleted, moved',
+      '- `.claude/settings.json`: added',
+      '',
+      ...notes,
+      'Merge it to finish onboarding; agent sessions then work as ExampleBot. Running onboard again updates this pull request.',
+    ].join('\n');
+
+  it("commits each change on the default branch's tip as the agent, pushes it to onboard's branch and opens the pull request", async () => {
+    const { sys, options, io, err } = on();
+    assert.deepEqual(await openPull(sys, io, target, changes, ['- a note']), { url: PULL_URL, id: 'PR_7' });
+    assert.deepEqual(err, []);
+    assert.deepEqual(gitSteps(sys), [
+      ['init -q', undefined],
+      [`fetch -q --depth=1 --filter=blob:none ${REMOTE} refs/heads/main`, undefined],
+      ['read-tree FETCH_HEAD', undefined],
+      ['rev-parse --verify -q FETCH_HEAD:.github/workflows/niyam.yml', undefined],
+      ['hash-object --stdin', 'old\n'],
+      ['hash-object -w --stdin', 'new\n'],
+      [`update-index --add --cacheinfo 100644,${blobName('new\n')},.github/workflows/niyam.yml`, undefined],
+      ['rev-parse --verify -q FETCH_HEAD:.github/process-rules/cloud-setup.sh', undefined],
+      ['hash-object --stdin', 'setup\n'],
+      ['update-index --force-remove .github/process-rules/cloud-setup.sh', undefined],
+      ['rev-parse --verify -q FETCH_HEAD:.claude/settings.json', undefined],
+      ['hash-object -w --stdin', '{}\n'],
+      [`update-index --add --cacheinfo 100644,${blobName('{}\n')},.claude/settings.json`, undefined],
+      ['write-tree --missing-ok', undefined],
+      ['commit-tree -S tree1 -p FETCH_HEAD -m chore(niyam): onboard at v1.2.3', undefined],
+      [`push -q ${REMOTE} +abc123:refs/heads/niyam/onboard`, undefined],
+    ]);
+    assert.deepEqual(Object.fromEntries(sys.committed), { '.github/workflows/niyam.yml': 'new\n', '.claude/settings.json': '{}\n' });
+    assert.deepEqual([...sys.deleted], ['.github/process-rules/cloud-setup.sh']);
+    // In the temporary repository, as the agent, with input only where git reads some.
+    const env = sessionEnv({}, AGENT, AGENT_ID, TOKEN, pathsFor(HOME, AGENT));
+    assert.ok(sys.calls.every((call) => call.command === 'git' && call.cwd === DIR && isDeepStrictEqual(call.env, env)));
+    assert.deepEqual(
+      options.map((given) => Object.keys(given).join(' ')),
+      sys.calls.map((call) => (call.input === undefined ? 'cwd env' : 'cwd env input')),
+    );
+    assert.deepEqual(sys.removed, [DIR]);
+    const opened = sys.requests.find((request) => request.method === 'POST');
+    assert.deepEqual(opened, {
+      url: 'https://api.github.com/repos/example-org/example-app/pulls',
+      method: 'POST',
+      token: TOKEN,
+      body: { title: 'chore(niyam): onboard at v1.2.3', head: 'niyam/onboard', base: 'main', body: description(['- a note', '']) },
+    });
+  });
+
+  it('lists no notes when it is given none', async () => {
+    const { sys, io } = on();
+    assert.deepEqual(await openPull(sys, io, target, changes), { url: PULL_URL, id: 'PR_7' });
+    assert.equal((sys.requests.find((request) => request.method === 'POST')?.body as { body: string }).body, description([]));
+  });
+
+  it("refuses a file the default branch has otherwise than this checkout, so nothing on it is undone", async () => {
+    const refused = async (tip: Map<string, string>, change: Change) => {
+      const { sys, io, err } = on(tip);
+      assert.equal(await openPull(sys, io, target, [change]), 1);
+      assert.deepEqual(err, [`onboard: ${change.path} on main is not what this checkout has; bring this checkout up to date with main and run onboard again`]);
+      assert.ok(!sys.calls.some((call) => call.args[0] === 'update-index' || call.args[0] === 'push'));
+      assert.deepEqual(sys.removed, [DIR]);
+    };
+    await refused(new Map([[WORKFLOW_PATH, 'changed on main\n']]), workflow);
+    await refused(new Map(), workflow);
+    await refused(new Map([[HOOKS_PATH, 'added on main\n']]), hooks);
+  });
+
+  it('says which step failed and how, and deletes the temporary repository, opening nothing', async () => {
+    const cases: [string, string, { code: number; stdout: string; stderr: string }?][] = [
+      ['init', 'git init failed: boom'],
+      ['fetch', 'git fetch failed: boom'],
+      ['read-tree', 'git read-tree failed: boom'],
+      ['update-index --force-remove', 'deleting .github/process-rules/cloud-setup.sh failed: boom'],
+      ['hash-object -w', 'storing .github/workflows/niyam.yml failed: boom'],
+      ['update-index --add', 'staging .github/workflows/niyam.yml failed: boom'],
+      ['write-tree', 'git write-tree failed: boom'],
+      ['commit-tree', 'signing the commit failed: boom'],
+      ['commit-tree', 'signing the commit failed: ', { code: 0, stdout: '\n', stderr: '' }],
+      ['push', 'pushing as ExampleBot failed: boom'],
+    ];
+    for (const [step, said, result] of cases) {
+      const { sys, io, err } = on();
+      sys.execOverride = failing(step, result);
+      assert.equal(await openPull(sys, io, target, changes), 1, step);
+      assert.deepEqual(err, [`onboard: ${said}`], step);
+      assert.equal(sys.calls.at(-1)?.args.join(' ').startsWith(step), true, `${step} is the last step`);
+      assert.ok(!sys.requests.some((request) => request.method === 'POST'), step);
+      assert.deepEqual(sys.removed, [DIR], step);
+    }
   });
 });
