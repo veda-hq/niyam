@@ -185,7 +185,7 @@ export async function prIdentity(sys: Sys, io: Output): Promise<number> {
  * Who pushed the commits, read from GitHub's record (read `read` of
  * RECORD_READS), and read again RECORD_WAIT_MS later until it names them all.
  */
-async function recordedPushers(
+export async function recordedPushers(
   sys: Sys,
   token: string,
   branch: { repo: string; ref: string; base: string; commits: string[] },
