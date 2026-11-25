@@ -117,7 +117,7 @@ function workItems(raw: unknown, kinds: Record<string, DocKind>): WorkItems {
   const kind = text(value.kind, `${at}.kind`);
   if (!Object.hasOwn(kinds, kind)) throw new Error(`${at}.kind names "${kind}", which "kinds" does not have`);
   const last = value.lastMovedIssue;
-  if (last !== undefined && (typeof last !== 'number' || !Number.isSafeInteger(last) || last < 1)) throw new Error(`${at}.lastMovedIssue must be an issue number`);
+  if (last !== undefined && (!Number.isSafeInteger(last) || (last as number) < 1)) throw new Error(`${at}.lastMovedIssue must be an issue number`);
   let frozen: WorkItems['frozen'];
   if (value.frozen !== undefined) {
     const f = record(value.frozen, `${at}.frozen`);
@@ -281,9 +281,10 @@ export interface Pull {
 export const PullListSchema = schema((value): Pull[] => {
   if (!Array.isArray(value)) throw new Error('`gh pr list` returned an unexpected shape');
   return (value as unknown[]).map((pr) => {
-    const entry = typeof pr === 'object' && pr !== null ? (pr as { number?: unknown; files?: unknown }) : {};
+    // JSON gives no functions, and a number or a string has no such fields: only null needs standing in for.
+    const entry = (pr ?? {}) as { number?: unknown; files?: unknown };
     const files = Array.isArray(entry.files) ? (entry.files as unknown[]) : [];
-    const paths = files.map((file) => (typeof file === 'object' && file !== null ? (file as { path?: unknown }).path : undefined)).filter((path): path is string => typeof path === 'string');
+    const paths = files.map((file) => (file as { path?: unknown } | null)?.path).filter((path): path is string => typeof path === 'string');
     return { number: entry.number, paths, listed: files.length };
   });
 });
@@ -291,8 +292,8 @@ export const PullListSchema = schema((value): Pull[] => {
 /** One line of the Work item list: `{number, title}`. */
 export const WorkItemLineSchema = schema((value): { number: number; title: string } => {
   const { number, title } = (typeof value === 'object' && value !== null ? value : {}) as { number?: unknown; title?: unknown };
-  if (typeof number !== 'number' || !Number.isInteger(number) || typeof title !== 'string') throw new Error('not {number, title}');
-  return { number, title };
+  if (!Number.isInteger(number) || typeof title !== 'string') throw new Error('not {number, title}');
+  return { number: number as number, title };
 });
 
 /** A whole number from digits the caller has matched; throws on anything else. */
@@ -327,9 +328,9 @@ export function localBasenames(sys: Sys, kind: DocKind, root: string): string[] 
 export function basenamesOnRef(sys: Sys, kind: DocKind, ref: string, root: string): string[] | null {
   const out = gitOut(sys, root, ['ls-tree', '--name-only', ref, `${kind.dir}/`]);
   if (out === null) return null;
+  // A blank line names no document, so the name filter drops it.
   return out
     .split('\n')
-    .filter(Boolean)
     .map((path) => path.slice(path.lastIndexOf('/') + 1))
     .filter((name) => NUMBERED_DOC.test(name))
     .sort();
@@ -362,7 +363,7 @@ export interface Layer {
 
 /** Every file of one pull request, paged through the REST list, or why it could not be read whole. */
 function allPrFiles(number: unknown, gh: RunGh): { ok: true; paths: string[] } | { ok: false; reason: string } {
-  if (typeof number !== 'number' || !Number.isInteger(number)) return { ok: false, reason: 'no PR number' };
+  if (!Number.isInteger(number)) return { ok: false, reason: 'no PR number' };
   let paths: string[];
   try {
     paths = gh(['api', `repos/{owner}/{repo}/pulls/${String(number)}/files`, '--paginate', '--jq', '.[].filename'])

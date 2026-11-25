@@ -37,7 +37,41 @@ interface Builder {
 
 const fresh = (): Builder => ({ text: '', known: true, opensUnknown: false, started: false });
 
-type Append = (text: string, known?: boolean) => void;
+/** Adds text to the word being read; undefined adds a part only the running shell knows. */
+type Append = (text: string | undefined) => void;
+
+/**
+ * How many leading UTF-16 units of `rest` a word takes: up to a blank or an operator outside quotes. It reads only
+ * as far as the word goes, a character (one or two units) at a time.
+ */
+function wordLength(rest: string): number {
+  let length = 0;
+  let quote: string | undefined;
+  let escaped = false;
+  for (const c of rest) {
+    if (escaped) escaped = false;
+    else if (quote !== undefined) {
+      if (c === quote) quote = undefined;
+      else escaped = c === '\\' && quote === '"';
+    } else if (c === "'" || c === '"') quote = c;
+    else if (c === '\\') escaped = true;
+    else if (/[\s;&|()<>]/.test(c)) break;
+    length += c.length;
+  }
+  return length;
+}
+
+/** How many leading UTF-16 units of `rest` a backquoted command takes: up to its closing backquote, escapes skipped. */
+function backquotedLength(rest: string): number {
+  let length = 0;
+  let escaped = false;
+  for (const c of rest) {
+    if (!escaped && c === '`') break;
+    escaped = !escaped && c === '\\';
+    length += c.length;
+  }
+  return length;
+}
 
 class Reader {
   pos = 0;
@@ -48,14 +82,20 @@ class Reader {
 
   private readonly src: string;
   private readonly read: ReadFile;
+  /**
+   * One entry per UTF-16 unit of the line, for the loops to step over: each step reads at least one unit, so no loop
+   * can run longer than the line.
+   */
+  private readonly units: readonly string[];
 
   constructor(src: string, read: ReadFile) {
     this.src = src;
     this.read = read;
+    this.units = src.split('');
   }
 
   /** The commands up to the end, or up to the `)` closing a `$(` when `nested`. */
-  list(nested: boolean): Simple[] {
+  list(nested = false): Simple[] {
     const commands: Simple[] = [];
     let current: Simple = { words: [] };
     let word = fresh();
@@ -68,21 +108,21 @@ class Reader {
       if (current.words.length > 0) commands.push(current);
       current = { words: [] };
     };
-    const append: Append = (text, known = true) => {
-      if (word.text === '' && !known) word.opensUnknown = true;
+    const append: Append = (text) => {
+      if (word.text === '' && text === undefined) word.opensUnknown = true;
       word.started = true;
-      word.text += known ? text : UNKNOWN;
-      if (!known) word.known = false;
+      word.text += text ?? UNKNOWN;
+      if (text === undefined) word.known = false;
     };
     const src = this.src;
-    while (this.pos < src.length) {
+    for (const _ of this.units) {
+      if (this.pos >= src.length) break;
       const c = src[this.pos] as string;
       if (c === ' ' || c === '\t') {
         endWord();
         this.pos++;
       } else if (c === '\n') {
         // A command's heredocs start on the line after it.
-        endWord();
         this.pos++;
         this.heredocs();
         endCommand();
@@ -94,7 +134,8 @@ class Reader {
         endCommand();
         this.pos++;
       } else if (c === '#' && !word.started) {
-        while (this.pos < src.length && src[this.pos] !== '\n') this.pos++;
+        const end = src.indexOf('\n', this.pos);
+        this.pos = end === -1 ? src.length : end;
       } else if (c === '<' || c === '>') {
         // A file descriptor's number, as in 2>&1, belongs to the redirection.
         if (word.known && /^\d+$/.test(word.text)) word = fresh();
@@ -102,7 +143,7 @@ class Reader {
         this.redirect(current);
       } else if (c === "'") {
         const end = src.indexOf("'", this.pos + 1);
-        const stop = end < 0 ? src.length : end;
+        const stop = end === -1 ? src.length : end;
         append(src.slice(this.pos + 1, stop));
         this.pos = stop + 1;
       } else if (c === '"') {
@@ -116,7 +157,7 @@ class Reader {
         this.dollar(append, false);
       } else if (c === '`') {
         this.backquoted();
-        append('', false);
+        append(undefined);
       } else {
         append(c);
         this.pos++;
@@ -130,16 +171,18 @@ class Reader {
   private doubleQuoted(append: Append): void {
     const src = this.src;
     append('');
-    while (this.pos < src.length && src[this.pos] !== '"') {
+    for (const _ of this.units) {
+      if (this.pos >= src.length || src[this.pos] === '"') break;
       const c = src[this.pos] as string;
-      if (c === '\\' && /["\\$`\n]/.test(src[this.pos + 1] ?? '')) {
-        if (src[this.pos + 1] !== '\n') append(src[this.pos + 1] as string);
+      const escaped = src.slice(this.pos + 1, this.pos + 2);
+      if (c === '\\' && /["\\$`\n]/.test(escaped)) {
+        if (escaped !== '\n') append(escaped);
         this.pos += 2;
       } else if (c === '$') {
         this.dollar(append, true);
       } else if (c === '`') {
         this.backquoted();
-        append('', false);
+        append(undefined);
       } else {
         append(c);
         this.pos++;
@@ -153,22 +196,21 @@ class Reader {
     const src = this.src;
     const next = src[this.pos + 1];
     if (next === '(' && src[this.pos + 2] === '(') {
-      this.pos = closing(src, this.pos + 3, '((', '))');
-      append('', false);
+      this.pos = this.closing(this.pos + 3, '((', '))');
+      append(undefined);
     } else if (next === '(') {
       this.pos += 2;
       const inner = this.list(true);
       this.nested.push(...inner);
-      const value = this.substitution(inner);
-      if (value === undefined) append('', false);
-      else append(value);
+      append(this.substitution(inner));
     } else if (next === '{') {
-      this.pos = closing(src, this.pos + 2, '{', '}');
-      append('', false);
+      this.pos = this.closing(this.pos + 2, '{', '}');
+      append(undefined);
     } else if (next === "'" && !quoted) {
       this.pos += 2;
       let text = '';
-      while (this.pos < src.length && src[this.pos] !== "'") {
+      for (const _ of this.units) {
+        if (this.pos >= src.length || src[this.pos] === "'") break;
         if (src[this.pos] === '\\' && this.pos + 1 < src.length) {
           const escaped = src[this.pos + 1] as string;
           text += ({ n: '\n', t: '\t' } as Record<string, string>)[escaped] ?? escaped;
@@ -182,8 +224,9 @@ class Reader {
       append(text);
     } else if (next !== undefined && /[\w@*#?$!-]/.test(next)) {
       this.pos += 2;
-      if (/[A-Za-z_]/.test(next)) while (/\w/.test(src[this.pos] ?? '')) this.pos++;
-      append('', false);
+      // A name runs on to the first character that is not a word's; any other parameter is one character.
+      if (/[A-Za-z_]/.test(next)) this.pos += src.slice(this.pos).search(/\W|$/);
+      append(undefined);
     } else {
       append('$');
       this.pos++;
@@ -192,8 +235,8 @@ class Reader {
 
   /** What `$(…)` gives, when it is `cat` of a heredoc or a file; undefined otherwise. */
   private substitution(inner: Simple[]): string | undefined {
-    const [only] = inner;
-    if (inner.length !== 1 || !only || !only.words.every((word) => word.known)) return undefined;
+    const [only, another] = inner;
+    if (!only || another || !only.words.every((word) => word.known)) return undefined;
     const [command, file, extra] = only.words.map((word) => word.text);
     if (command !== 'cat' || extra !== undefined) return undefined;
     const text = file !== undefined ? this.read(file) : only.stdin?.known ? only.stdin.text : undefined;
@@ -205,9 +248,9 @@ class Reader {
   private backquoted(): void {
     const src = this.src;
     const start = ++this.pos;
-    while (this.pos < src.length && src[this.pos] !== '`') this.pos += src[this.pos] === '\\' ? 2 : 1;
+    this.pos += backquotedLength(src.slice(start));
     const inner = new Reader(src.slice(start, this.pos).replace(/\\([`\\$])/g, '$1'), this.read);
-    this.nested.push(...inner.list(false), ...inner.nested);
+    this.nested.push(...inner.list(), ...inner.nested);
     this.pos++;
   }
 
@@ -231,8 +274,10 @@ class Reader {
       return;
     }
     const input = src[this.pos] === '<' && src[this.pos + 1] !== '&';
-    this.pos++;
-    while (/[<>&|]/.test(src[this.pos] ?? '')) this.pos++;
+    // The rest of the operator, as `>>`, `>&` or `>|`, read where it stands.
+    const operator = /[<>&|]*/y;
+    operator.lastIndex = this.pos + 1;
+    this.pos = operator.lastIndex + (operator.exec(src) as RegExpExecArray)[0].length;
     const target = this.word();
     if (input) {
       const text = target.known ? this.read(target.text) : undefined;
@@ -243,21 +288,11 @@ class Reader {
   /** The next word, past blanks: a redirection's target or a heredoc's delimiter, with how it was written. */
   private word(): Text & { raw: string } {
     const src = this.src;
-    while (src[this.pos] === ' ' || src[this.pos] === '\t') this.pos++;
+    this.pos += src.slice(this.pos).search(/[^ \t]|$/);
     const start = this.pos;
-    let quote: string | undefined;
-    while (this.pos < src.length) {
-      const c = src[this.pos] as string;
-      if (quote) {
-        if (c === quote) quote = undefined;
-        else if (c === '\\' && quote === '"') this.pos++;
-      } else if (c === "'" || c === '"') quote = c;
-      else if (c === '\\') this.pos++;
-      else if (/[\s;&|()<>]/.test(c)) break;
-      this.pos++;
-    }
+    this.pos += wordLength(src.slice(start));
     const raw = src.slice(start, this.pos);
-    const first = new Reader(raw, this.read).list(false)[0]?.words[0];
+    const first = new Reader(raw, this.read).list()[0]?.words[0];
     return { ...(first ?? { text: '', known: true, opensUnknown: false }), raw };
   }
 
@@ -266,10 +301,10 @@ class Reader {
     const src = this.src;
     for (const doc of this.pending.splice(0)) {
       const lines: string[] = [];
-      while (this.pos < src.length) {
-        const end = src.indexOf('\n', this.pos);
-        const line = src.slice(this.pos, end < 0 ? src.length : end);
-        this.pos = end < 0 ? src.length : end + 1;
+      for (const _ of this.units) {
+        if (this.pos >= src.length) break;
+        const line = src.slice(this.pos).split('\n', 1)[0] as string;
+        this.pos += line.length + 1;
         const bare = doc.strip ? line.replace(/^\t+/, '') : line;
         if (bare === doc.delimiter) break;
         lines.push(bare);
@@ -280,23 +315,24 @@ class Reader {
       doc.into.stdin = { text, known: !expands, opensUnknown: expands && /^\s*[$`]/.test(text) };
     }
   }
-}
 
-/** Just past the `close` that matches the `open` before `from`, counting nested pairs. */
-function closing(src: string, from: number, open: string, close: string): number {
-  let depth = 1;
-  let at = from;
-  while (at < src.length) {
-    if (src.startsWith(close, at)) {
-      depth--;
-      at += close.length;
-      if (depth === 0) return at;
-    } else if (src.startsWith(open, at)) {
-      depth++;
-      at += open.length;
-    } else at++;
+  /** Just past the `close` that matches the `open` before `from`, counting nested pairs; the end when none does. */
+  private closing(from: number, open: string, close: string): number {
+    const src = this.src;
+    let depth = 1;
+    let at = from;
+    for (const _ of this.units) {
+      if (src.startsWith(close, at)) {
+        depth--;
+        at += close.length;
+        if (depth === 0) return at;
+      } else if (src.startsWith(open, at)) {
+        depth++;
+        at += open.length;
+      } else at++;
+    }
+    return src.length;
   }
-  return at;
 }
 
 /**
@@ -307,13 +343,15 @@ function closing(src: string, from: number, open: string, close: string): number
 export function commands(line: string, read: ReadFile): Simple[] {
   const found: Simple[] = [];
   const reader = new Reader(line, read);
-  const top = reader.list(false);
+  const top = reader.list();
   for (const simple of [...top, ...reader.nested]) {
     found.push(simple);
     const words = simple.words;
     const shell = words.findIndex((word) => /^(?:.*\/)?(?:ba|z|da)?sh$/.test(word.text));
-    const script = shell < 0 ? -1 : words.findIndex((word, at) => at > shell && /^-[A-Za-z]*c[A-Za-z]*$/.test(word.text));
-    const body = script < 0 ? undefined : words[script + 1];
+    // The words after the shell's name: none when no shell runs.
+    const after = words.slice(shell < 0 ? words.length : shell + 1);
+    const script = after.findIndex((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word.text));
+    const body = script < 0 ? undefined : after[script + 1];
     if (body?.known) found.push(...commands(body.text, read));
   }
   return found;

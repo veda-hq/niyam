@@ -82,7 +82,7 @@ export async function doctor(sys: Sys, io: Output, named?: string): Promise<numb
   const keyProblem = keyPairProblem(sys, paths.key);
   const mac: Finding[] = [
     keyProblem
-      ? { mark: '✗', text: keyProblem.replaceAll(paths.key, home(paths.key)), fix: /missing$/.test(keyProblem) ? MACHINE : `move it aside, then ${MACHINE}` }
+      ? { mark: '✗', text: keyProblem.replaceAll(paths.key, home(paths.key)), fix: keyProblem.endsWith(' is missing') ? MACHINE : `move it aside, then ${MACHINE}` }
       : { mark: '✓', text: `signing key ${home(paths.key)}` },
     await remote('session file', async () => {
       if (!sys.exists(paths.session)) return { mark: '✗', text: 'session file missing', fix: MACHINE };
@@ -146,9 +146,10 @@ function launcherFinding(sys: Sys): Finding {
  * What is left on this Mac from before niyam, which no release reads since
  * P-57: the folder before P-55, and the keychain's entry before niyam. Each
  * is ▲, as `machine` removes it; an entry holding another token than the
- * current one `machine` leaves, so its fix is the delete by hand.
+ * current one `machine` leaves, so its fix is the delete by hand. Exported
+ * for its test, since the one store this platform has names its leftover.
  */
-function leftoverFindings(sys: Sys, store: TokenStore, agent: string): Finding[] {
+export function leftoverFindings(sys: Sys, store: TokenStore, agent: string): Finding[] {
   const dir = leftoverDir(sys);
   const token = leftoverToken(sys, store, agent);
   const item = store.leftoverItem?.(agent) ?? 'the old keychain entry';
@@ -165,19 +166,18 @@ function leftoverFindings(sys: Sys, store: TokenStore, agent: string): Finding[]
 }
 
 /**
- * The repository doctor runs in and its settings, parsed, where they turn
- * the board on and doctor has a token to ask GitHub with; else undefined.
+ * The repository doctor runs in, with the Approvals issue its settings name,
+ * where they turn the board on: one, or none.
  */
-function boardRepo(sys: Sys, token: string | undefined): { slug: string; settings: unknown } | undefined {
+function boardRepo(sys: Sys): { slug: string; approvals: number | undefined }[] {
   try {
     const found = repoAt(sys);
-    const path = `${found.root}/${SETTINGS_PATH}`;
-    if (!token || !sys.exists(path)) return undefined;
-    const settings = JSON.parse(sys.read(path)) as unknown;
-    return featuresIn(settings).includes('board') ? { slug: found.slug, settings } : undefined;
+    const settings = JSON.parse(sys.read(`${found.root}/${SETTINGS_PATH}`)) as unknown;
+    if (!featuresIn(settings).includes('board')) return [];
+    return [{ slug: found.slug, approvals: loadSettings(sys, found.root).approvals }];
   } catch {
-    // Outside a client's clone, or settings doctor cannot read: onboard says what is wrong with them.
-    return undefined;
+    // Outside a client's clone, or settings doctor cannot read or that fail their checks: onboard says what is wrong with them.
+    return [];
   }
 }
 
@@ -188,11 +188,10 @@ function boardRepo(sys: Sys, token: string | undefined): { slug: string; setting
  * in an organisation, since onboard keeps them so there.
  */
 async function typesFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
-  const here = boardRepo(sys, token);
-  if (!here || !token) return [];
-  const { slug, settings } = here;
-  const named = (settings as { approvals?: unknown } | null)?.approvals;
-  const approvals = typeof named === 'number' ? named : undefined;
+  if (!token) return [];
+  const [here] = boardRepo(sys);
+  if (!here) return [];
+  const { slug, approvals } = here;
   const org = slug.split('/')[0] as string;
   try {
     return (await isOrganisation(sys, org, token)) ? [await typesDrift(sys, token, org, slug, approvals)] : [];
@@ -209,8 +208,9 @@ async function typesFindings(sys: Sys, token: string | undefined): Promise<Findi
  * board; secrets GitHub will not list say nothing.
  */
 async function boardAppFindings(sys: Sys, token: string | undefined): Promise<Finding[]> {
-  const here = boardRepo(sys, token);
-  if (!here || !token) return [];
+  if (!token) return [];
+  const [here] = boardRepo(sys);
+  if (!here) return [];
   const { slug } = here;
   try {
     if (!(await isOrganisation(sys, slug.split('/')[0] as string, token))) return [];
@@ -240,8 +240,9 @@ async function branchFindings(sys: Sys, token: string | undefined): Promise<Find
   try {
     // The repository the session works in, as the caller check reads it, wherever doctor runs from.
     const root = repoRoot(sys);
-    slug = githubSlug(sys.exec('git', ['remote', 'get-url', 'origin'], { cwd: root }).stdout.trim());
-    if (!token || !slug || !hasSettings(sys, root)) return [];
+    slug = githubSlug(sys.exec('git', ['remote', 'get-url', 'origin'], { cwd: root }).stdout);
+    if (!token || !slug) return [];
+    // Settings that are missing or fail their checks throw: not an onboarded clone.
     owner = either(loadSettings(sys, root).owners);
   } catch {
     // fail-open: outside a client's clone, or settings doctor cannot read, there is no repository to check; onboard says what is wrong with them.
@@ -249,6 +250,7 @@ async function branchFindings(sys: Sys, token: string | undefined): Promise<Find
   }
   try {
     const { status, json } = await readRepo(sys, slug, token);
+    // GitHub's 200 carries the repository; anything else says nothing here.
     const on = status === 200 ? (json as { delete_branch_on_merge?: unknown } | null)?.delete_branch_on_merge : undefined;
     if (on === true) return [{ mark: '✓', text: 'merged pull requests’ branches are deleted' }];
     if (on !== false) return [];
@@ -530,9 +532,8 @@ async function cloudDoctor(sys: Sys, io: Output, named?: string): Promise<number
  * agent's.
  */
 function cloudCommits(sys: Sys, agent: string): Finding {
-  const name = sys.env.GIT_AUTHOR_NAME;
-  const email = sys.env.GIT_AUTHOR_EMAIL?.toLowerCase() ?? '';
-  if (name !== undefined && sameLogin(name, agent) && /^\d+\+/.test(email) && email.endsWith(`+${agent.toLowerCase()}@${GITHUB_NOREPLY}`)) {
+  const email = sys.env.GIT_AUTHOR_EMAIL?.toLowerCase();
+  if (sameLogin(sys.env.GIT_AUTHOR_NAME, agent) && email?.match(/^\d+\+/) && email.endsWith(`+${agent.toLowerCase()}@${GITHUB_NOREPLY}`)) {
     return { mark: '✓', text: `this session's commits are ${agent}'s, signed with ${SIGNING_KEY_VAR}` };
   }
   if (sys.env[SIGNING_KEY_VAR]) {
