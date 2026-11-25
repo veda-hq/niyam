@@ -112,11 +112,10 @@ export function declinedPath(home: string, agent: string): string {
 
 /** What was declined on this Mac; nothing when there is no record or it cannot be read. */
 export function readDeclined(sys: Sys, agent: string): Declined {
-  const path = declinedPath(sys.home, agent);
   const none: Declined = { ghLogins: [], gitPassword: false };
-  if (!sys.exists(path)) return none;
+  // No record reads as nothing declined, as a broken one does.
   try {
-    const record = JSON.parse(sys.read(path)) as Partial<Declined>;
+    const record = JSON.parse(sys.read(declinedPath(sys.home, agent))) as Partial<Declined>;
     return {
       ghLogins: Array.isArray(record.ghLogins) ? record.ghLogins.filter((login): login is string => typeof login === 'string') : [],
       gitPassword: record.gitPassword === true,
@@ -158,15 +157,15 @@ export function movedPath(home: string, agent: string): string {
 
 /** The last move on this Mac; undefined when there is none or it cannot be read. */
 export function readMoved(sys: Sys, agent: string): Moved | undefined {
-  const path = movedPath(sys.home, agent);
-  if (!sys.exists(path)) return undefined;
+  let record: Partial<Moved>;
+  // No record reads as no move, as a broken one does.
   try {
-    const record = JSON.parse(sys.read(path)) as Partial<Moved>;
-    const logins = Array.isArray(record.logins) ? record.logins.filter((login): login is string => typeof login === 'string') : [];
-    return typeof record.at === 'string' && !Number.isNaN(Date.parse(record.at)) && logins.length > 0 ? { at: record.at, logins } : undefined;
+    record = JSON.parse(sys.read(movedPath(sys.home, agent))) as Partial<Moved>;
   } catch {
     return undefined;
   }
+  const logins = Array.isArray(record.logins) ? record.logins.filter((login): login is string => typeof login === 'string') : [];
+  return typeof record.at === 'string' && !Number.isNaN(Date.parse(record.at)) && logins.length > 0 ? { at: record.at, logins } : undefined;
 }
 
 const DESKTOP_APP = '/Claude.app/Contents/MacOS/Claude';
@@ -201,9 +200,15 @@ export function ownerFixes(logins: string[]): Finding[] {
  * owner's steps while the app runs and started before the move, else none.
  */
 export function movedFindings(sys: Sys, agent: string): Finding[] {
+  const pending = pendingMove(sys, agent);
+  return pending ? ownerFixes(pending.logins) : [];
+}
+
+/** The move the desktop app has not caught up with: it runs, and started before the move; else undefined. */
+function pendingMove(sys: Sys, agent: string): Moved | undefined {
   const moved = readMoved(sys, agent);
   const started = moved && desktopAppStarted(sys);
-  return moved && started && started.getTime() < Date.parse(moved.at) ? ownerFixes(moved.logins) : [];
+  return moved && started && started.getTime() < Date.parse(moved.at) ? moved : undefined;
 }
 
 /** Signs `gh` out of the owner's `login`; what went wrong, or undefined. */
@@ -225,11 +230,10 @@ export function removeGitPassword(sys: Sys): boolean {
  * before goes, as the owner has now said yes.
  */
 export function recordMove(sys: Sys, agent: string, signedOut: string[]): Finding[] {
-  // The owner has said yes.
-  const declined = declinedPath(sys.home, agent);
-  if (sys.exists(declined)) sys.remove(declined);
+  // The owner has said yes. Removing a record that is not there changes nothing.
+  sys.remove(declinedPath(sys.home, agent));
   if (signedOut.length === 0) return [];
-  const pending = movedFindings(sys, agent).length > 0 ? (readMoved(sys, agent)?.logins ?? []) : [];
+  const pending = pendingMove(sys, agent)?.logins ?? [];
   const logins = [...pending.filter((login) => !signedOut.some((other) => sameLogin(other, login))), ...signedOut];
   sys.mkdir(pathsFor(sys.home, agent).dir);
   sys.write(movedPath(sys.home, agent), `${JSON.stringify({ at: sys.now().toISOString(), logins }, null, 2)}\n`, 0o600);

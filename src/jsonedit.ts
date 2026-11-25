@@ -15,10 +15,23 @@ interface Layout {
   eol: string;
 }
 
-const skipSpace = (text: string, at: number): number => {
-  while (at < text.length && /\s/.test(text[at] as string)) at++;
-  return at;
-};
+// The text is read with sticky patterns and recursion, never a loop that waits for a position to move on.
+const SPACE = /\s*/y;
+const INDENT = /[ \t]*/y;
+const STRING = /"(?:[^"\\]|\\.)*"/y;
+/** A number, true, false or null: what runs to the next space, comma or closing bracket. */
+const BARE = /[^\s,}\]]*/y;
+/** What an object's or array's end is found by: a bracket, or a string, which may hold brackets. */
+const NESTING = /"(?:[^"\\]|\\.)*"|[{}[\]]/g;
+
+/** Where the sticky pattern `sticky` stops matching `text` from `at`. */
+function past(sticky: RegExp, text: string, at: number): number {
+  sticky.lastIndex = at;
+  sticky.test(text);
+  return sticky.lastIndex;
+}
+
+const skipSpace = (text: string, at: number): number => past(SPACE, text, at);
 
 /** The file's indentation step, that of its first indented line (two spaces when none is), and its line ending. */
 function layoutOf(text: string): Layout {
@@ -28,23 +41,19 @@ function layoutOf(text: string): Layout {
 /** The end of the JSON value starting at `at`. */
 function valueEnd(text: string, at: number): number {
   const first = text[at];
-  if (first === '"') {
-    let i = at + 1;
-    while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
-    return i + 1;
+  if (first === '"') return past(STRING, text, at);
+  if (first === '{' || first === '[') return nestedEnd(text, at);
+  return past(BARE, text, at);
+}
+
+/** The end of the object or array starting at `at`: past the bracket that brings the depth back to none. */
+function nestedEnd(text: string, at: number): number {
+  let depth = 0;
+  for (const { 0: token, index } of text.slice(at).matchAll(NESTING)) {
+    if (token === '{' || token === '[') depth++;
+    else if ((token === '}' || token === ']') && --depth === 0) return at + index + 1;
   }
-  if (first === '{' || first === '[') {
-    let depth = 0;
-    for (let i = at; i < text.length; i++) {
-      const c = text[i];
-      if (c === '"') i = valueEnd(text, i) - 1;
-      else if (c === '{' || c === '[') depth++;
-      else if ((c === '}' || c === ']') && --depth === 0) return i + 1;
-    }
-  }
-  let i = at;
-  while (i < text.length && !/[\s,}\]]/.test(text[i] as string)) i++;
-  return i;
+  return text.length;
 }
 
 /**
@@ -54,14 +63,16 @@ function valueEnd(text: string, at: number): number {
 function memberSpan(text: string, objectStart: number, key: string): Span | undefined {
   let found: Span | undefined;
   let at = skipSpace(text, objectStart + 1);
-  while (text[at] === '"') {
-    const keyEnd = valueEnd(text, at);
+  // Each member takes a character at least, so the walk never takes more steps than the text has.
+  for (const _ of text) {
+    if (text[at] !== '"') break;
+    const keyEnd = past(STRING, text, at);
     const name = JSON.parse(text.slice(at, keyEnd)) as string;
-    at = skipSpace(text, skipSpace(text, keyEnd) + 1);
-    const end = valueEnd(text, at);
-    if (name === key) found = { start: at, end };
-    at = skipSpace(text, end);
-    if (text[at] === ',') at = skipSpace(text, at + 1);
+    const start = skipSpace(text, skipSpace(text, keyEnd) + 1);
+    const end = valueEnd(text, start);
+    if (name === key) found = { start, end };
+    // The separator is passed over, whatever it is: past the object's closing bracket comes no string in well-formed JSON.
+    at = skipSpace(text, skipSpace(text, end) + 1);
   }
   return found;
 }
@@ -70,11 +81,14 @@ function memberSpan(text: string, objectStart: number, key: string): Span | unde
 function elementSpans(text: string, arrayStart: number): Span[] {
   const spans: Span[] = [];
   let at = skipSpace(text, arrayStart + 1);
-  while (at < text.length && text[at] !== ']') {
+  if (text[at] === ']') return spans;
+  // Each element takes a character at least, so the walk never takes more steps than the text has.
+  for (const _ of text) {
     const end = valueEnd(text, at);
     spans.push({ start: at, end });
-    at = skipSpace(text, end);
-    if (text[at] === ',') at = skipSpace(text, at + 1);
+    const next = skipSpace(text, end);
+    if (text[next] !== ',') break;
+    at = skipSpace(text, next + 1);
   }
   return spans;
 }
@@ -82,7 +96,7 @@ function elementSpans(text: string, arrayStart: number): Span[] {
 /** The indentation of the line `at` is on. */
 function lineIndent(text: string, at: number): string {
   const lineStart = text.lastIndexOf('\n', at - 1) + 1;
-  return /^[ \t]*/.exec(text.slice(lineStart))?.[0] ?? '';
+  return text.slice(lineStart, past(INDENT, text, lineStart));
 }
 
 /** `value` as JSON in the file's layout, indented to sit at `indent`. */
@@ -114,7 +128,7 @@ export function appendToArray(text: string, path: string[], key: string, value: 
   const last = text.slice(array.start + 1, close).trimEnd();
   const outer = lineIndent(text, close);
   const inner = `${outer}${layout.unit}`;
-  if (!last.trim()) return `${text.slice(0, array.start)}[${eol}${inner}${indented(value, inner, layout)}${eol}${outer}]${text.slice(array.end)}`;
+  if (!last) return `${text.slice(0, array.start)}[${eol}${inner}${indented(value, inner, layout)}${eol}${outer}]${text.slice(array.end)}`;
   const lastEnd = array.start + 1 + last.length;
   return `${text.slice(0, lastEnd)},${eol}${inner}${indented(value, inner, layout)}${text.slice(lastEnd)}`;
 }
@@ -133,7 +147,7 @@ function addMember(text: string, objectStart: number, name: string, value: unkno
   const inner = `${outer}${layout.unit}`;
   const member = `${inner}${JSON.stringify(name)}: ${indented(value, inner, layout)}`;
   const at = objectStart + 1 + body.length;
-  return body.trim()
+  return body
     ? `${text.slice(0, at)},${eol}${member}${eol}${outer}}${text.slice(close + 1)}`
     : `${text.slice(0, objectStart)}{${eol}${member}${eol}${outer}}${text.slice(close + 1)}`;
 }
@@ -202,7 +216,8 @@ export function removeElements(text: string, path: string[], drop: (value: unkno
     removed += elements.length - kept.length;
     const first = elements[0] as Span;
     const last = elements.at(-1) as Span;
-    const between = elements.length > 1 ? text.slice(first.end, (elements[1] as Span).start) : '';
+    // With one element there is none between: the slice runs backwards and is empty.
+    const between = text.slice(first.end, (elements[1] ?? first).start);
     const inside =
       kept.length === 0
         ? '[]'
@@ -229,7 +244,7 @@ export function setMember(text: string, path: string[], key: string, value: unkn
       return addMember(text, objectStart, name, nest([...path.slice(i + 1), key], value), layout);
     }
     // An array is walked into only by an index.
-    const into = text[span.start] === '[' && INDEX.test(path[i + 1] ?? '');
+    const into = text[span.start] === '[' && INDEX.test(String(path[i + 1]));
     if (text[span.start] !== '{' && !into) throw new Error(`${path.slice(0, i + 1).join('.')} is not an object`);
     objectStart = span.start;
   }

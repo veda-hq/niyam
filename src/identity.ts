@@ -13,16 +13,20 @@ export interface Commit {
 
 /** GitHub lists at most 250 commits for a pull request. */
 export const MOST_COMMITS = 250;
+/** The pages of 100 those take. */
+const COMMIT_PAGES = 3;
 
 /** Pull request `number`'s commits, as many as GitHub lists: MOST_COMMITS or more means some went unseen. */
-export async function commitsOf(sys: Sys, token: string, slug: string, number: number): Promise<Commit[]> {
-  const commits: Commit[] = [];
-  for (let page = 1; ; page++) {
-    const { status, json } = await sys.http(`${API}/repos/${slug}/pulls/${number}/commits?per_page=100&page=${page}`, { token });
-    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot list the commits of #${number} (HTTP ${status})`);
-    commits.push(...(json as Commit[]));
-    if (json.length < 100 || commits.length >= MOST_COMMITS) return commits;
-  }
+export function commitsOf(sys: Sys, token: string, slug: string, number: number): Promise<Commit[]> {
+  return commitPages(sys, token, slug, number, 1, []);
+}
+
+/** `seen` and the commits on page `page` on, to the last page GitHub lists. */
+async function commitPages(sys: Sys, token: string, slug: string, number: number, page: number, seen: Commit[]): Promise<Commit[]> {
+  const { status, json } = await sys.http(`${API}/repos/${slug}/pulls/${number}/commits?per_page=100&page=${page}`, { token });
+  if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot list the commits of #${number} (HTTP ${status})`);
+  const commits = [...seen, ...(json as Commit[])];
+  return json.length < 100 || page === COMMIT_PAGES ? commits : commitPages(sys, token, slug, number, page + 1, commits);
 }
 
 /**
@@ -75,11 +79,11 @@ export async function prIdentity(sys: Sys, io: Output): Promise<number> {
     };
   };
   const pull = event.pull_request;
-  const number = pull?.number;
-  if (typeof number !== 'number' || !pull?.base || !pull.head) {
+  if (!pull || typeof pull.number !== 'number' || !pull.base || !pull.head) {
     io.out('pr-identity: not a pull request; nothing to check');
     return 0;
   }
+  const { number } = pull;
   const notAdopted = notAdoptedLine(sys, sys.cwd, 'pr-identity');
   if (notAdopted) {
     io.out(notAdopted);
@@ -141,17 +145,14 @@ export async function prIdentity(sys: Sys, io: Output): Promise<number> {
   const shas = (list: Commit[]): string => list.map((commit) => commit.sha.slice(0, 7)).join(', ');
   const claim = (list: Commit[]): string => `claim${list.length === 1 ? 's' : ''} ${either([...new Set(list.map((commit) => claimed(commit) as string))])}`;
   const head = pull.head.repo?.full_name;
-  if (agentCommits.length > 0 && !head) {
+  if (agentCommits.length === 0) {
+    // Nothing to ask GitHub.
+  } else if (!head) {
     // A deleted fork takes its push record with it.
     problems.push(`#${number}'s head repository is gone, so no record says who pushed ${shas(agentCommits)}, which ${claim(agentCommits)}`);
-  } else if (head) {
+  } else {
     const branch = { repo: head, ref: pull.head.ref, base: pull.base.sha, commits: commits.map((commit) => commit.sha) };
-    let pushers = new Map<string, string | null>();
-    for (let read = 1; agentCommits.length > 0; read++) {
-      pushers = await whoPushed(sys, token, branch);
-      if (read === RECORD_READS || agentCommits.every((commit) => pushers.has(commit.sha))) break;
-      await sys.sleep(RECORD_WAIT_MS);
-    }
+    const pushers = await recordedPushers(sys, token, branch, agentCommits, 1);
     const byPusher = new Map<string, Commit[]>();
     const unrecorded: Commit[] = [];
     for (const commit of agentCommits) {
@@ -180,7 +181,27 @@ export async function prIdentity(sys: Sys, io: Output): Promise<number> {
   return 0;
 }
 
+/**
+ * Who pushed the commits, read from GitHub's record (read `read` of
+ * RECORD_READS), and read again RECORD_WAIT_MS later until it names them all.
+ */
+async function recordedPushers(
+  sys: Sys,
+  token: string,
+  branch: { repo: string; ref: string; base: string; commits: string[] },
+  agentCommits: Commit[],
+  read: number,
+): Promise<Map<string, string | null>> {
+  const pushers = await whoPushed(sys, token, branch);
+  if (read === RECORD_READS || agentCommits.every((commit) => pushers.has(commit.sha))) return pushers;
+  await sys.sleep(RECORD_WAIT_MS);
+  return recordedPushers(sys, token, branch, agentCommits, read + 1);
+}
+
 const ZERO = /^0+$/;
+const NEXT = /<([^>]+)>;\s*rel="next"/;
+
+type Push = { before: string; after: string; activity_type: string; actor: { login: string } | null };
 
 /**
  * Who pushed each of a pull request's commits, from GitHub's record of the
@@ -193,30 +214,39 @@ export async function whoPushed(
   token: string,
   branch: { repo: string; ref: string; base: string; commits: string[] },
 ): Promise<Map<string, string | null>> {
-  const pushes: { before: string; after: string; activity_type: string; actor: { login: string } | null }[] = [];
   // The activity list pages by cursor: each reply's Link header names the next page.
   const ref = encodeURIComponent(`refs/heads/${branch.ref}`);
-  for (let url: string | undefined = `${API}/repos/${branch.repo}/activity?ref=${ref}&per_page=100`; url; ) {
-    const { status, json, headers = {} } = await sys.http(url, { token });
-    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot read the pushes to ${branch.ref} (HTTP ${status})`);
-    pushes.push(...(json as typeof pushes));
-    url = /<([^>]+)>;\s*rel="next"/.exec(headers.link ?? '')?.[1];
-  }
+  const pushes = await pushesFrom(sys, token, branch.ref, `${API}/repos/${branch.repo}/activity?ref=${ref}&per_page=100`, []);
   const wanted = new Set(branch.commits);
   const pushers = new Map<string, string | null>();
   for (const push of pushes.reverse()) {
     if (ZERO.test(push.after)) continue;
     const from = push.activity_type === 'push' && !ZERO.test(push.before) ? push.before : branch.base;
     // Every page of what the push brought, so no commit is left for the fallback.
-    for (let page = 1; ; page++) {
-      const { status, json } = await sys.http(`${API}/repos/${branch.repo}/compare/${from}...${push.after}?per_page=100&page=${page}`, { token });
-      if (status !== 200) throw new Error(`cannot compare ${from.slice(0, 7)}...${push.after.slice(0, 7)} (HTTP ${status})`);
-      const brought = (json as { commits?: { sha: string }[] } | null)?.commits ?? [];
-      for (const { sha } of brought) {
-        if (wanted.has(sha) && !pushers.has(sha)) pushers.set(sha, push.actor?.login ?? null);
-      }
-      if (brought.length < 100) break;
+    for (const sha of await brought(sys, token, branch.repo, from, push.after, 1)) {
+      if (wanted.has(sha) && !pushers.has(sha)) pushers.set(sha, push.actor?.login ?? null);
     }
   }
   return pushers;
+}
+
+/** `seen` and the pushes listed at `url` and the pages its Link headers name after it. */
+async function pushesFrom(sys: Sys, token: string, ref: string, url: string, seen: Push[]): Promise<Push[]> {
+  const { status, json, headers = {} } = await sys.http(url, { token });
+  if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot read the pushes to ${ref} (HTTP ${status})`);
+  const pushes = [...seen, ...(json as Push[])];
+  const next = headers.link?.match(NEXT)?.[1];
+  return next ? pushesFrom(sys, token, ref, next, pushes) : pushes;
+}
+
+/**
+ * The commits GitHub's compare of `from` with `to` lists, page `page` on. A
+ * compare that lists no commits is not an answer: it fails as a refusal does.
+ */
+async function brought(sys: Sys, token: string, repo: string, from: string, to: string, page: number): Promise<string[]> {
+  const { status, json } = await sys.http(`${API}/repos/${repo}/compare/${from}...${to}?per_page=100&page=${page}`, { token });
+  const commits = (json as { commits?: unknown } | null)?.commits;
+  if (status !== 200 || !Array.isArray(commits)) throw new Error(`cannot compare ${from.slice(0, 7)}...${to.slice(0, 7)} (HTTP ${status})`);
+  const shas = (commits as { sha: string }[]).map(({ sha }) => sha);
+  return shas.length < 100 ? shas : [...shas, ...(await brought(sys, token, repo, from, to, page + 1))];
 }
