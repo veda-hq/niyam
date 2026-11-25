@@ -50,6 +50,21 @@ describe('appendToArray', () => {
     assert.throws(() => appendToArray('{ "hooks": { "SessionStart": {} } }', ['hooks'], 'SessionStart', 1), /^Error: hooks\.SessionStart is not an array$/);
     const repeated = appendToArray('{ "hooks": "x", "hooks": { "SessionStart": [] } }', ['hooks'], 'SessionStart', 1);
     assert.deepEqual(JSON.parse(repeated), { hooks: { SessionStart: [1] } });
+    assert.throws(() => appendToArray('{ "a": "x" }', ['a', 'b'], 'k', 1), /^Error: a is not an object$/, 'names the path up to the value, no further');
+    assert.throws(() => appendToArray('{ "a": { "b": 1 } }', ['a', 'b', 'c'], 'k', 1), /^Error: a\.b is not an object$/);
+  });
+
+  it('reads every kind of value on the way, with or without space around it', () => {
+    const text = '{"s":"a\\\\","q":"\\"{[","n":-1.5e3,"t":true,"f":false,"z":null,"o":{"x":[1,{"y":"]}"}]},"e":{},"l":[],"k":[0]}';
+    assert.equal(appendToArray(text, [], 'k', 1), text.replace('"k":[0]', '"k":[0,\n  1]'));
+    const spaced = '{ \t\r\n"o" : { "x" : [ 1 , 2 ] } ,\n "k" :\t[ 0 ] \n}';
+    assert.equal(appendToArray(spaced, [], 'k', 1), '{ \t\r\n"o" : { "x" : [ 1 , 2 ] } ,\n "k" :\t[ 0,\r\n  1 ] \n}');
+    assert.equal(appendToArray(spaced, ['o'], 'x', 3), '{ \t\r\n"o" : { "x" : [ 1 , 2,\r\n 3 ] } ,\n "k" :\t[ 0 ] \n}');
+  });
+
+  it('fills an array of spaces alone as an empty one', () => {
+    assert.equal(appendToArray('{\n  "k": [ \n ]\n}', [], 'k', 1), '{\n  "k": [\n   1\n ]\n}');
+    assert.equal(appendToArray('{ \n }', [], 'k', 1), '{\n  "k": [\n   1\n  ]\n }');
   });
 });
 
@@ -78,6 +93,25 @@ describe('replaceValues', () => {
     assert.deepEqual(replaceValues(text, ['hooks', 'Stop', '1', 'timeout'], () => 9), { text: '{"hooks":{"Stop":[{"timeout":1},{"timeout":9}]}}', replaced: 1 });
     assert.deepEqual(replaceValues(text, ['hooks', 'Stop', '2', 'timeout'], () => 9), { text, replaced: 0 }, 'past the end');
     assert.deepEqual(replaceValues(text, ['hooks', '0'], () => 9), { text, replaced: 0 }, 'an index into an object');
+    assert.deepEqual(replaceValues('{"a":"xy"}', ['a', '0'], () => 9), { text: '{"a":"xy"}', replaced: 0 }, 'an index into a string');
+    assert.deepEqual(replaceValues('{"a":1}', ['a', '*'], () => 9), { text: '{"a":1}', replaced: 0 }, 'every element of a number');
+  });
+
+  it('takes only digits as an index', () => {
+    const text = '[5,6]';
+    for (const name of ['', '1e0', '0x1', ' 1', 'a1', '1a']) assert.deepEqual(replaceValues(text, [name], () => 9), { text, replaced: 0 }, JSON.stringify(name));
+    assert.deepEqual(replaceValues(text, ['1'], () => 9), { text: '[5,9]', replaced: 1 });
+    const eleven = JSON.stringify(Array.from({ length: 11 }, (_, i) => i));
+    assert.deepEqual(replaceValues(eleven, ['10'], () => 99), { text: eleven.replace('10]', '99]'), replaced: 1 }, 'an index of two digits');
+  });
+
+  it('reads past a string that holds spaces, commas and brackets', () => {
+    assert.deepEqual(replaceValues('[" a, b] ", 1]', ['1'], () => 2), { text: '[" a, b] ", 2]', replaced: 1 });
+    assert.deepEqual(replaceValues('{"a":"x y","b":1}', ['b'], () => 2), { text: '{"a":"x y","b":2}', replaced: 1 });
+  });
+
+  it('swaps values of another length, each where it stood', () => {
+    assert.deepEqual(replaceValues('[1, 2,3]', ['*'], (value) => (value as number) * 100), { text: '[100, 200,300]', replaced: 3 });
   });
 });
 
@@ -103,6 +137,21 @@ describe('removeElements', () => {
     assert.deepEqual(removeElements(text, ['hooks', 'Stop'], own), { text, removed: 0 });
     assert.deepEqual(removeElements(text, ['hooks', 'x'], own), { text, removed: 0 });
     assert.deepEqual(removeElements(text, ['nothing'], own), { text, removed: 0 });
+    const uneven = '{ "a": [1, 2,3], "e": [ ] }';
+    assert.deepEqual(removeElements(uneven, ['a'], () => false), { text: uneven, removed: 0 }, 'separators as written');
+    assert.deepEqual(removeElements(uneven, ['e'], () => true), { text: uneven, removed: 0 }, 'an empty array as written');
+    const other = '{ "a": { "b": 1 }, "s": "xy" }';
+    for (const name of ['a', 's']) assert.deepEqual(removeElements(other, [name], () => true), { text: other, removed: 0 }, `${name} is no array`);
+  });
+
+  it('empties an array whose every element goes, space and all', () => {
+    assert.deepEqual(removeElements('{ "a": [ 1, 2 ] }', ['a'], () => true), { text: '{ "a": [] }', removed: 2 });
+    assert.deepEqual(removeElements('{ "a": [ 1 ] }', ['a'], () => true), { text: '{ "a": [] }', removed: 1 });
+  });
+
+  it('keeps one element as written, and joins those kept with the first separator', () => {
+    assert.deepEqual(removeElements('[ 1 , 2 ]', [], (value) => value === 2), { text: '[ 1 ]', removed: 1 });
+    assert.deepEqual(removeElements('[1, 2,  3]', [], (value) => value === 2), { text: '[1, 3]', removed: 1 });
   });
 });
 
@@ -127,11 +176,16 @@ describe('setMember', () => {
     assert.deepEqual(JSON.parse(setMember(text, ['hooks', '0'], 'timeout', 9)).hooks, [{ command: 'a', timeout: 9 }, { command: 'b', timeout: 1 }]);
     assert.throws(() => setMember(text, ['hooks', '2'], 'timeout', 9), /^Error: hooks\.2 is not there$/);
     assert.throws(() => setMember(text, ['hooks'], 'timeout', 9), /^Error: hooks is not an object$/);
+    assert.throws(() => setMember(text, ['hooks', '2', 'x'], 'k', 9), /^Error: hooks\.2 is not there$/, 'names the path up to the missing element, no further');
+    assert.throws(() => setMember(text, ['hooks', '10'], 'k', 9), /^Error: hooks\.10 is not there$/, 'an index of two digits');
+    for (const name of ['x1', '1x']) assert.throws(() => setMember(text, ['hooks', name], 'k', 9), /^Error: hooks is not an object$/, name);
+    assert.throws(() => setMember('{ "env": "x" }', ['env', '0'], 'k', 9), /^Error: env is not an object$/, 'only an array is walked into by an index');
   });
 
   it('refuses a value on the way that is not an object, and undefined', () => {
     assert.throws(() => setMember('{ "env": [] }', ['env'], 'A', '1'), /^Error: env is not an object$/);
     assert.throws(() => setMember('{}', ['env'], 'A', undefined), /^Error: env\.A cannot be set to undefined$/);
+    assert.throws(() => setMember('{ "a": { "b": "s" } }', ['a', 'b', 'c'], 'k', 1), /^Error: a\.b is not an object$/);
   });
 
   it('swaps in an object in the file\'s layout', () => {

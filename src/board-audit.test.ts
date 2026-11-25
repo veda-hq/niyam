@@ -6,6 +6,7 @@ import { auditArgs, boardAudit } from './board-audit.ts';
 import { BUILT_IN, Board, OWNER_TOKEN, SLUG, URL } from './fake-board.test.ts';
 import { FakeSys, ROOT, capture } from './fake.test.ts';
 import { run } from './run.ts';
+import type { HttpResult } from './types.ts';
 
 const SETTINGS = `${ROOT}/.github/niyam.json`;
 const CONTENTS = `/repos/${SLUG}/contents/.github/niyam.json`;
@@ -18,7 +19,25 @@ function setUp(settings: Record<string, unknown> = {}): { sys: FakeSys; board: B
   sys.env = { GH_TOKEN: OWNER_TOKEN };
   sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: 'ExampleBot', ...settings }));
   board.project = { fields: [...BUILT_IN], linked: true };
+  // No audit here reads 30 pages: past them GitHub refuses, so a read that never ends fails at once.
+  const answer = sys.routes.get(GRAPHQL) as () => HttpResult;
+  let asked = 0;
+  sys.route('POST', '/graphql', () => (++asked > 30 ? { status: 500, json: { message: 'read more pages than the board has' } } : answer()));
   return { sys, board };
+}
+
+const GRAPHQL = 'POST https://api.github.com/graphql';
+
+/** The board's items with `extra` added to the last page, as GitHub may list them. */
+function withItems(sys: FakeSys, extra: Record<string, unknown>[]): void {
+  const answer = sys.routes.get(GRAPHQL) as () => HttpResult;
+  sys.route('POST', '/graphql', () => {
+    const asked = (sys.requests.at(-1)?.body as { query: string }).query;
+    const result = answer();
+    if (!asked.includes('BoardAuditItems')) return result;
+    const { data } = result.json as { data: { node: { items: { nodes: unknown[] } } } };
+    return { ...result, json: { data: { node: { ...data.node, items: { ...data.node.items, nodes: [...data.node.items.nodes, ...extra] } } } } };
+  });
 }
 
 async function audit(sys: FakeSys, args: string[] = []): Promise<{ code: number; out: string[]; err: string[] }> {
@@ -127,6 +146,39 @@ describe('board-audit', () => {
     );
   });
 
+  it('reads a missing issue on a later page', async () => {
+    const { sys, board } = setUp();
+    board.itemsPerPage = 1;
+    board.auditIssues = [{ number: 1, on: [{}] }, { number: 2 }];
+    const { code, out } = await audit(sys);
+    assert.equal(code, 3);
+    assert.ok(out.includes('  #2 Issue 2'), out.join('\n'));
+  });
+
+  it('lists the missing and the archived by number', async () => {
+    const { sys, board } = setUp();
+    board.auditIssues = [{ number: 5 }, { number: 3 }, { number: 4 }, { number: 9, on: [{ archived: true }] }, { number: 6, on: [{ archived: true }] }, { number: 8, on: [{ archived: true }] }];
+    const { out } = await audit(sys);
+    assert.deepEqual(out.slice(4, 9), [
+      `✗ 3 open issues are not on the board: add them at ${URL} (+ Add item, then #N), or gh project item-add`,
+      '  #3 Issue 3',
+      '  #4 Issue 4',
+      '  #5 Issue 5',
+      '- 3 open issues are archived on the board, so hidden there; restore any that belong on it: #6, #8, #9',
+    ]);
+  });
+
+  it('passes over an item with no number or no repository, and names one with no title by its number', async () => {
+    const { sys } = setUp();
+    withItems(sys, [
+      { isArchived: false, status: { name: 'Done' }, content: { __typename: 'Issue', title: 'no number', state: 'OPEN', repository: { nameWithOwner: SLUG } } },
+      { isArchived: false, status: { name: 'Done' }, content: { __typename: 'Issue', number: 60, title: 'no repository', state: 'OPEN' } },
+      { isArchived: false, status: { name: 'Done' }, content: { __typename: 'Issue', number: 50, state: 'OPEN', repository: { nameWithOwner: SLUG } } },
+    ]);
+    const { out } = await audit(sys);
+    assert.deepEqual(out.slice(-3), [`✗ 1 item's Status disagrees with the issue: set it at ${URL}`, '  #50 is open, Status Done: ', 'board-audit: 1 to fix']);
+  });
+
   it("audits the Project the clone's settings name, or the one named with --project", async () => {
     const { sys, board } = setUp({ project: ' Athya work ' });
     board.project!.title = 'Athya work';
@@ -149,8 +201,42 @@ describe('board-audit', () => {
     assert.equal(out[0], `board-audit: ${SLUG} on "Athya work" (${URL})`);
   });
 
+  it("reads another repository's settings from GitHub, even inside a clone with its own", async () => {
+    const { sys, board } = setUp({ project: 'Local work' });
+    board.project!.title = 'Other work';
+    sys.route('GET', '/repos/example-org/other/contents/.github/niyam.json', { status: 200, json: { content: Buffer.from(JSON.stringify({ project: 'Other work' })).toString('base64') } });
+    assert.deepEqual((await audit(sys, ['example-org/other'])).err, ['niyam board-audit: GitHub shows no repository example-org/other']);
+    assert.equal(sys.requests.find((request) => request.url.endsWith('/repos/example-org/other/contents/.github/niyam.json'))?.token, OWNER_TOKEN);
+  });
+
+  it('reads the settings from GitHub in a clone that has none', async () => {
+    const { sys, board } = setUp();
+    sys.files.delete(SETTINGS);
+    board.project!.title = 'Athya work';
+    sys.route('GET', CONTENTS, { status: 200, json: { content: Buffer.from(JSON.stringify({ project: 'Athya work' })).toString('base64') } });
+    const { code, out } = await audit(sys);
+    assert.equal(code, 0);
+    assert.equal(out[0], `board-audit: ${SLUG} on "Athya work" (${URL})`);
+  });
+
+  it('could not run when GitHub answers the settings with no content, or refuses them with some', async () => {
+    for (const [status, json] of [[200, {}], [200, { content: 7 }], [500, { content: Buffer.from('{}').toString('base64') }]] as const) {
+      const { sys } = setUp();
+      sys.inRepo = false;
+      sys.route('GET', CONTENTS, { status, json });
+      assert.deepEqual((await audit(sys, [SLUG])).err, [`niyam board-audit: cannot read ${SLUG}'s .github/niyam.json (HTTP ${status})`], JSON.stringify(json));
+    }
+  });
+
   it('takes "<repo> work" when the settings GitHub has name no Project, or there are none', async () => {
-    for (const answer of [{ status: 404, json: null }, { status: 200, json: { content: Buffer.from('{}').toString('base64') } }]) {
+    for (const answer of [
+      { status: 404, json: null },
+      { status: 200, json: { content: Buffer.from('{}').toString('base64') } },
+      { status: 200, json: { content: Buffer.from('null').toString('base64') } },
+      { status: 200, json: { content: Buffer.from('"x"').toString('base64') } },
+      { status: 200, json: { content: Buffer.from(JSON.stringify({ project: '   ' })).toString('base64') } },
+      { status: 200, json: { content: Buffer.from(JSON.stringify({ project: 7 })).toString('base64') } },
+    ]) {
       const { sys } = setUp();
       sys.origin = 'https://github.com/example-org/another.git';
       sys.route('GET', CONTENTS, answer);
@@ -197,6 +283,26 @@ describe('board-audit', () => {
       assert.deepEqual(err, []);
       assert.equal(code, 0);
       assert.ok(readsAs(sys, AGENT_TOKEN));
+      const top = sys.calls.find((call) => call.command === 'git' && call.args[0] === 'rev-parse');
+      assert.deepEqual([top?.args, top?.cwd], [['rev-parse', '--show-toplevel'], ROOT]);
+    });
+
+    it('takes a git that fails as no clone, whatever it printed, and a clone with no settings as none', async () => {
+      const failed = setUp({ agent: 'OtherBot' });
+      failed.sys.env = {};
+      setUpAgent(failed.sys, 'ExampleBot');
+      failed.sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      failed.sys.execOverride = (call) => (call.command === 'git' && call.args.join(' ') === 'rev-parse --show-toplevel' ? { code: 128, stdout: `${ROOT}\n`, stderr: 'fatal' } : undefined);
+      assert.deepEqual((await audit(failed.sys, [SLUG, '--project', 'example-app work'])).err, []);
+      assert.ok(readsAs(failed.sys, AGENT_TOKEN), 'as the one agent set up here, not the OtherBot the settings name');
+
+      const bare = setUp();
+      bare.sys.env = {};
+      bare.sys.files.delete(SETTINGS);
+      setUpAgent(bare.sys, 'ExampleBot');
+      bare.sys.keychain.set('niyam/ExampleBot', AGENT_TOKEN);
+      assert.deepEqual((await audit(bare.sys, [SLUG, '--project', 'example-app work'])).err, []);
+      assert.ok(readsAs(bare.sys, AGENT_TOKEN));
     });
 
     it("reads the keychain under the login as niyam machine spelled it, whatever case the settings use", async () => {
@@ -309,6 +415,8 @@ describe('board-audit', () => {
     assert.throws(() => auditArgs(['--project', '--x']), /needs the Project's title/);
     assert.throws(() => auditArgs(['a/b', 'c/d']), /not "c\/d"/);
     assert.throws(() => auditArgs(['--fix']), /takes \[owner\/repo\] \[--project <title>\], not "--fix"/);
+    for (const arg of ['x a/b', 'a/b c', 'a/b/c']) assert.throws(() => auditArgs([arg]), new RegExp(`not "${arg}"`), arg);
+    assert.deepEqual(auditArgs(['--project', 'One', 'a/b', '--project', 'Two']), { slug: 'a/b', project: 'Two' }, 'the last --project counts');
     const { sys } = setUp();
     const { code, err } = await audit(sys, ['--fix']);
     assert.equal(code, 2);

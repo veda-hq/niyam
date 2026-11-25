@@ -49,6 +49,9 @@ function actions(action: string, actor: string, commits: Record<string, unknown>
     const from = push.type === 'push' && push.before !== ZERO ? push.before : BASE;
     sys.route('GET', compare(from, push.after), { status: 200, json: { commits: push.brings.map((sha) => ({ sha })) } });
   }
+  // A run reads the record six times at most, so it waits five times at most: a sixth wait fails at once.
+  const sleep = sys.sleep.bind(sys);
+  sys.sleep = (ms) => (sys.slept.length >= 5 ? Promise.reject(new Error('waited more than the reads allow')) : sleep(ms));
   return sys;
 }
 
@@ -383,11 +386,19 @@ describe('prIdentity', () => {
 
     it('checks a draft when a tested pull request has more commits than GitHub lists', async () => {
       const many = Array.from({ length: 100 }, (_, index) => ({ sha: `t${index}` }));
-      const sys = queued([commit('a1', 'agent'), merge('m1', 2)], { theirs: {} });
-      for (const page of [1, 2, 3]) sys.route('GET', `${REPO}/pulls/2/commits?per_page=100&page=${page}`, { status: 200, json: many });
-      const { code, out } = await check(sys);
-      assert.equal(code, 1);
-      assert.match(out[0] ?? '', /but #2 has 250 or more commits, more than GitHub lists; checked as any pull request$/);
+      for (const last of [100, 50]) {
+        const sys = queued([commit('a1', 'agent'), merge('m1', 2)], { theirs: {} });
+        for (const page of [1, 2]) sys.route('GET', `${REPO}/pulls/2/commits?per_page=100&page=${page}`, { status: 200, json: many });
+        sys.route('GET', `${REPO}/pulls/2/commits?per_page=100&page=3`, { status: 200, json: many.slice(0, last) });
+        const { code, out } = await check(sys);
+        assert.equal(code, 1);
+        assert.match(out[0] ?? '', /but #2 has 250 or more commits, more than GitHub lists; checked as any pull request$/, `${200 + last}`);
+      }
+    });
+
+    it('names every stray commit of a forged draft by its first seven characters', async () => {
+      const { out } = await check(queued([commit('a1', 'agent'), commit('f1f1f1f1f1', 'agent'), commit('f2f2f2f2f2', 'agent'), merge('m1', 2)]));
+      assert.equal(out[0], "pr-identity: #7 is shaped as mergify[bot]'s merge queue draft testing #2, but f1f1f1f, f2f2f2f are in no pull request it tests and not mergify[bot]'s signed merge; checked as any pull request");
     });
 
     it('throws when GitHub will not list a tested pull request’s commits', async () => {
@@ -432,10 +443,137 @@ describe('prIdentity', () => {
     });
   }
 
-  it('reads a compare with no commits as bringing none', async () => {
-    const sys = actions('reopened', AGENT, [commit('a1', 'agent')], [created(AGENT, [])]);
-    sys.route('GET', compare(BASE, 'h1'), { status: 200, json: null });
-    assert.match((await check(sys)).err[0] ?? '', /^✗ no push GitHub has recorded to work brought a1/);
+  it('throws on a compare that lists no commits, as on a refusal', async () => {
+    for (const json of [null, {}, { commits: 'a1' }]) {
+      const sys = actions('reopened', AGENT, [commit('a1', 'agent')], [created(AGENT, [])]);
+      sys.route('GET', compare(BASE, 'h1'), { status: 200, json });
+      await assert.rejects(check(sys), /^Error: cannot compare base0\.\.\.h1 \(HTTP 200\)$/, JSON.stringify(json));
+    }
+  });
+
+  it('throws on a refusal even when it carries a list', async () => {
+    for (const [what, change, message] of [
+      ['the commits', (sys: FakeSys) => sys.route('GET', `${COMMITS}&page=1`, { status: 403, json: [] }), /^Error: cannot list the commits of #7 \(HTTP 403\)$/],
+      ['the pushes', (sys: FakeSys) => sys.route('GET', ACTIVITY, { status: 403, json: [] }), /^Error: cannot read the pushes to work \(HTTP 403\)$/],
+      ['a compare', (sys: FakeSys) => sys.route('GET', compare(BASE, 'h1'), { status: 500, json: { commits: [{ sha: 'a1' }] } }), /^Error: cannot compare base0\.\.\.h1 \(HTTP 500\)$/],
+    ] as const) {
+      const sys = actions('opened', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a1'])]);
+      change(sys);
+      await assert.rejects(check(sys), message, what);
+    }
+  });
+
+  it('throws on a list that is not one', async () => {
+    for (const [what, change, message] of [
+      ['the commits', (sys: FakeSys) => sys.route('GET', `${COMMITS}&page=1`, { status: 200, json: {} }), /^Error: cannot list the commits of #7 \(HTTP 200\)$/],
+      ['the pushes', (sys: FakeSys) => sys.route('GET', ACTIVITY, { status: 200, json: {} }), /^Error: cannot read the pushes to work \(HTTP 200\)$/],
+    ] as const) {
+      const sys = actions('opened', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a1'])]);
+      change(sys);
+      await assert.rejects(check(sys), message, what);
+    }
+  });
+
+  it('names a refused compare by the first seven characters of each end', async () => {
+    const sys = actions('synchronize', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a0'], 'b0b0b0b0b0'), pushed(AGENT, 'b0b0b0b0b0', 'h1h1h1h1h1', ['a1'])]);
+    sys.route('GET', compare('b0b0b0b0b0', 'h1h1h1h1h1'), { status: 500, json: null });
+    await assert.rejects(check(sys), /^Error: cannot compare b0b0b0b\.\.\.h1h1h1h \(HTTP 500\)$/);
+  });
+
+  it('needs each of the Actions variables', async () => {
+    for (const name of ['GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GH_TOKEN']) {
+      const sys = actions('opened', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a1'])]);
+      delete sys.env[name];
+      await assert.rejects(check(sys), /^Error: pr-identity runs in GitHub Actions: GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set$/, name);
+    }
+  });
+
+  it('skips a repository not adopted on its base, and one with pr-identity off, asking GitHub nothing', async () => {
+    const bare = actions('opened', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a1'])]);
+    bare.files.delete(`${ROOT}/.github/niyam.json`);
+    assert.deepEqual(await check(bare), {
+      code: 0,
+      out: ['pr-identity: the base branch has no .github/niyam.json, so the repo is not adopted on its base yet; nothing to check'],
+      err: [],
+    });
+    const off = actions('opened', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a1'])]);
+    off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: [] }));
+    assert.deepEqual(await check(off), { code: 0, out: ['pr-identity: pr-identity is off in .github/niyam.json; nothing to check'], err: [] });
+    for (const sys of [bare, off]) assert.deepEqual(sys.requests, []);
+  });
+
+  it('skips a pull request event missing its number, base or head', async () => {
+    const whole = { number: 7, base: { sha: BASE }, head: { ref: 'work', repo: { full_name: 'example-org/example-app' } } };
+    for (const lacking of ['number', 'base', 'head'] as const) {
+      const sys = actions('opened', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a1'])]);
+      const { [lacking]: _, ...pull } = whole;
+      sys.files.set(EVENT, JSON.stringify({ action: 'opened', pull_request: pull }));
+      assert.deepEqual((await check(sys)).out, ['pr-identity: not a pull request; nothing to check'], lacking);
+    }
+  });
+
+  it('checks exactly 249 commits, and fails closed at exactly 250', async () => {
+    const owners = (n: number, from = 0) => Array.from({ length: n }, (_, i) => commit(`o${from + i}`, 'owner'));
+    for (const [last, code] of [[49, 0], [50, 1]] as const) {
+      const sys = actions('opened', 'example-owner', owners(100));
+      sys.route('GET', `${COMMITS}&page=2`, { status: 200, json: owners(100, 100) });
+      sys.route('GET', `${COMMITS}&page=3`, { status: 200, json: owners(last, 200) });
+      assert.equal((await check(sys)).code, code, `${200 + last} commits`);
+      assert.equal(sys.requests.filter((r) => r.url.includes('/commits?')).length, 3);
+    }
+  });
+
+  it('reads a commit with no commit details, or no author address, as not the agent', async () => {
+    const sys = actions('opened', 'example-owner', [{ sha: 'o1', author: { login: 'example-owner' } }, { sha: 'o2', author: null, commit: { author: {} } }]);
+    assert.deepEqual((await check(sys)).out, ['✓ pr-identity: 0 commits by ExampleBot, each Verified and pushed by ExampleBot']);
+  });
+
+  it('fails a Verified commit that claims the agent with no committer', async () => {
+    const lone = commit('c4', 'agent');
+    lone.committer = null;
+    const sys = actions('opened', AGENT, [lone], [created(AGENT, ['c4'])]);
+    assert.equal((await check(sys)).err[0], '✗ c4 claims ExampleBot but is not Verified as ExampleBot (committer none, valid)');
+  });
+
+  it('names commits by their first seven characters, and one commit in the singular', async () => {
+    const sys = actions('opened', 'example-owner', [commit('a1a1a1a1a1', 'agent')], [created('example-owner', ['a1a1a1a1a1'])]);
+    assert.equal((await check(sys)).err[0], '✗ example-owner pushed a1a1a1a, which claims ExampleBot; agent work must be pushed by ExampleBot');
+    const one = actions('opened', AGENT, [commit('a1', 'agent')], [created(AGENT, ['a1'])]);
+    assert.deepEqual((await check(one)).out, ['✓ pr-identity: 1 commit by ExampleBot, each Verified and pushed by ExampleBot']);
+  });
+
+  it('reads the record again until it names every agent commit, not just one', async () => {
+    const sys = actions('synchronize', AGENT, [commit('a1', 'agent'), commit('a2', 'agent')]);
+    let reads = 0;
+    sys.route('GET', ACTIVITY, () => ({
+      status: 200,
+      json: [
+        ...(++reads < 2 ? [] : [{ activity_type: 'push', actor: { login: AGENT }, before: 'h1', after: 'h2' }]),
+        { activity_type: 'branch_creation', actor: { login: AGENT }, before: ZERO, after: 'h1' },
+      ],
+    }));
+    sys.route('GET', compare(BASE, 'h1'), { status: 200, json: { commits: [{ sha: 'a1' }] } });
+    sys.route('GET', compare('h1', 'h2'), { status: 200, json: { commits: [{ sha: 'a2' }] } });
+    assert.equal((await check(sys)).code, 0);
+    assert.deepEqual(sys.slept, [10_000]);
+  });
+
+  it('takes only a sha of zeros alone as none', async () => {
+    const sys = actions('synchronize', AGENT, [commit('a1', 'agent'), commit('a2', 'agent')], [created(AGENT, ['a1'], '0h1'), pushed(AGENT, '0h1', 'h20', ['a2'])]);
+    assert.equal((await check(sys)).code, 0);
+  });
+
+  it('follows a Link header with no space before rel', async () => {
+    const sys = actions('opened', AGENT, [commit('a1', 'agent')]);
+    const next = 'https://api.github.com/repos/example-org/example-app/activity?after=CURSOR';
+    sys.route('GET', ACTIVITY, { status: 200, json: [], headers: { link: `<${next}>;rel="next"` } });
+    sys.route('GET', next, {
+      status: 200,
+      json: [{ activity_type: 'branch_creation', actor: { login: AGENT }, before: ZERO, after: 'h1' }],
+      headers: { link: `<${ACTIVITY}>; rel="first"` },
+    });
+    sys.route('GET', compare(BASE, 'h1'), { status: 200, json: { commits: [{ sha: 'a1' }] } });
+    assert.equal((await check(sys)).code, 0);
   });
 });
 
@@ -477,7 +615,6 @@ describe('prIdentity with two agents', () => {
 
   it('names every agent the unrecorded commits claim', async () => {
     const sys = team([commit('a1', 'agent'), other('b1')], []);
-    sys.sleep = () => Promise.resolve();
     assert.deepEqual((await check(sys)).err, [
       '✗ no push GitHub has recorded to work brought a1, b1, which claim ExampleBot or OtherBot; re-run once GitHub records the push',
       'pr-identity: #7 fails the identity check',

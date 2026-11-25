@@ -20,20 +20,20 @@ type Page<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string
 
 /** board-audit's options: the repository, and the Project's title. */
 export function auditArgs(args: readonly string[]): { slug?: string; project?: string } {
-  const parsed: { slug?: string; project?: string } = {};
-  for (let at = 0; at < args.length; at++) {
-    const arg = args[at] as string;
-    if (arg === '--project') {
-      const value = args[++at];
-      if (!value || value.startsWith('-')) throw new Error("board-audit --project needs the Project's title");
-      parsed.project = value;
-    } else if (parsed.slug === undefined && /^[\w.-]+\/[\w.-]+$/.test(arg)) {
-      parsed.slug = arg;
-    } else {
-      throw new Error(`board-audit takes [owner/repo] [--project <title>], not "${arg}"`);
-    }
+  return argsFrom(args, {});
+}
+
+/** `parsed` with the options in `args` added. */
+function argsFrom(args: readonly string[], parsed: { slug?: string; project?: string }): { slug?: string; project?: string } {
+  const [arg, ...rest] = args;
+  if (arg === undefined) return parsed;
+  if (arg === '--project') {
+    const [value, ...after] = rest;
+    if (!value || value.startsWith('-')) throw new Error("board-audit --project needs the Project's title");
+    return argsFrom(after, { ...parsed, project: value });
   }
-  return parsed;
+  if (parsed.slug === undefined && /^[\w.-]+\/[\w.-]+$/.test(arg)) return argsFrom(rest, { ...parsed, slug: arg });
+  throw new Error(`board-audit takes [owner/repo] [--project <title>], not "${arg}"`);
 }
 
 /** The `project` the repository's settings name, from the clone here when it is that repository, else from GitHub; undefined when they name none. */
@@ -41,10 +41,9 @@ async function settingsTitle(sys: Sys, token: string, slug: string): Promise<str
   let text: string | undefined;
   try {
     const here = repoAt(sys);
-    const path = `${here.root}/${SETTINGS_PATH}`;
-    if (here.slug.toLowerCase() === slug.toLowerCase() && sys.exists(path)) text = sys.read(path);
+    if (here.slug.toLowerCase() === slug.toLowerCase()) text = sys.read(`${here.root}/${SETTINGS_PATH}`);
   } catch {
-    // fail-open: not in a clone, so the settings come from GitHub, read next.
+    // fail-open: not in a clone, or a clone without settings, so the settings come from GitHub, read next.
   }
   if (text === undefined) {
     const { status, json } = await sys.http(`${API}/repos/${slug}/contents/${SETTINGS_PATH}`, { token });
@@ -53,9 +52,59 @@ async function settingsTitle(sys: Sys, token: string, slug: string): Promise<str
     if (status !== 200 || typeof content !== 'string') throw new Error(`cannot read ${slug}'s ${SETTINGS_PATH} (HTTP ${status})`);
     text = Buffer.from(content, 'base64').toString('utf8');
   }
-  const raw: unknown = JSON.parse(text);
-  const project = raw !== null && typeof raw === 'object' && 'project' in raw ? raw.project : undefined;
+  const project = (JSON.parse(text) as { project?: unknown } | null)?.project;
   return typeof project === 'string' && project.trim() ? project.trim() : undefined;
+}
+
+type Project = { id: string; title: string; url: string; closed: boolean };
+type Issue = { number: number; title: string; projectItems: { nodes: { isArchived: boolean; project: { id: string } }[] } };
+type Item = {
+  isArchived: boolean;
+  status: { name?: string } | null;
+  content: { __typename: string; number?: number; title?: string; state?: string; repository?: { nameWithOwner: string } } | null;
+};
+
+/** The open Project titled `title` of `owner`'s, from the page after `after` on; undefined when none is. */
+async function openProject(sys: Sys, token: string, owner: string, title: string, after: string | null): Promise<Project | undefined> {
+  const read = (await graphql(
+    sys,
+    token,
+    'query BoardAuditProject($login: String!, $title: String!, $after: String) { repositoryOwner(login: $login) { ... on ProjectV2Owner { projectsV2(first: 100, query: $title, after: $after) { nodes { id title url closed } pageInfo { hasNextPage endCursor } } } } }',
+    { login: owner, title, after },
+  )) as { repositoryOwner: { projectsV2?: Page<Project> } | null };
+  const projects = read.repositoryOwner?.projectsV2;
+  if (!projects) throw new Error(`GitHub shows no owner ${owner} with Projects`);
+  const project = projects.nodes.find((node) => node.title === title && !node.closed);
+  return project || !projects.pageInfo.hasNextPage ? project : openProject(sys, token, owner, title, projects.pageInfo.endCursor);
+}
+
+/** `seen` and `slug`'s open issues from the page after `after` on. */
+async function openIssues(sys: Sys, token: string, slug: string, after: string | null, seen: Issue[]): Promise<Issue[]> {
+  const [owner, name] = slug.split('/') as [string, string];
+  const read = (await graphql(
+    sys,
+    token,
+    'query BoardAuditIssues($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { issues(states: OPEN, first: 100, after: $after) { nodes { number title projectItems(first: 50, includeArchived: true) { nodes { isArchived project { id } } } } pageInfo { hasNextPage endCursor } } } }',
+    { owner, name, after },
+  )) as { repository: { issues: Page<Issue> } | null };
+  if (!read.repository) throw new Error(`GitHub shows no repository ${slug}`);
+  const { nodes, pageInfo } = read.repository.issues;
+  const issues = [...seen, ...nodes];
+  return pageInfo.hasNextPage ? openIssues(sys, token, slug, pageInfo.endCursor, issues) : issues;
+}
+
+/** The Project's items from the page after `after` on, with its workflows as the last page gives them. */
+async function projectItems(sys: Sys, token: string, id: string, after: string | null): Promise<{ items: Item[]; workflows: { name: string; enabled: boolean }[] }> {
+  const read = (await graphql(
+    sys,
+    token,
+    'query BoardAuditItems($id: ID!, $after: String) { node(id: $id) { ... on ProjectV2 { workflows(first: 50) { nodes { name enabled } } items(first: 100, after: $after) { nodes { isArchived status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } content { __typename ... on Issue { number title state repository { nameWithOwner } } } } pageInfo { hasNextPage endCursor } } } } }',
+    { id, after },
+  )) as { node: { workflows: { nodes: { name: string; enabled: boolean }[] }; items: Page<Item> } };
+  const { nodes, pageInfo } = read.node.items;
+  if (!pageInfo.hasNextPage) return { items: nodes, workflows: read.node.workflows.nodes };
+  const later = await projectItems(sys, token, id, pageInfo.endCursor);
+  return { items: [...nodes, ...later.items], workflows: later.workflows };
 }
 
 /**
@@ -66,69 +115,27 @@ async function settingsTitle(sys: Sys, token: string, slug: string): Promise<str
  * from.
  */
 export async function auditBoard(sys: Sys, token: string, slug: string, title: string): Promise<Audit> {
-  const [owner, name] = slug.split('/') as [string, string];
-  type Project = { id: string; title: string; url: string; closed: boolean };
-  let project: Project | undefined;
-  for (let after: string | null = null; ; ) {
-    const read = (await graphql(
-      sys,
-      token,
-      'query BoardAuditProject($login: String!, $title: String!, $after: String) { repositoryOwner(login: $login) { ... on ProjectV2Owner { projectsV2(first: 100, query: $title, after: $after) { nodes { id title url closed } pageInfo { hasNextPage endCursor } } } } }',
-      { login: owner, title, after },
-    )) as { repositoryOwner: { projectsV2?: Page<Project> } | null };
-    const projects = read.repositoryOwner?.projectsV2;
-    if (!projects) throw new Error(`GitHub shows no owner ${owner} with Projects`);
-    project = projects.nodes.find((node) => node.title === title && !node.closed);
-    if (project || !projects.pageInfo.hasNextPage) break;
-    after = projects.pageInfo.endCursor;
-  }
+  const [owner] = slug.split('/') as [string];
+  const project = await openProject(sys, token, owner, title, null);
   if (!project) throw new Error(`${owner} has no open Project titled "${title}"; name it with --project`);
 
-  type Issue = { number: number; title: string; projectItems: { nodes: { isArchived: boolean; project: { id: string } }[] } };
   const missing: Audit['missing'] = [];
   const archived: Audit['archived'] = [];
-  for (let after: string | null = null; ; ) {
-    const read = (await graphql(
-      sys,
-      token,
-      'query BoardAuditIssues($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { issues(states: OPEN, first: 100, after: $after) { nodes { number title projectItems(first: 50, includeArchived: true) { nodes { isArchived project { id } } } } pageInfo { hasNextPage endCursor } } } }',
-      { owner, name, after },
-    )) as { repository: { issues: Page<Issue> } | null };
-    if (!read.repository) throw new Error(`GitHub shows no repository ${slug}`);
-    for (const issue of read.repository.issues.nodes) {
-      const items = issue.projectItems.nodes.filter((item) => item.project.id === project.id);
-      if (items.some((item) => !item.isArchived)) continue;
-      (items.length > 0 ? archived : missing).push({ number: issue.number, title: issue.title });
-    }
-    if (!read.repository.issues.pageInfo.hasNextPage) break;
-    after = read.repository.issues.pageInfo.endCursor;
+  for (const issue of await openIssues(sys, token, slug, null, [])) {
+    const items = issue.projectItems.nodes.filter((item) => item.project.id === project.id);
+    if (items.some((item) => !item.isArchived)) continue;
+    (items.length > 0 ? archived : missing).push({ number: issue.number, title: issue.title });
   }
 
-  type Item = {
-    isArchived: boolean;
-    status: { name?: string } | null;
-    content: { __typename: string; number?: number; title?: string; state?: string; repository?: { nameWithOwner: string } } | null;
-  };
   const disagree: Audit['disagree'] = [];
-  let workflows: { name: string; enabled: boolean }[] = [];
-  for (let after: string | null = null; ; ) {
-    const read = (await graphql(
-      sys,
-      token,
-      'query BoardAuditItems($id: ID!, $after: String) { node(id: $id) { ... on ProjectV2 { workflows(first: 50) { nodes { name enabled } } items(first: 100, after: $after) { nodes { isArchived status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } content { __typename ... on Issue { number title state repository { nameWithOwner } } } } pageInfo { hasNextPage endCursor } } } } }',
-      { id: project.id, after },
-    )) as { node: { workflows: { nodes: { name: string; enabled: boolean }[] }; items: Page<Item> } };
-    workflows = read.node.workflows.nodes;
-    for (const item of read.node.items.nodes) {
-      const issue = item.content;
-      if (item.isArchived || issue?.__typename !== 'Issue' || issue.number === undefined || issue.repository?.nameWithOwner.toLowerCase() !== slug.toLowerCase()) continue;
-      const status = item.status?.name;
-      const done = status?.toLowerCase() === 'done';
-      const open = issue.state === 'OPEN';
-      if (open === done) disagree.push({ number: issue.number, title: issue.title ?? '', state: open ? 'open' : 'closed', status });
-    }
-    if (!read.node.items.pageInfo.hasNextPage) break;
-    after = read.node.items.pageInfo.endCursor;
+  const { items, workflows } = await projectItems(sys, token, project.id, null);
+  for (const item of items) {
+    const issue = item.content;
+    if (item.isArchived || issue?.__typename !== 'Issue' || issue.number === undefined || issue.repository?.nameWithOwner.toLowerCase() !== slug.toLowerCase()) continue;
+    const status = item.status?.name;
+    const done = status?.toLowerCase() === 'done';
+    const open = issue.state === 'OPEN';
+    if (open === done) disagree.push({ number: issue.number, title: issue.title ?? '', state: open ? 'open' : 'closed', status });
   }
   return {
     project: { title: project.title, url: project.url },

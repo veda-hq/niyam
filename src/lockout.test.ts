@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { pathsFor } from './agent.ts';
 import { AGENT, FakeSys, HOME, NOW } from './fake.test.ts';
 import { declinedPath, desktopAppStarted, exposure, exposureFindings, keyFindings, movedFindings, movedPath, ownerFixes, readDeclined, readMoved, recordMove, removeGitPassword, setAside, signOut } from './lockout.ts';
 
@@ -179,7 +180,16 @@ describe('a declined lockout', () => {
   });
 
   it('still warns about a git password saved after the owner declined only gh', () => {
-    assert.equal(setAside(found, { ghLogins: ['example-owner'], gitPassword: false }).left.gitPassword, true);
+    assert.deepEqual(setAside(found, { ghLogins: ['other-owner', 'example-owner'], gitPassword: false }), {
+      left: { ghLogins: ['new-owner'], gitPassword: true, openKeys: [OWNER_KEY], sshLogin: undefined },
+      kept: ['gh stays signed in as example-owner, as you chose'],
+    });
+  });
+
+  it('reads a record of a declined password', () => {
+    const sys = new FakeSys().ready();
+    sys.files.set(declinedPath(HOME, AGENT), JSON.stringify({ ghLogins: ['a', 'b'], gitPassword: true }));
+    assert.deepEqual(readDeclined(sys, AGENT), { ghLogins: ['a', 'b'], gitPassword: true });
   });
 
   it('reads no record, or one it cannot parse, as nothing declined', () => {
@@ -259,9 +269,115 @@ describe('moving gh to the agent', () => {
   it('reads no record, or a broken one, as no move', () => {
     const sys = new FakeSys().ready();
     assert.equal(readMoved(sys, AGENT), undefined);
-    for (const text of ['{not json', JSON.stringify({ at: 'soon', logins: ['a'] }), JSON.stringify({ at: NOW.toISOString(), logins: [] })]) {
+    for (const text of [
+      '{not json',
+      JSON.stringify({ at: 'soon', logins: ['a'] }),
+      JSON.stringify({ at: NOW.toISOString(), logins: [] }),
+      JSON.stringify({ at: NOW.toISOString(), logins: 'a' }),
+      JSON.stringify({ at: NOW.toISOString(), logins: [3] }),
+      // Date.parse reads the number 0 as the year 2000: only a string is a time.
+      JSON.stringify({ at: 0, logins: ['a'] }),
+    ]) {
       sys.files.set(movedPath(HOME, AGENT), text);
       assert.equal(readMoved(sys, AGENT), undefined, text);
     }
+    sys.files.set(movedPath(HOME, AGENT), JSON.stringify({ at: NOW.toISOString(), logins: ['a', 3, 'b'] }));
+    assert.deepEqual(readMoved(sys, AGENT), { at: NOW.toISOString(), logins: ['a', 'b'] }, 'the logins that are strings');
+  });
+
+  it('gives no steps for an app started the very second of the move', () => {
+    const sys = exposed();
+    lock(sys, ['example-owner']);
+    assert.deepEqual(movedFindings(since(sys, NOW), AGENT), []);
+    assert.deepEqual(movedFindings(since(sys, new Date(NOW.getTime() - 1000)), AGENT), ownerFixes(['example-owner']));
+  });
+
+  it('makes the agent folder before it records the move', () => {
+    const sys = exposed();
+    lock(sys, ['example-owner']);
+    assert.ok(sys.dirs.includes(pathsFor(HOME, AGENT).dir));
+  });
+});
+
+describe('what lockout asks this Mac, exactly', () => {
+  const OWNER_ENV = { GH_TOKEN: undefined, GITHUB_TOKEN: undefined, GH_CONFIG_DIR: undefined, KEEP: '1' };
+
+  it("asks gh, the keychain, ssh-keygen of each key but the agents' and the .pub halves, and ssh, as the owner", () => {
+    const sys = exposed();
+    sys.env = { GH_TOKEN: 'ghp_agent', KEEP: '1' };
+    exposure(sys, AGENT);
+    assert.deepEqual(
+      sys.calls.map(({ command, args, env, timeoutMs }) => ({ command, args, env, timeoutMs })),
+      [
+        { command: 'gh', args: ['auth', 'status', '-h', 'github.com'], env: OWNER_ENV, timeoutMs: undefined },
+        { command: '/usr/bin/security', args: ['find-internet-password', '-s', 'github.com'], env: undefined, timeoutMs: undefined },
+        ...['id_ed25519', 'id_rsa', 'config', 'work_signing'].map((name) => ({
+          command: 'ssh-keygen',
+          args: ['-y', '-P', '', '-f', `${HOME}/.ssh/${name}`],
+          env: undefined,
+          timeoutMs: undefined,
+        })),
+        {
+          command: 'ssh',
+          args: ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ConnectTimeout=5', 'git@github.com'],
+          env: OWNER_ENV,
+          timeoutMs: 15_000,
+        },
+      ],
+    );
+  });
+
+  it('takes the account SSH greets only from the start of a line', () => {
+    for (const [said, login] of [
+      ["Warning: added a key\nHi example-owner! You've successfully authenticated", 'example-owner'],
+      ["Warning: Hi example-owner! is not a greeting", undefined],
+    ] as const) {
+      const sys = new FakeSys().ready();
+      sys.execOverride = (call) => (call.command === 'ssh' ? { code: 1, stdout: '', stderr: said } : undefined);
+      assert.equal(exposure(sys, AGENT).sshLogin, login, said);
+    }
+  });
+
+  it('signs out and erases the git password as the owner, with the words git and gh take', () => {
+    const sys = exposed();
+    sys.env = { GH_TOKEN: 'ghp_agent', KEEP: '1' };
+    signOut(sys, 'example-owner');
+    removeGitPassword(sys);
+    assert.deepEqual(sys.calls.find((call) => call.command === 'gh')?.env, OWNER_ENV);
+    assert.deepEqual(sys.calls.find((call) => call.command === 'git')?.args, ['credential-osxkeychain', 'erase']);
+  });
+
+  it("asks ps for every process's start and name, in C's words", () => {
+    const sys = new FakeSys().ready();
+    sys.env = { KEEP: '1' };
+    desktopAppStarted(sys);
+    const ps = sys.calls.find((call) => call.command === 'ps');
+    assert.deepEqual(ps?.args, ['-axo', 'lstart=,comm=']);
+    assert.deepEqual(ps?.env, { KEEP: '1', LC_ALL: 'C' });
+  });
+
+  describe("the desktop app's start, as ps lists it", () => {
+    const APP = '/Applications/Claude.app/Contents/MacOS/Claude';
+    const listing = (code: number, ...lines: string[]): FakeSys => {
+      const sys = new FakeSys().ready();
+      sys.execOverride = (call) => (call.command === 'ps' ? { code, stdout: `${lines.join('\n')}\n`, stderr: '' } : undefined);
+      return sys;
+    };
+    const OCT_28 = new Date(2026, 9, 28, 9, 30, 15).getTime();
+    const OCT_26 = new Date(2026, 9, 26, 8, 0, 0).getTime();
+
+    it('reads a line with space around it', () => {
+      assert.equal(desktopAppStarted(listing(0, `Wed Oct 28 09:30:15 2026     ${APP}   `))?.getTime(), OCT_28, 'space after');
+      assert.equal(desktopAppStarted(listing(0, `   Wed Oct 28 09:30:15 2026     ${APP}`))?.getTime(), OCT_28, 'space before');
+    });
+
+    it('takes the earliest of several, and passes over a start it cannot read', () => {
+      assert.equal(desktopAppStarted(listing(0, `Wed Oct 28 09:30:15 2026 ${APP}`, `Mon Oct 26 08:00:00 2026 ${APP}`))?.getTime(), OCT_26);
+      assert.equal(desktopAppStarted(listing(0, `not a time, nor near one ${APP}`, `Wed Oct 28 09:30:15 2026 ${APP}`))?.getTime(), OCT_28);
+    });
+
+    it('says nothing when ps fails, whatever it printed', () => {
+      assert.equal(desktopAppStarted(listing(1, `Wed Oct 28 09:30:15 2026 ${APP}`)), undefined);
+    });
   });
 });

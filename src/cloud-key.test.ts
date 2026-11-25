@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { CLOUD_KEY_TITLE, cloudKey, cloudKeyArgs, cloudKeyRefusal, makeCloudKey } from './cloud-key.ts';
+import { CLOUD_KEY_TITLE, cloudKey, cloudKeyArgs, cloudKeyRefusal, listedKeys, makeCloudKey } from './cloud-key.ts';
 import { AGENT, FakeSys, TOKEN, capture, diskWrites, keyOnClipboard } from './fake.test.ts';
 import { run } from './run.ts';
 import type { ExecResult, HttpResult } from './types.ts';
@@ -182,6 +182,83 @@ describe('cloud-key', () => {
     assert.ok(!('problem' in keyOnClipboard(sys.clipboard[0])));
     assert.deepEqual(sys.chosen, [], 'asks nothing');
     assert.deepEqual(out, [`✓ registered as ExampleBot's signing key "${CLOUD_KEY_TITLE}" (id 99)`, '✓ NIYAM_SIGNING_KEY=… is on the clipboard']);
+  });
+
+  it('says what it will do before it asks, titled as niyam names it, and with no arguments asks', async () => {
+    assert.equal(CLOUD_KEY_TITLE, 'niyam cloud signing');
+    const sys = mac();
+    const { io, out } = capture();
+    assert.equal(await cloudKey(sys, io), 0);
+    assert.deepEqual(sys.chosen, ['Go ahead?']);
+    assert.deepEqual(out.slice(0, 2), [
+      'cloud-key: a new signing key for ExampleBot\'s Claude cloud sessions, registered on GitHub as ExampleBot ("niyam cloud signing"),',
+      "  its private key put on the clipboard as NIYAM_SIGNING_KEY=…, for a cloud environment's variables. Nothing is printed.",
+    ]);
+    assert.equal((sys.requests.find((request) => request.method === 'POST')?.body as { title: string }).title, 'niyam cloud signing');
+    assert.deepEqual(sys.calls.find((call) => call.command === '/usr/bin/pbcopy')?.args, []);
+    assert.equal(sys.requests.find((request) => request.url === LIST)?.token, TOKEN, 'lists the keys with the stored token');
+  });
+
+  it('says "Nothing changed." on a no, and gives no repin line when it fails', async () => {
+    const no = mac();
+    no.answers = ['no'];
+    assert.equal((await key(no)).out.at(-1), 'Nothing changed.');
+    const refused = mac();
+    refused.route('POST', ADD, { status: 422, json: null });
+    assert.ok(!(await key(refused)).out.some((line) => line.includes('niyam onboard')));
+  });
+
+  it('takes only a 201 with a numeric id as registered', async () => {
+    for (const [status, json] of [[500, null], [201, {}], [201, { id: '99' }], [200, { id: 99 }]] as const) {
+      const sys = mac();
+      sys.route('POST', ADD, { status, json });
+      const { code, out } = await key(sys);
+      assert.equal(code, 1, `${status} ${JSON.stringify(json)}`);
+      assert.ok(out.includes(`✗ GitHub did not register the key as ExampleBot's signing key (HTTP ${status}); nothing is on the clipboard`), out.join('\n'));
+      assert.deepEqual(sys.clipboard, []);
+    }
+  });
+
+  it('deletes the key again when GitHub will not list the keys after registering it', async () => {
+    const sys = mac();
+    sys.route('GET', ADD, { status: 500, json: null });
+    const { code, out } = await key(sys);
+    assert.equal(code, 1);
+    assert.ok(out.includes('✗ GitHub does not list it, so the key was deleted from GitHub again; nothing is on the clipboard'), out.join('\n'));
+  });
+
+  it("names the clipboard's refusal by its words trimmed, or by its exit code", async () => {
+    for (const [stderr, why] of [['pbcopy: no pasteboard\n', 'pbcopy: no pasteboard'], [' \n', 'exit 3']] as const) {
+      const sys = mac();
+      sys.execOverride = ({ command }) => (command === '/usr/bin/pbcopy' ? { code: 3, stdout: '', stderr } : undefined);
+      assert.ok((await key(sys)).out.includes(`✗ the clipboard did not take the key (${why}), so the key was deleted from GitHub again; nothing is on the clipboard`), why);
+    }
+  });
+
+  it("lists the agent's signing keys as GitHub gives them, passing over entries with no id", async () => {
+    const sys = mac();
+    sys.route('GET', LIST, {
+      status: 200,
+      json: [
+        { id: 1, title: 'laptop', created_at: '2026-11-01T00:00:00Z', key: 'ssh-ed25519 AAAAone laptop' },
+        { id: 2 },
+        { id: 3, title: 7, created_at: 7, key: 7 },
+        { title: 'no id', key: 'ssh-ed25519 AAAAtwo' },
+        { id: '4' },
+        null,
+      ],
+    });
+    assert.deepEqual(await listedKeys(sys, AGENT, TOKEN), {
+      keys: [
+        { id: 1, title: 'laptop', created: '2026-11-01T00:00:00Z', key: 'ssh-ed25519 AAAAone' },
+        { id: 2, title: '', created: '', key: '' },
+        { id: 3, title: '', created: '', key: '' },
+      ],
+    });
+    for (const [status, json] of [[200, {}], [500, []]] as const) {
+      sys.route('GET', LIST, { status, json });
+      assert.deepEqual(await listedKeys(sys, AGENT, TOKEN), { problem: `GitHub answered HTTP ${status} when asked for ExampleBot's signing keys` });
+    }
   });
 
   it('reads its arguments, and refuses others as bad usage', async () => {
