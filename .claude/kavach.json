@@ -46,9 +46,10 @@
             "pathOptions": [
               "--body-file"
             ]
-          }
+          },
+          "state": {}
         },
-        "reason": "it reads only the --body-file it is given and writes nothing locally (niyam 0.6.20 audited); it replies to, resolves or reacts on the thread on GitHub"
+        "reason": "review-thread reads only the --body-file it is given and writes nothing locally (niyam 0.6.20 audited); it replies to, resolves or reacts on the thread on GitHub. state takes one slice and one --title, reads no path and writes nothing locally (niyam 0.7.20 audited); it files a State issue on GitHub and attaches it under the slice (#654)"
       }
     ],
     "ownCheckout": {
