@@ -455,12 +455,13 @@ function waitingOn(slug: string, issue: number, waiting: Owed[]): string {
 async function sweep(sys: Sys, token: string, slug: string, settings: Settings, io: Output, posted?: Comment, named?: readonly number[]): Promise<void> {
   const waiting = await every<{ number: number }>(sys, token, `${API}/repos/${slug}/issues?state=open&labels=${NEEDS_OWNER}`);
   // The Approvals issue's comments, read once a sweep and only when an issue's own comments have not answered it,
-  // with the event's answer where they do not list it yet; none where GitHub cannot find the issue.
+  // with the event's answer where they do not list it yet, as where GitHub cannot find the issue.
   let approvals: Promise<Comment[] | undefined> | undefined;
   const batch = (): Promise<Comment[] | undefined> => {
-    approvals ??= everyFound<Comment>(sys, token, `${API}/repos/${slug}/issues/${settings.approvals}/comments`).then((listed) =>
-      posted && listed && !listed.some((comment) => comment.id === posted.id) ? [...listed, posted] : listed,
-    );
+    approvals ??= everyFound<Comment>(sys, token, `${API}/repos/${slug}/issues/${settings.approvals}/comments`).then((listed) => {
+      if (!posted || listed?.some((comment) => comment.id === posted.id)) return listed;
+      return listed ? [...listed, posted] : [posted];
+    });
     return approvals;
   };
   let cleared = 0;

@@ -652,8 +652,8 @@ describe('needsOwner', () => {
         ['beside another comment', {}, [says(OWNER, 701, 'Decision: later', 1)], undefined, CLEARED],
         ['edited by the agent before the event', { updated_at: hour(6) }, [], AGENT, WAITS],
         ['edited by the owner alone', { updated_at: hour(6) }, [], OWNER, CLEARED],
-        // An Approvals issue GitHub cannot find counts no answer, the event's included.
-        ['on an Approvals issue GitHub cannot find', {}, null, undefined, WAITS],
+        // On an Approvals issue GitHub cannot list, the event's answer still counts.
+        ['on an Approvals issue GitHub cannot find', {}, null, undefined, CLEARED],
       ] as const) {
         const sys = job('issue_comment', answer('Decision: approve #12', made), ON_7);
         sys.route('GET', LABELLED, { status: 200, json: [{ number: 12 }] });
@@ -663,6 +663,13 @@ describe('needsOwner', () => {
         sys.route('DELETE', off(12), { status: 200, json: null });
         assert.equal((await runJob(sys)).out[1], line, name);
       }
+      // A listed answer and the event's own answer the slice's two proposals between them.
+      const sys = job('issue_comment', answer('Decision: approve #12'), ON_7);
+      sys.route('GET', LABELLED, { status: 200, json: [{ number: 12 }] });
+      comments(sys, 12, [says(AGENT, 1, `Proposal: add #12 to #5. ${PAGE}`, 1), says(AGENT, 2, `Proposal: drop state #30. ${PAGE}`, 2)]);
+      sys.route('GET', onIssue(7), { status: 200, json: [says(OWNER, 701, 'Decision: approve #30', 4)] });
+      sys.route('DELETE', off(12), { status: 200, json: null });
+      assert.equal((await runJob(sys)).out[1], CLEARED);
     });
 
     it('is an ordinary decision on any other issue, from anyone but an owner, or without "approve"', async () => {
