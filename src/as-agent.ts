@@ -161,8 +161,9 @@ export function hooksHittingLock(sys: Sys): string[] {
     const script = scriptOf(sys, root, command);
     // A routed script's own text is not judged; the command that runs it still is, and then names the hook.
     const judgedScript = script && !routedByHelper(sys, root, script.text) ? script : undefined;
-    const [line, code] = [withoutComments(command), withoutComments(judgedScript?.text ?? '')];
-    const judged = cloud ? `${line}\n${code}` : `${beforeCloudOnly(line)}\n${beforeCloudOnly(code)}`;
+    // The command, then the script it runs when that is judged, each read on its own up to a cloud-only line off the cloud.
+    const texts = (judgedScript ? [command, judgedScript.text] : [command]).map(withoutComments);
+    const judged = (cloud ? texts : texts.map(beforeCloudOnly)).join('\n');
     if (reachesGitHub(withoutAsAgent(withoutRoutedSetGh(judged)))) found.push(`${file} ${event} ${kind} ${judgedScript ? judgedScript.path : JSON.stringify(command)}`);
   }
   return found;
@@ -184,28 +185,31 @@ export interface ClientHook {
  */
 export function clientHooks(sys: Sys, root: string): ClientHook[] {
   const found: ClientHook[] = [];
-  const read = (file: string): { hooks?: Record<string, unknown> } | undefined => {
+  /** The file's `hooks`, read as JSON; a primitive has none, so only null needs the optional chain. */
+  const hooksIn = (file: string): unknown => {
+    let parsed: { hooks?: unknown } | null = null;
     try {
-      const parsed = JSON.parse(sys.read(`${root}/${file}`)) as unknown;
-      return typeof parsed === 'object' && parsed !== null ? (parsed as { hooks?: Record<string, unknown> }) : undefined;
+      parsed = JSON.parse(sys.read(`${root}/${file}`)) as { hooks?: unknown } | null;
     } catch {
-      return undefined;
+      // Missing or not JSON: no hooks.
     }
+    return parsed?.hooks;
   };
-  const events = (hooks: unknown): [string, unknown[]][] =>
-    typeof hooks === 'object' && hooks !== null ? Object.entries(hooks).map(([event, list]) => [event, Array.isArray(list) ? list : []]) : [];
+  /** Each event with a list of entries; an event whose value is not a list has none. */
+  const events = (hooks: unknown): [string, unknown[]][] => Object.entries(hooks ?? {}).filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]));
   for (const file of SETTINGS_FILES) {
-    for (const [event, groups] of events(read(file)?.hooks)) {
+    for (const [event, groups] of events(hooksIn(file))) {
       for (const group of groups) {
         const hooks = (group as { hooks?: unknown } | null)?.hooks;
-        for (const hook of Array.isArray(hooks) ? hooks : []) {
+        if (!Array.isArray(hooks)) continue;
+        for (const hook of hooks) {
           const command = (hook as { command?: unknown } | null)?.command;
           if (typeof command === 'string') found.push({ file, event, command, kind: 'hook' });
         }
       }
     }
   }
-  for (const [event, entries] of events(read(SARATHI_PATH)?.hooks)) {
+  for (const [event, entries] of events(hooksIn(SARATHI_PATH))) {
     for (const entry of entries) {
       const command = (entry as { command?: unknown } | null)?.command;
       if (typeof command === 'string') found.push({ file: SARATHI_PATH, event, command, kind: 'handler' });
@@ -229,17 +233,18 @@ function withoutComments(text: string): string {
     .join('\n');
 }
 
-/** One line up to its comment, if it has one. Quotes are tracked within the line. */
+/** One line up to its comment, if it has one. Quotes are tracked within the line; a backslash escapes the next character. */
 function withoutComment(line: string): string {
   let quote: string | undefined;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (quote) {
-      if (char === '\\' && quote === '"') i++;
+  let escaped = false;
+  for (const [i, char] of line.split('').entries()) {
+    if (escaped) escaped = false;
+    else if (quote) {
+      if (char === '\\' && quote === '"') escaped = true;
       else if (char === quote) quote = undefined;
-    } else if (char === '\\') i++;
+    } else if (char === '\\') escaped = true;
     else if (char === '"' || char === "'") quote = char;
-    else if (char === '#' && (i === 0 || /[\s;&|()]/.test(line[i - 1] ?? ''))) return line.slice(0, i);
+    else if (char === '#' && (i === 0 || /[\s;&|()]/.test(line.charAt(i - 1)))) return line.slice(0, i);
   }
   return line;
 }
@@ -282,13 +287,13 @@ function beforeCloudOnly(code: string): string {
  * A Python import at a line's start: `from a.b import c, d as e` (the
  * module, then the names) or `import a, b.c as d` (the modules).
  */
-const IMPORT = /^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+import[ \t]+\(?([\w \t,]*)|import[ \t]+([\w. \t,]+))/gm;
+const IMPORT = /^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+import[ \t]+\(?([\w \t,]*)|import[ \t]([\w. \t,]+))/gm;
 
-/** The names in `a, b as c`, each without its `as`. */
+/** The names in `a, b as c`, each without its `as`: a part's first word. */
 function importNames(list: string): string[] {
   return list
     .split(',')
-    .map((part) => part.trim().split(/[ \t]+/)[0] ?? '')
+    .flatMap((part) => part.trim().split(/[ \t]/, 1))
     .filter(Boolean);
 }
 
@@ -298,9 +303,10 @@ function importNames(list: string): string[] {
  * `a/b.py`. Relative imports are not followed.
  */
 function importedPaths(code: string): string[] {
-  const modules = [...code.matchAll(IMPORT)].flatMap(([, from, names = '', imported = '']) => {
-    if (from === undefined) return importNames(imported).filter((name) => !name.startsWith('.'));
-    return from.startsWith('.') ? [] : [from, ...importNames(names).map((name) => `${from}.${name}`)];
+  // A match is one form or the other: `from` and its names, or the modules imported.
+  const modules = [...code.matchAll(IMPORT)].flatMap(([, from, names, imported]) => {
+    if (from === undefined) return importNames(imported as string).filter((name) => !name.startsWith('.'));
+    return from.startsWith('.') ? [] : [from, ...importNames(names as string).map((name) => `${from}.${name}`)];
   });
   return [...new Set(modules.map((name) => `${name.replaceAll('.', '/')}.py`))];
 }
@@ -317,22 +323,22 @@ function routedByHelper(sys: Sys, root: string, script: string): boolean {
   if (paths.length === 0) return false;
   const listed = sys.exec('git', ['ls-files', '-z', '--', ...paths.map((path) => `:(glob)**/${path}`)], { cwd: root });
   if (listed.code !== 0) return false;
-  return listed.stdout
-    .split('\0')
-    .filter(Boolean)
-    .some((path) => {
-      try {
-        return /\bas-agent\b/.test(withoutComments(sys.read(`${root}/${path}`)));
-      } catch {
-        return false;
-      }
-    });
+  // The empty name after the last NUL is the repository's folder, which reads as no file.
+  return listed.stdout.split('\0').some((path) => {
+    let text: string | undefined;
+    try {
+      text = sys.read(`${root}/${path}`);
+    } catch {
+      // Not readable: not a helper.
+    }
+    return text !== undefined && /\bas-agent\b/.test(withoutComments(text));
+  });
 }
 
 /** A command that only puts gh in the positional parameters, for `"$@"` to run: `set -- gh …`, with no command substitution in it. */
 const SET_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+gh(?:\s(?:(?!\$\(|`).)*)?$/;
 /** One that puts `as-agent` running gh there instead: `set -- "$cli" as-agent --session "$sid" -- gh …`. */
-const SET_AS_AGENT_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+.*\bas-agent\s.*\s--\s+gh(?:\s|$)/;
+const SET_AS_AGENT_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s.*\bas-agent\s.*\s--\s+gh(?:\s|$)/;
 
 /**
  * The text without its `set -- gh` commands, when it also has a
@@ -346,27 +352,29 @@ const SET_AS_AGENT_GH = /^\s*(?:(?:then|else|do)\s+)?set\s+--\s+.*\bas-agent\s.*
  * its `"$@"` runs gh plain.
  */
 function withoutRoutedSetGh(text: string): string {
-  const commands = text.split(/[;&|\n]+/);
+  const commands = text.split(/[;&|\n]/);
   if (!commands.some((command) => SET_AS_AGENT_GH.test(command))) return text;
   return commands.filter((command) => !SET_GH.test(command)).join('\n');
 }
 
 /** The text with each command that runs `as-agent` taken out, the rest of its line kept. */
 function withoutAsAgent(text: string): string {
-  return text.split(/[;&|\n]+/).filter((command) => !/\bas-agent\b/.test(command)).join('\n');
+  return text.split(/[;&|\n]/).filter((command) => !/\bas-agent\b/.test(command)).join('\n');
 }
 
-/** The script in the repo a hook command runs, by its first word. */
+/** The script in the repo a hook command runs, by its first word. The first match is at the start: it can match nothing first. */
 function scriptOf(sys: Sys, root: string, command: string): { path: string; text: string } | undefined {
-  const first = /^\s*(?:(?:ba|z)?sh\s+|node\s+|python3?\s+)?(\S+)/.exec(command)?.[1];
+  const first = /\s*(?:(?:ba|z)?sh\s+|node\s+|python3?\s+)?(\S+)/.exec(command)?.[1];
   if (!first) return undefined;
   const path = first.replaceAll(/["']/g, '').replace(/^\$\{?CLAUDE_PROJECT_DIR\}?\//, '').replace(/^\.\//, '');
   if (path.startsWith('/') || path.startsWith('$') || path.startsWith('~')) return undefined;
+  let text: string | undefined;
   try {
-    return { path, text: sys.read(`${root}/${path}`) };
+    text = sys.read(`${root}/${path}`);
   } catch {
-    return undefined;
+    // Not in the repo: no script.
   }
+  return text === undefined ? undefined : { path, text };
 }
 
 /** The top of the git repository the hook runs in. */

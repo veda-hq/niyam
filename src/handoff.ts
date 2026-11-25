@@ -38,7 +38,8 @@ const where = `${SETTINGS_PATH}: "handoff"`;
 
 /** The `"handoff"` settings, or undefined when the repository names none. Throws on a malformed entry. */
 export function handoffSettings(raw: unknown): HandoffSettings | undefined {
-  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).handoff : undefined;
+  // A primitive has no "handoff" either, so only null needs the optional chain.
+  const value = (raw as { handoff?: unknown } | null)?.handoff;
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${where} must be an object`);
   const { plumbing, history, ignoreStages = [], template, base = 'origin/main', ...rest } = value as Record<string, unknown>;
@@ -77,13 +78,13 @@ export interface HookRun {
 
 /**
  * The runs of the push history: every field its writer always writes, with the right type, or the line is not a
- * run. A corrupt line is counted, never evidence, and never stops a push.
+ * run. A corrupt line is counted, never evidence, and never stops a push. No history at all is no runs.
  */
-export function parseHistory(text: string): { runs: HookRun[]; malformed: number } {
+export function parseHistory(text: string | undefined): { runs: HookRun[]; malformed: number } {
   const runs: HookRun[] = [];
   let malformed = 0;
   const nullableText = (v: unknown): boolean => v === undefined || v === null || typeof v === 'string';
-  for (const raw of text.split('\n')) {
+  for (const raw of text === undefined ? [] : text.split('\n')) {
     const line = raw.trim();
     if (!line) continue;
     let run: Record<string, unknown> | null = null;
@@ -96,10 +97,9 @@ export function parseHistory(text: string): { runs: HookRun[]; malformed: number
       const one = s as Record<string, unknown> | null;
       return typeof one?.name === 'string' && typeof one.startMs === 'number' && typeof one.durationMs === 'number' && typeof one.status === 'string';
     };
+    // A line that parses to a primitive has no fields, so only null needs the optional chain.
     const ok =
-      typeof run === 'object' &&
-      run !== null &&
-      typeof run.schema === 'number' &&
+      typeof run?.schema === 'number' &&
       typeof run.id === 'string' &&
       typeof run.invocation === 'string' &&
       typeof run.startedAt === 'string' &&
@@ -135,22 +135,21 @@ export interface Repeated {
  * session reading "failures 0" with two real failures behind it tries once more blind, which can fire the trigger.
  */
 export function repeatedFailure(runs: readonly HookRun[], branch: string, ignore: readonly string[]): Repeated {
-  const counts = new Map<string, number>();
-  const trees = new Map<string, Set<string>>();
+  const seen = new Map<string, { failures: number; trees: Set<string> }>();
   for (const run of runs) {
     if (run.kind !== 'pre-push' || run.exitCode === 0 || run.branch !== branch) continue;
     const stage = run.stages.find((one) => one.status === 'failed' || one.status === 'timed_out')?.name;
     if (stage === undefined || ignore.includes(stage)) continue;
-    counts.set(stage, (counts.get(stage) ?? 0) + 1);
-    const seen = trees.get(stage) ?? new Set<string>();
-    if (run.fingerprint) seen.add(run.fingerprint);
-    trees.set(stage, seen);
+    const one = seen.get(stage) ?? { failures: 0, trees: new Set<string>() };
+    one.failures++;
+    if (run.fingerprint) one.trees.add(run.fingerprint);
+    seen.set(stage, one);
   }
   const threshold = { failures: MIN_FAILURES, trees: MIN_TREES };
   let worst: Repeated = { fired: false, stage: null, failures: 0, trees: 0, threshold };
   let nearest = worst;
-  for (const [stage, failures] of counts) {
-    const distinct = trees.get(stage)?.size ?? 0;
+  for (const [stage, { failures, trees }] of seen) {
+    const distinct = trees.size;
     if (failures >= MIN_FAILURES && distinct >= MIN_TREES) {
       if (failures > worst.failures) worst = { fired: true, stage, failures, trees: distinct, threshold };
     } else if (failures > nearest.failures || (failures === nearest.failures && distinct > nearest.trees)) {
@@ -180,7 +179,7 @@ export interface Entry {
   spawned: (typeof SPAWNED)[number];
 }
 
-const oneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === 'string' && (list as readonly string[]).includes(v);
+const oneOf = <T extends string>(list: readonly T[], v: unknown): v is T => (list as readonly unknown[]).includes(v);
 const texts = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
 
 /** The declarations, each line whole or not counted. */
@@ -197,9 +196,7 @@ export function parseRunLog(text: string): { entries: Entry[]; malformed: number
       // Counted below.
     }
     const ok =
-      typeof e === 'object' &&
-      e !== null &&
-      typeof e.ts === 'string' &&
+      typeof e?.ts === 'string' &&
       oneOf(CALL_SITES, e.callSite) &&
       typeof e.branch === 'string' &&
       typeof e.baseRef === 'string' &&
@@ -218,7 +215,7 @@ export function parseRunLog(text: string): { entries: Entry[]; malformed: number
 
 /** Whether a dismissal's reason cites where the owner decided: an issue (#N or a URL), an id such as ABC-12, an ADR, or a commit. */
 export function citesAuthority(reason: string): boolean {
-  return /(?:^|[^\w])#\d+/.test(reason) || /\bhttps?:\/\/\S+/.test(reason) || /\b[A-Z]{2,}-\d+\b/.test(reason) || /\b[0-9a-f]{7,40}\b/.test(reason);
+  return /(?:^|[^\w])#\d/.test(reason) || /\bhttps?:\/\/\S/.test(reason) || /\b[A-Z]{2,}-\d+\b/.test(reason) || /\b[0-9a-f]{7,40}\b/.test(reason);
 }
 
 export interface Triggers {
@@ -318,7 +315,8 @@ export async function assertDeclared(input: GateInput): Promise<GateResult> {
     const verdict = judgeBrief(brief, await input.readIssue(Number(number)), {
       branch: input.branch,
       disposition: newest.disposition === 'carrying' ? 'carrying' : 'handed-off',
-      lint: { yaml: (input.yaml ??= await loadYaml()), pathExists: input.pathExists, pathDeletedSince: input.pathDeletedSince, changedFiles: input.changedFiles, ...(input.template ? { template: input.template } : {}) },
+      // No template: an issue's body always reads back with frontmatter, so the lint never names one.
+      lint: { yaml: (input.yaml ??= await loadYaml()), pathExists: input.pathExists, pathDeletedSince: input.pathDeletedSince, changedFiles: input.changedFiles },
       isAncestorOfHead: input.isAncestorOfHead,
     });
     if (!verdict.ok) return no(verdict.reason, verdict.detail);
@@ -385,7 +383,7 @@ export function collect(sys: Sys, h: Here, base: string): { branch: string; chan
   const changedFiles = must(h, ['diff', '--name-only', `${base}...HEAD`], `what this branch changes against ${base}`).split('\n').filter(Boolean);
   // The settings file is plumbing itself: it says what plumbing is.
   const paths = changedFiles.filter((file) => file === SETTINGS_PATH || isPlumbing(file, h.settings.plumbing));
-  const history = h.settings.history && sys.exists(`${h.root}/${h.settings.history}`) ? parseHistory(sys.read(`${h.root}/${h.settings.history}`)).runs : [];
+  const history = parseHistory(h.settings.history && sys.exists(`${h.root}/${h.settings.history}`) ? sys.read(`${h.root}/${h.settings.history}`) : undefined).runs;
   return {
     branch,
     changedFiles,
@@ -457,20 +455,23 @@ export async function gate(sys: Sys, io: Output, base: string | undefined, callS
   return 1;
 }
 
-/** The options `handoff` and `brief` take, each once, with a value that is not the next option. */
-function options(args: readonly string[], known: readonly string[], flags: readonly string[]): Map<string, string | true> {
-  const found = new Map<string, string | true>();
+/**
+ * The options `handoff` and `brief` take, each once, with a value that is not the next option. A flag maps to
+ * its own name. `--name=value` gives the value inline; every name this takes starts with `--`.
+ */
+function options(args: readonly string[], known: readonly string[], flags: readonly string[]): Map<string, string> {
+  const found = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
     const token = args[i] as string;
-    const eq = token.startsWith('--') ? token.indexOf('=') : -1;
-    const name = eq > 0 ? token.slice(0, eq) : token;
+    const inline = /^(--[^=]+)=(.*)/s.exec(token);
+    const name = inline ? (inline[1] as string) : token;
     if (found.has(name)) throw new Error(`${name} is given twice`);
-    if (flags.includes(name) && eq < 0) {
-      found.set(name, true);
+    if (flags.includes(name) && !inline) {
+      found.set(name, name);
       continue;
     }
     if (!known.includes(name)) throw new Error(`unexpected argument "${token}"`);
-    const value = eq > 0 ? token.slice(eq + 1) : args[++i];
+    const value = inline ? inline[2] : args[++i];
     if (value === undefined || !value.trim() || value.startsWith('--')) throw new Error(`${name} needs a value`);
     found.set(name, value);
   }
@@ -497,7 +498,7 @@ export function handoffArgs(args: readonly string[]): HandoffArgs {
   const modes = MODES.filter((mode) => found.has(mode));
   if (modes.length !== 1) throw new Error('handoff takes one of --detect, --record or --assert-fresh');
   const mode = (modes[0] as string).slice(2) as HandoffArgs['mode'];
-  const value = (name: string): string | undefined => found.get(name) as string | undefined;
+  const value = (name: string): string | undefined => found.get(name);
   const only = (allowed: string[]): void => {
     const stray = VALUES.find((name) => found.has(name) && !allowed.includes(name));
     if (stray) throw new Error(`--${mode} does not take ${stray}`);
@@ -535,8 +536,11 @@ function draftAt(h: Here, sys: Sys, draft: string): string | null {
   return repoPath(rel);
 }
 
-/** Lints a draft for this branch and opens it as a Brief issue on the repository's Project; the issue's ref, or a problem. */
-async function openDraft(sys: Sys, io: Output, h: Here, draft: string, disposition: 'handed-off' | 'carrying', branch: string, changedFiles: readonly string[]): Promise<string | undefined> {
+/**
+ * Lints a draft for this branch and opens it as a Brief issue on the repository's Project; the issue's ref, or a
+ * problem. A draft is linted as handed off unless `carrying`: the lint tells nothing else apart.
+ */
+async function openDraft(sys: Sys, io: Output, h: Here, draft: string, carrying: boolean, branch: string, changedFiles: readonly string[]): Promise<string | undefined> {
   const rel = draftAt(h, sys, draft);
   if (rel === null) {
     io.err(`✗ the brief draft must be a file in the repository: ${draft}; no issue was opened`);
@@ -546,7 +550,12 @@ async function openDraft(sys: Sys, io: Output, h: Here, draft: string, dispositi
     io.err(`✗ no brief draft at ${draft}; no issue was opened`);
     return undefined;
   }
-  const lint = lintDraft(sys.read(`${h.root}/${rel}`), branch, { ...lintContext(h, changedFiles), yaml: await loadYaml(), disposition, ...(h.settings.template ? { template: h.settings.template } : {}) });
+  const lint = lintDraft(sys.read(`${h.root}/${rel}`), branch, {
+    ...lintContext(h, changedFiles),
+    yaml: await loadYaml(),
+    ...(carrying ? { disposition: 'carrying' as const } : {}),
+    ...(h.settings.template ? { template: h.settings.template } : {}),
+  });
   if (!lint.ok) {
     io.err(`✗ ${draft}: ${lint.problems.join('; ')}`);
     io.err('no issue was opened');
@@ -592,7 +601,7 @@ export async function handoff(sys: Sys, io: Output, args: readonly string[]): Pr
       io.err(`✗ --open-brief goes with --disposition handed-off or carrying, not "${disposition}"`);
       return 1;
     }
-    const opened = await openDraft(sys, io, h, parsed.openBrief, disposition, branch, changedFiles);
+    const opened = await openDraft(sys, io, h, parsed.openBrief, disposition === 'carrying', branch, changedFiles);
     if (opened === undefined) return 1;
     if (!briefs.includes(opened)) briefs.push(opened);
   }
@@ -626,13 +635,14 @@ export async function brief(sys: Sys, io: Output, args: readonly string[]): Prom
   const { draft, lint } = briefArgs(args);
   const h = here(sys);
   const { branch, changedFiles } = collect(sys, h, h.base);
-  if (!lint) return (await openDraft(sys, io, h, draft, 'handed-off', branch, changedFiles)) === undefined ? 1 : 0;
+  if (!lint) return (await openDraft(sys, io, h, draft, false, branch, changedFiles)) === undefined ? 1 : 0;
   const rel = draftAt(h, sys, draft);
   if (rel === null || !sys.exists(`${h.root}/${rel}`)) {
     io.err(`✗ no brief draft in the repository at ${draft}`);
     return 1;
   }
-  const result = lintDraft(sys.read(`${h.root}/${rel}`), branch, { ...lintContext(h, changedFiles), yaml: await loadYaml(), disposition: 'handed-off', ...(h.settings.template ? { template: h.settings.template } : {}) });
+  // Linted as handed off: a draft is opened as one.
+  const result = lintDraft(sys.read(`${h.root}/${rel}`), branch, { ...lintContext(h, changedFiles), yaml: await loadYaml(), ...(h.settings.template ? { template: h.settings.template } : {}) });
   if (result.ok) {
     io.out(`✓ ${draft} is a brief this branch can open`);
     return 0;
