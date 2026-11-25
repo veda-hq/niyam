@@ -85,9 +85,10 @@ export function recordedAgent(sys: Sys, sessionId: unknown): { agent: string } |
   if (!path || !sys.exists(path)) {
     return { problem: 'session-start did not run for this session, so it was not given the agent identity' };
   }
-  let entry: { agent?: unknown; problem?: unknown } | null = null;
+  type Entry = { agent?: unknown; problem?: unknown } | null;
+  let entry: Entry = null;
   try {
-    entry = JSON.parse(sys.read(path)) as typeof entry;
+    entry = JSON.parse(sys.read(path)) as Entry;
   } catch {
     // Unreadable, or not JSON: it stays null, as a record of JSON null would be.
   }
