@@ -14,7 +14,12 @@ import { exitCode, isTimeout, loadPrompts, nearestPresent, notMade, readHidden, 
 
 /** `promise`, or a failure after `ms`: a broken wait fails the test at once instead of hanging the run. */
 function within<T>(ms: number, promise: Promise<T>): Promise<T> {
-  return Promise.race([promise, new Promise<never>((_, fail) => setTimeout(() => fail(new Error(`no answer within ${ms} ms`)), ms).unref())]);
+  // Held until the race settles, so a wait with nothing else keeping the process alive still fails by its deadline.
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, fail) => {
+    timer = setTimeout(() => fail(new Error(`no answer within ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
 describe('realSys', () => {
@@ -222,6 +227,37 @@ describe('realSys', () => {
       served.close();
     }
     await assert.rejects(pending, (error: Error) => error.name !== 'TimeoutError');
+  });
+
+  it('fails to serve when the server cannot start, and takes in an error after it has', async () => {
+    const failing = Object.assign(new EventEmitter(), { listen: () => failing.emit('error', new Error('EADDRINUSE')) });
+    await assert.rejects(within(2000, realSys({ createServer: (() => failing) as unknown as typeof createServer }).serve(() => Promise.reject(new Error('unused')))), /^Error: EADDRINUSE$/);
+    const started = Object.assign(new EventEmitter(), {
+      listen: (_port: number, _host: string, done: () => void) => done(),
+      address: () => ({ port: 4321 }),
+      closeAllConnections: () => {},
+      close: () => {},
+    });
+    const served = await within(2000, realSys({ createServer: (() => started) as unknown as typeof createServer }).serve(() => Promise.reject(new Error('unused'))));
+    try {
+      assert.equal(served.port, 4321);
+      assert.doesNotThrow(() => started.emit('error', new Error('later')), 'a later error does not end the process');
+    } finally {
+      served.close();
+    }
+  });
+
+  it('leaves a file it could not write as it was, mode and all', () => {
+    const kept = join(dir, 'kept');
+    writeFileSync(kept, 'old', { mode: 0o644 });
+    chmodSync(kept, 0o644);
+    const failing = realSys({
+      writeFileSync: (() => {
+        throw new Error('ENOSPC');
+      }) as unknown as typeof writeFileSync,
+    });
+    assert.throws(() => failing.write(kept, 'new', 0o666), /ENOSPC/);
+    assert.equal(statSync(kept).mode & 0o777, 0o644);
   });
 
   it('calls a Ctrl-C handler instead of ending, until it is taken off', () => {

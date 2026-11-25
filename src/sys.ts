@@ -1,5 +1,4 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { once } from 'node:events';
 import {
   appendFileSync,
   closeSync,
@@ -38,7 +37,13 @@ export function loadPrompts(): Promise<Prompts> {
   return import('@clack/prompts');
 }
 
-/** The machine's own calls realSys makes; a test hands in its own to see what it is given. */
+/**
+ * The machine calls a test cannot watch on the real machine, which realSys makes through here: processes, the
+ * terminal, the prompts library, the proxy, the server, and the fs calls whose order or file handles matter
+ * (write, replace, detach). A test hands in its own to see what it is given. The rest of realSys (read, exists,
+ * append, mkdir, list, tempDir, remove, claim, modified) works on the real filesystem, where a test can see what
+ * it did.
+ */
 interface Calls {
   spawn: typeof spawn;
   spawnSync: typeof spawnSync;
@@ -52,9 +57,24 @@ interface Calls {
   renameSync: typeof renameSync;
   prompts: () => Promise<Prompts>;
   proxy: (env: NodeJS.ProcessEnv) => void;
+  createServer: typeof http.createServer;
 }
 
-const CALLS: Calls = { spawn, spawnSync, isatty, readFileSync, openSync, closeSync, writeFileSync, fchmodSync, fsyncSync, renameSync, prompts: loadPrompts, proxy: useProxy };
+const CALLS: Calls = {
+  spawn,
+  spawnSync,
+  isatty,
+  readFileSync,
+  openSync,
+  closeSync,
+  writeFileSync,
+  fchmodSync,
+  fsyncSync,
+  renameSync,
+  prompts: loadPrompts,
+  proxy: useProxy,
+  createServer: http.createServer,
+};
 
 /**
  * What realSys reaches the machine through: any of its calls, and the terminal's streams, which stay unopened
@@ -97,9 +117,9 @@ export function realSys(machine: Machine = {}): Sys {
     write(path, data, mode) {
       const fd = m.openSync(path, 'w', mode);
       try {
-        // A file already there keeps its own mode when opened, so the mode is set on it as well.
-        if (mode !== undefined) m.fchmodSync(fd, mode);
         m.writeFileSync(fd, data);
+        // A file already there keeps its own mode when opened, so the mode is set on it as well, once the write has gone through.
+        if (mode !== undefined) m.fchmodSync(fd, mode);
       } finally {
         m.closeSync(fd);
       }
@@ -241,7 +261,7 @@ export function realSys(machine: Machine = {}): Sys {
       m.spawnSync('open', [url]);
     },
     async serve(handle) {
-      const server = http.createServer((request, response) => {
+      const server = m.createServer((request, response) => {
         const answer = (status: number, headers: Record<string, string> = {}, body = ''): void => {
           response.writeHead(status, { 'cache-control': 'no-store', ...headers });
           response.end(body);
@@ -254,9 +274,11 @@ export function realSys(machine: Machine = {}): Sys {
           () => answer(500),
         );
       });
-      // once() rejects when the server reports an error instead.
-      server.listen(0, LOOPBACK);
-      await once(server, 'listening');
+      // An error while starting rejects; the listener stays, so one later is taken in and does not end the process.
+      await new Promise<void>((done, fail) => {
+        server.on('error', fail);
+        server.listen(0, LOOPBACK, done);
+      });
       const { port } = server.address() as AddressInfo;
       return {
         port,
