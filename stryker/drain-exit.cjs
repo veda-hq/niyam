@@ -23,8 +23,10 @@ process.exit = function drainThenExit(...args) {
   leaving = true;
   if (args.length > 0) process.exitCode = args[0];
   // Writes are ordered, so this callback runs once every earlier chunk has
-  // been written, or has failed (a closed pipe, say).
-  process.stdout.write('', () => exit());
+  // been written, or has failed (a closed pipe, say). It exits with the
+  // arguments first given, so code that sets process.exitCode while stdout
+  // drains cannot change the code.
+  process.stdout.write('', () => exit(...args));
   // Unlike exit, this returns. node:test calls it last, and the handles a
   // test left open keep the loop alive until the callback ends the process.
   return undefined;

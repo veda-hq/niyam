@@ -94,12 +94,11 @@ async function runLike(file: string): Promise<{ code: number | null; tap: string
     const [code] = (await within(20_000, once(child, 'close'), `${file}'s end`)) as [number | null];
     return { code, tap, ms: Date.now() - started, pid: child.pid };
   } finally {
-    // A child the lane failed to end is left to the system, never sent a signal: its pipes are closed and
-    // it no longer holds this process open.
+    // A child the lane failed to end is killed, so a failed test leaves no process behind.
     if (child.exitCode === null && child.signalCode === null) {
       stdout.destroy();
       signal.destroy();
-      child.unref();
+      child.kill('SIGKILL');
     }
   }
 }
@@ -131,7 +130,8 @@ describe('the mutation lanes run a suite', () => {
 
   it('keeping a code given to process.exit, once what was written before it is out', async () => {
     const file = join(dir, 'exits.mjs');
-    writeFileSync(file, "process.stdout.write('y'.repeat(1_000_000));\nprocess.exit(7);\n");
+    // The exitCode set while stdout drains must not change the code process.exit was given.
+    writeFileSync(file, "process.stdout.write('y'.repeat(1_000_000));\nprocess.exit(7);\nprocess.exitCode = 3;\n");
     const { code, tap } = await runLike(file);
     assert.equal(code, 7);
     assert.equal(tap, 'y'.repeat(1_000_000));
