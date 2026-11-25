@@ -1,16 +1,16 @@
 import { existsSync, realpathSync, rmSync } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
-import { isAbsolute, relative } from 'node:path';
+import { sep } from 'node:path';
 
 /**
  * Removes a test's fixture folder and all in it, once links are followed; refuses any path that is not strictly
- * inside the system's temporary folder, so a cleanup can never reach a real checkout. Nothing there is fine.
+ * inside `root`, the system's temporary folder unless a test names its own, so a cleanup can never reach a real
+ * checkout. Nothing there is fine.
  */
-export function removeFixtureRoot(path: string): void {
+export function removeFixtureRoot(path: string, root: string = tmpdir()): void {
   if (!existsSync(path)) return;
-  const inside = relative(realpathSync(tmpdir()), realpathSync(path));
-  if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) throw new Error(`refusing to remove ${path}: it is not inside ${tmpdir()}`);
-  rmSync(path, { recursive: true, force: true });
+  if (!realpathSync(path).startsWith(realpathSync(root) + sep)) throw new Error(`refusing to remove ${path}: it is not inside ${root}`);
+  rmSync(path, { recursive: true });
 }
 
 /**
