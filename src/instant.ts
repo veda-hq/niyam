@@ -1,6 +1,7 @@
 /**
  * Strict instants from ISO 8601 text, such as GitHub's `created_at`, so that
- * two times compare as times rather than as text (#639).
+ * two times compare as times rather than as text (#639). The asks and
+ * issue-type jobs read times through this one parser.
  */
 
 // Date and time to the second, an optional fraction, and `Z` or an offset: the offset is required.
@@ -24,10 +25,11 @@ export function instant(text: string | undefined): number | undefined {
   const [offsetHours, offsetMinutes] = [whole(match[9]), whole(match[10])];
   if (hour > 23 || minute > 59 || second > 59 || offsetHours > 23 || offsetMinutes > 59) return undefined;
   const milliseconds = whole((match[7] ?? '').slice(0, 3).padEnd(3, '0'));
-  const at = Date.UTC(year, month - 1, day, hour, minute, second, milliseconds);
-  const date = new Date(at);
-  // Date.UTC rolls an impossible day into the next month, and reads years 0 to 99 as 1900 to 1999.
+  // Date.UTC reads years 0 to 99 as 1900 to 1999, so the year is set on its own, and rolls an impossible day into the
+  // next month, which the round trip catches.
+  const date = new Date(Date.UTC(2000, month - 1, day, hour, minute, second, milliseconds));
+  date.setUTCFullYear(year, month - 1, day);
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return undefined;
   const offset = (match[8] === '-' ? -1 : 1) * (offsetHours * 60 + offsetMinutes) * 60_000;
-  return at - offset;
+  return date.getTime() - offset;
 }

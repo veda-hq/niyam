@@ -1,5 +1,6 @@
 import { API, SETTINGS_PATH, loadSettings } from './agent.ts';
 import { HOURLY, isOn, notAdoptedLine, offLine } from './features.ts';
+import { instant } from './instant.ts';
 import { isOrganisation } from './owner-login.ts';
 import type { Finding } from './layout.ts';
 import type { Output, Sys } from './types.ts';
@@ -464,20 +465,6 @@ export async function typesDrift(sys: Sys, token: string, org: string, slug: str
  * second call, and to add its parent or sub-issues.
  */
 export const OPENER_WAIT_MS = 30_000;
-
-/**
- * The instant a GitHub timestamp names, in milliseconds; undefined unless
- * it is UTC to the second (`2026-11-17T09:15:16Z`), as GitHub writes it, and
- * a real date, so a repaired one (30 February) is not read as another.
- */
-function instant(text: string | undefined): number | undefined {
-  const parts = text === undefined ? null : /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)Z$/.exec(text);
-  if (!parts || text === undefined) return undefined;
-  const [year, month, day, hour, minute, second] = parts.slice(1).map(Number) as [number, number, number, number, number, number];
-  const at = Date.UTC(year, month - 1, day, hour, minute, second);
-  // Date.UTC carries an impossible field into the next one: a round trip that differs names no real instant.
-  return new Date(at).toISOString() === `${text.slice(0, 19)}.000Z` ? at : undefined;
-}
 
 interface IssueEvent {
   action?: string;

@@ -889,7 +889,9 @@ cron far less often than hourly, so a slice 👍'd and then closed by its
 merge before a sweep would otherwise keep the label for good. When an issue
 is reopened, the job judges it as the sweep judges an open issue, and labels
 it again where an ask on it still waits: one with no answer above, and no
-`approved` label of the owner's since the latest such ask. Only comments
+`approved` label of the owner's since the latest such ask. A reopened pull
+request is not judged again, since the caller's asks job does not run on
+pull request events; its next ask labels it. Only comments
 that may ask or decide, from the owner, a member or a collaborator, the
 `approved` label, an issue reopened, and the hourly cron start the job, so
 other comments, and an outsider's, run nothing.
