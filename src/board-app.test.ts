@@ -161,7 +161,7 @@ describe('the board app', () => {
         default_events: [],
       });
       // It stops waiting for Create once GitHub came back, and for Install once GitHub lists it: one wait, on the first look.
-      assert.ok(sys.slept.filter((ms) => ms === 500).length < 50, `${sys.slept.length} waits`);
+      assert.deepEqual(sys.slept.filter((ms) => ms === 500), [500]);
       assert.deepEqual(sys.slept.filter((ms) => ms === 3000), [3000]);
       assert.ok(
         sys.requests.filter((r) => r.url.includes(`/repos/${SLUG}`) || r.url.includes('/installations?')).every((r) => r.token === OWNER),
@@ -406,7 +406,9 @@ describe('the board app', () => {
     ]);
     const otherHalf = await noApp();
     otherHalf.sys.route('GET', `${ORG_SECRETS}?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_KEY' }] } });
-    assert.match((await setUpBoardApp(otherHalf.sys, capture().io, SLUG, OWNER))[0] ?? '', /it has the secret NIYAM_BOARD_APP_KEY but not NIYAM_BOARD_APP_ID\./);
+    assert.deepEqual(await setUpBoardApp(otherHalf.sys, capture().io, SLUG, OWNER), [
+      "Once for example-org: it has the secret NIYAM_BOARD_APP_KEY but not NIYAM_BOARD_APP_ID. Set the board app's other one at https://github.com/organizations/example-org/settings/secrets/actions, or delete it and its app, then run niyam onboard again at your own terminal.",
+    ]);
     for (const { sys } of [shadowed, both, half, otherHalf]) {
       assert.deepEqual(sys.opened, [], 'no browser');
       assert.ok(!sys.requests.some((r) => r.method === 'PUT'), 'no secret changed');

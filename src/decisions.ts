@@ -53,12 +53,15 @@ interface Issue {
   labels: { name: string }[];
 }
 
-/** Every item of the list GitHub pages 100 at a time at `url` (which ends in `per_page=100&page=`), from `page` on; `refused` says why not. */
-async function everyPage<T>(sys: Sys, token: string, url: string, refused: (status: number) => string, page = 1): Promise<T[]> {
+/**
+ * Every item of the list GitHub pages 100 at a time at `url` (which ends in `per_page=100&page=`), added to `got`
+ * from `page` on; `refused` says why not.
+ */
+async function everyPage<T>(sys: Sys, token: string, url: string, refused: (status: number) => string, page = 1, got: T[] = []): Promise<T[]> {
   const { status, json } = await sys.http(`${url}${page}`, { token });
   if (status !== 200 || !Array.isArray(json)) throw new Error(refused(status));
-  const items = json as T[];
-  return items.length < 100 ? items : [...items, ...(await everyPage<T>(sys, token, url, refused, page + 1))];
+  got.push(...(json as T[]));
+  return json.length < 100 ? got : everyPage(sys, token, url, refused, page + 1, got);
 }
 
 function openIssues(sys: Sys, token: string, slug: string, filter: string): Promise<Issue[]> {
