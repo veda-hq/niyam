@@ -1,17 +1,31 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { chmodSync, closeSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { type AddressInfo, connect } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { realSys } from './sys.ts';
+import { exitCode, isTimeout, loadPrompts, nearestPresent, notMade, readHidden, realPath, realSys, RETRY_MS, useProxy } from './sys.ts';
+
+/** `promise`, or a failure after `ms`: a broken wait fails the test at once instead of hanging the run. */
+function within<T>(ms: number, promise: Promise<T>): Promise<T> {
+  return Promise.race([promise, new Promise<never>((_, fail) => setTimeout(() => fail(new Error(`no answer within ${ms} ms`)), ms).unref())]);
+}
 
 describe('realSys', () => {
   const sys = realSys();
+
+  it('sets up the proxy from its environment as it starts', () => {
+    const seen: unknown[] = [];
+    realSys({ proxy: (env) => seen.push(env) });
+    assert.deepEqual(seen, [process.env]);
+    assert.equal(seen[0], process.env);
+  });
   const dir = mkdtempSync(join(tmpdir(), 'process-rules-sys-'));
   after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -50,7 +64,71 @@ describe('realSys', () => {
     sys.append(path, '+more');
     assert.equal(sys.read(path), 'data+more');
     sys.write(join(dir, 'g'), 'plain');
-    assert.equal(sys.exists(join(dir, 'g')), true);
+    assert.equal(sys.read(join(dir, 'g')), 'plain');
+    // A file already there gets the mode too, which opening it alone would not give.
+    const shared = join(dir, 'shared');
+    writeFileSync(shared, 'old', { mode: 0o644 });
+    chmodSync(shared, 0o644);
+    sys.write(shared, 'secret', 0o600);
+    assert.deepEqual([sys.read(shared), statSync(shared).mode & 0o777], ['secret', 0o600]);
+  });
+
+  it('closes each file it opens to write, replace or log to', () => {
+    const opened: number[] = [];
+    const closed: number[] = [];
+    const calls: string[] = [];
+    const child = { on: (event: string) => calls.push(`on ${event}`), unref: () => calls.push('unref') };
+    const spawned: Record<string, unknown>[] = [];
+    const seen = realSys({
+      openSync: ((...args: Parameters<typeof openSync>) => {
+        const fd = openSync(...args);
+        opened.push(fd);
+        calls.push('open');
+        return fd;
+      }) as typeof openSync,
+      closeSync: (fd) => {
+        closed.push(fd);
+        calls.push('close');
+        closeSync(fd);
+      },
+      writeFileSync: ((...args: Parameters<typeof writeFileSync>) => {
+        calls.push('write');
+        writeFileSync(...args);
+      }) as typeof writeFileSync,
+      fsyncSync: (fd) => {
+        calls.push('fsync');
+        fsyncSync(fd);
+      },
+      renameSync: (from, to) => {
+        calls.push('rename');
+        renameSync(from, to);
+      },
+      spawn: ((...args: unknown[]) => {
+        calls.push(`spawn ${JSON.stringify(args.slice(0, 2))}`);
+        spawned.push(args[2] as Record<string, unknown>);
+        return child;
+      }) as unknown as typeof import('node:child_process').spawn,
+    });
+    seen.write(join(dir, 'w'), 'w');
+    assert.deepEqual(calls.splice(0), ['open', 'write', 'close']);
+    seen.replace(join(dir, 'r'), 'r');
+    assert.deepEqual(calls.splice(0), ['open', 'write', 'fsync', 'close', 'rename'], 'synced before it is closed and put in place');
+    assert.equal(seen.read(join(dir, 'r')), 'r');
+    seen.detach('cmd', ['a'], { cwd: dir, log: join(dir, 'd.log'), env: { X: 'x' } });
+    seen.detach('cmd', ['a'], { cwd: dir, log: join(dir, 'd.log') });
+    assert.deepEqual(calls.splice(0), ['open', 'spawn ["cmd",["a"]]', 'on error', 'unref', 'close', 'open', 'spawn ["cmd",["a"]]', 'on error', 'unref', 'close']);
+    const log = opened.at(-1);
+    assert.deepEqual(spawned[0], { cwd: dir, env: { X: 'x' }, detached: true, stdio: ['ignore', opened.at(-2), opened.at(-2)] });
+    assert.equal(spawned[1]?.env, process.env);
+    assert.deepEqual((spawned[1]?.stdio as unknown[])[1], log);
+    assert.deepEqual(closed, opened);
+  });
+
+  it('lists a folder, and nothing for one that is not there', () => {
+    sys.mkdir(join(dir, 'listed'));
+    writeFileSync(join(dir, 'listed', 'one'), '');
+    assert.deepEqual(sys.list(join(dir, 'listed')), ['one']);
+    assert.deepEqual(sys.list(join(dir, 'not-there')), []);
   });
 
   it('claims a file only once, says when it changed, and replaces one whole', () => {
@@ -80,6 +158,8 @@ describe('realSys', () => {
 
   it('makes a private temporary folder and removes it with what is in it', () => {
     const temp = sys.tempDir();
+    assert.equal(dirname(temp), tmpdir());
+    assert.match(basename(temp), /^niyam-\w{6}$/);
     assert.equal(statSync(temp).mode & 0o777, 0o700);
     sys.write(join(temp, 'hosts.yml'), 'token');
     sys.remove(temp);
@@ -92,24 +172,56 @@ describe('realSys', () => {
 
   it('serves GETs on 127.0.0.1 alone as the handler answers, until closed', async () => {
     const seen: unknown[] = [];
-    const served = await sys.serve((request) => {
+    const served = await within(2000, sys.serve((request) => {
       seen.push(request);
       if (request.path === '/broken') return Promise.reject(new Error('broken'));
       return Promise.resolve({ status: 302, headers: { location: 'https://example.com/next' }, body: 'moved' });
-    });
+    }));
     const base = `http://127.0.0.1:${served.port}`;
     try {
-      const moved = await fetch(`${base}/made?code=c1&state=s1`, { redirect: 'manual' });
+      const moved = await within(2000, fetch(`${base}/made?code=c1&state=s1`, { redirect: 'manual' }));
       assert.deepEqual([moved.status, moved.headers.get('location'), moved.headers.get('cache-control'), await moved.text()], [302, 'https://example.com/next', 'no-store', 'moved']);
       assert.deepEqual(seen, [{ path: '/made', query: { code: 'c1', state: 's1' } }]);
-      const posted = await fetch(`${base}/made`, { method: 'POST' });
-      assert.deepEqual([posted.status, posted.headers.get('allow')], [405, 'GET'], 'a GET alone');
+      const posted = await within(2000, fetch(`${base}/made`, { method: 'POST' }));
+      assert.deepEqual([posted.status, posted.headers.get('allow'), await posted.text()], [405, 'GET', ''], 'a GET alone');
       assert.equal(seen.length, 1, 'a POST never reaches the handler');
-      assert.equal((await fetch(`${base}/broken`)).status, 500, 'a handler that fails answers 500');
+      assert.equal((await within(2000, fetch(`${base}/broken`))).status, 500, 'a handler that fails answers 500');
     } finally {
       served.close();
     }
-    await assert.rejects(fetch(`${base}/made`), 'nothing serves there once closed');
+    // A fresh connection, not fetch's pool, whose old socket close() cut anyway: nothing listens there once closed.
+    const refused = await within(
+      2000,
+      new Promise<string>((done) => {
+        const socket = connect(served.port, '127.0.0.1');
+        socket.once('connect', () => (socket.destroy(), done('connected')));
+        socket.once('error', (error: NodeJS.ErrnoException) => done(error.code ?? 'error'));
+      }),
+    );
+    assert.equal(refused, 'ECONNREFUSED', 'nothing serves there once closed');
+  });
+
+  it('ends a request still open when it closes', async () => {
+    let asked = false;
+    const served = await within(
+      2000,
+      sys.serve(() => {
+        asked = true;
+        return new Promise(() => {});
+      }),
+    );
+    let pending: Promise<Response> | undefined;
+    try {
+      // Its own deadline, so a request close() leaves open fails as a timeout rather than hanging.
+      pending = fetch(`http://127.0.0.1:${served.port}/hang`, { signal: AbortSignal.timeout(2000) });
+      for (let waited = 0; !asked; waited += 5) {
+        assert.ok(waited < 2000, 'the handler was asked');
+        await new Promise((done) => setTimeout(done, 5));
+      }
+    } finally {
+      served.close();
+    }
+    await assert.rejects(pending, (error: Error) => error.name !== 'TimeoutError');
   });
 
   it('calls a Ctrl-C handler instead of ending, until it is taken off', () => {
@@ -127,16 +239,21 @@ describe('realSys', () => {
   });
 
   it('leaves an interactive command the terminal, capturing nothing', () => {
-    assert.deepEqual(sys.exec('sh', ['-c', 'exit 0'], { interactive: true }), { code: 0, stdout: '', stderr: '' });
+    // Written to standard error, which the test runner leaves alone, and not captured.
+    assert.deepEqual(sys.exec('sh', ['-c', 'echo shown >&2'], { interactive: true }), { code: 0, stdout: '', stderr: '' });
+    assert.match(sys.exec('/no/such/command', [], { interactive: true }).stderr, /ENOENT/);
   });
 
   it("hands a conversing command's lines from both streams to the caller, with its exit code", async () => {
     const lines: string[] = [];
-    const code = await sys.converse('sh', ['-c', 'test "$SEEN" = x || exit 4; echo one; echo two >&2; printf three; exit 3'], { env: { PATH: '/usr/bin:/bin', SEEN: 'x' } }, (line) => lines.push(line));
+    const code = await within(
+      2000,
+      sys.converse('sh', ['-c', 'test "$SEEN" = x || exit 4; echo one; echo two >&2; printf three; exit 3'], { env: { PATH: '/usr/bin:/bin', SEEN: 'x' } }, (line) => lines.push(line)),
+    );
     assert.equal(code, 3);
     assert.deepEqual([...lines].sort(), ['one', 'three', 'two']);
-    assert.equal(await sys.converse('/no/such/command', [], {}, () => {}), 127);
-    assert.equal(await sys.converse('sh', ['-c', 'kill -TERM $$'], {}, () => {}), 128 + 15);
+    assert.equal(await within(2000, sys.converse('/no/such/command', [], {}, () => {})), 127);
+    assert.equal(await within(2000, sys.converse('sh', ['-c', 'kill -TERM $$'], {}, () => {})), 128 + 15);
   });
 
   it('shows no spinner without a terminal', () => {
@@ -149,19 +266,25 @@ describe('realSys', () => {
     assert.deepEqual([shown.status, shown.stdout], [0, '']);
   });
 
-  it('knows home, cwd, env and the time', () => {
+  it('knows home, cwd, env, the time and where its node and CLI are', async () => {
     assert.equal(sys.cwd, process.cwd());
     assert.ok(sys.home.length > 0);
     assert.equal(sys.env, process.env);
     assert.ok(sys.now() instanceof Date);
+    assert.deepEqual(sys.runtime, { node: realpathSync(process.execPath), cli: realpathSync(process.argv[1] as string) });
+    const started = Date.now();
+    await within(2000, sys.sleep(30));
+    assert.ok(Date.now() - started >= 25);
   });
 
   it('calls a JSON API with a token and body', async () => {
     const seen: { auth?: string; body: string; method?: string }[] = [];
+    const headers: Record<string, string | string[] | undefined>[] = [];
     const server = createServer((req, res) => {
       let body = '';
       req.on('data', (chunk: Buffer) => (body += chunk.toString()));
       req.on('end', () => {
+        headers.push({ accept: req.headers.accept, version: req.headers['x-github-api-version'], type: req.headers['content-type'] });
         seen.push({ ...(req.headers.authorization ? { auth: req.headers.authorization } : {}), body, ...(req.method ? { method: req.method } : {}) });
         res.statusCode = req.url === '/empty' ? 204 : req.url === '/log' ? 200 : 201;
         res.setHeader('X-OAuth-Scopes', 'repo, workflow');
@@ -184,6 +307,8 @@ describe('realSys', () => {
         { auth: 'Bearer t', body: '', method: 'GET' },
         { body: '', method: 'GET' },
       ]);
+      const github = { accept: 'application/vnd.github+json', version: '2022-11-28' };
+      assert.deepEqual(headers, [{ ...github, type: 'application/json' }, { ...github, type: undefined }, { ...github, type: undefined }, { ...github, type: undefined }], 'a JSON body alone says it is JSON');
     } finally {
       server.close();
     }
@@ -266,7 +391,7 @@ describe('realSys', () => {
     const server = await flaky(1);
     try {
       const started = Date.now();
-      await assert.rejects(sys.http(`${server.base}/x`, { timeoutMs: 200 }), { name: 'TimeoutError' });
+      await assert.rejects(within(2000, sys.http(`${server.base}/x`, { timeoutMs: 200 })), { name: 'TimeoutError' });
       assert.ok(Date.now() - started < 900, 'the repeat waits no longer than what is left of the deadline');
       assert.equal(server.seen(), 1);
     } finally {
@@ -277,7 +402,9 @@ describe('realSys', () => {
   it('keeps a timeout as a TimeoutError, tried once', async () => {
     const server = await flaky(0, true);
     try {
-      await assert.rejects(sys.http(`${server.base}/x`, { timeoutMs: 50 }), { name: 'TimeoutError' });
+      const started = Date.now();
+      await assert.rejects(within(2000, sys.http(`${server.base}/x`, { timeoutMs: 50 })), { name: 'TimeoutError' });
+      assert.ok(Date.now() - started < RETRY_MS, 'never waits to try again');
       assert.equal(server.seen(), 1);
     } finally {
       server.close();
@@ -298,6 +425,235 @@ describe('realSys', () => {
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, 'q? got yes\n');
+  });
+});
+
+describe('realSys at a terminal, as a test hands it one', () => {
+  /** A prompts library that records what it was asked, and answers `answer`. */
+  function prompts(answer: unknown = true) {
+    const seen: unknown[] = [];
+    const spinners: { options: unknown; started?: string; cleared: number }[] = [];
+    return {
+      seen,
+      spinners,
+      load: () =>
+        Promise.resolve({
+          confirm: (options: unknown) => (seen.push(options), Promise.resolve(answer)),
+          spinner: (options: unknown) => {
+            const one = { options, cleared: 0 } as (typeof spinners)[number];
+            spinners.push(one);
+            return { start: (label: string) => void (one.started = label), clear: () => void (one.cleared += 1) };
+          },
+        }) as unknown as ReturnType<typeof loadPrompts>,
+    };
+  }
+  const tick = () => new Promise((done) => setImmediate(done));
+
+  it('is at a terminal only when standard input and output both are one', () => {
+    assert.equal(realSys({ isatty: () => true }).tty, true);
+    assert.equal(realSys({ isatty: (fd) => fd === 0 }).tty, false);
+    assert.equal(realSys({ isatty: (fd) => fd === 1 }).tty, false);
+  });
+
+  it('reads standard input whole unless it is the terminal', () => {
+    const asked: unknown[] = [];
+    const read = ((...args: unknown[]) => (asked.push(args), 'piped')) as unknown as typeof readFileSync;
+    assert.equal(realSys({ isatty: () => true, readFileSync: read }).readStdin(), '');
+    assert.equal(realSys({ isatty: () => false, readFileSync: read }).readStdin(), 'piped');
+    assert.deepEqual(asked, [[0, 'utf8']]);
+  });
+
+  it('asks Yes or No, Yes first, and takes only a Yes as yes', async () => {
+    const yes = prompts(true);
+    assert.equal(await realSys({ prompts: yes.load }).choose('go on?'), true);
+    assert.deepEqual(yes.seen, [{ message: 'go on?', active: 'Yes', inactive: 'No', initialValue: true }]);
+    assert.equal(await realSys({ prompts: prompts(false).load }).choose('go on?'), false);
+    assert.equal(await realSys({ prompts: prompts(Symbol('cancel')).load }).choose('go on?'), false);
+  });
+
+  it('shows a spinner at a terminal until stopped, and none before it loads or without one', async () => {
+    const shown = prompts();
+    const one = realSys({ isatty: () => true, prompts: shown.load }).spin('working');
+    try {
+      await tick();
+      assert.deepEqual(shown.spinners, [{ options: { indicator: 'dots' }, started: 'working', cleared: 0 }]);
+    } finally {
+      one.stop();
+    }
+    assert.equal(shown.spinners[0]?.cleared, 1);
+    const early = prompts();
+    realSys({ isatty: () => true, prompts: early.load }).spin('working').stop();
+    await tick();
+    assert.deepEqual(early.spinners, [], 'stopped before the library loaded, so never shown');
+    const none = prompts();
+    realSys({ isatty: () => false, prompts: none.load }).spin('working').stop();
+    await tick();
+    assert.deepEqual(none.spinners, []);
+  });
+
+  it('loads the real prompts library', async () => {
+    const loaded = await loadPrompts();
+    assert.equal(typeof loaded.confirm, 'function');
+    assert.equal(typeof loaded.spinner, 'function');
+  });
+
+  it('asks a question on the streams it is given, and lets go of them', async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let written = '';
+    output.on('data', (chunk: Buffer) => (written += chunk.toString()));
+    const answer = realSys({ stdin: input as unknown as NodeJS.ReadStream, stdout: output as unknown as NodeJS.WriteStream }).ask('q? ');
+    input.write('yes\n');
+    assert.equal(await within(2000, answer), 'yes');
+    assert.equal(written, 'q? ');
+    assert.equal(input.listenerCount('data'), 0);
+  });
+
+  /** A terminal's standard input that records what was done to it, fed by `type`. */
+  function terminal(isTTY = true) {
+    const done: string[] = [];
+    let listener: ((chunk: string) => void) | undefined;
+    const stdin = {
+      isTTY,
+      setRawMode: (on: boolean) => done.push(`raw ${on}`),
+      resume: () => done.push('resume'),
+      pause: () => done.push('pause'),
+      setEncoding: (encoding: string) => done.push(`encoding ${encoding}`),
+      on: (event: string, handler: (chunk: string) => void) => (done.push(`on ${event}`), (listener = handler)),
+      off: (event: string, handler: unknown) => done.push(`off ${event} ${handler === listener}`),
+    };
+    let written = '';
+    const stdout = { write: (text: string) => ((written += text), true) };
+    return { stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream, done, type: (chunk: string) => listener?.(chunk), written: () => written };
+  }
+
+  it('reads a hidden line, a backspace taking off the last letter, and gives the terminal back', async () => {
+    const at = terminal();
+    const secret = realSys({ stdin: at.stdin, stdout: at.stdout }).askSecret('token: ');
+    at.type('abcd\u007f');
+    at.type('e\rignored');
+    assert.equal(await within(2000, secret), 'abce');
+    assert.equal(at.written(), 'token: \n');
+    assert.deepEqual(at.done, ['raw true', 'resume', 'encoding utf8', 'on data', 'raw false', 'pause', 'off data true']);
+  });
+
+  it('ends a hidden line at a newline too, and a Ctrl-C cancels it', async () => {
+    const line = terminal();
+    const secret = readHidden('t: ', line.stdin, line.stdout);
+    line.type('xy\n');
+    assert.equal(await within(2000, secret), 'xy');
+    const cancelled = terminal();
+    const stopped = readHidden('t: ', cancelled.stdin, cancelled.stdout);
+    cancelled.type('x\u0003');
+    await assert.rejects(within(2000, stopped), /^Error: cancelled$/);
+    assert.equal(cancelled.written(), 't: \n');
+    assert.deepEqual(cancelled.done.slice(-3), ['raw false', 'pause', 'off data true']);
+  });
+
+  it('refuses a hidden prompt without a terminal, touching nothing', async () => {
+    const none = terminal(false);
+    await assert.rejects(readHidden('t: ', none.stdin, none.stdout), /^Error: a hidden prompt needs a terminal$/);
+    assert.deepEqual([none.done, none.written()], [[], '']);
+  });
+
+  it('opens a link with the system opener', () => {
+    const ran: unknown[] = [];
+    realSys({ spawnSync: ((...args: unknown[]) => ran.push(args)) as unknown as typeof spawnSync }).open('https://example.com/x');
+    assert.deepEqual(ran, [['open', ['https://example.com/x']]]);
+  });
+
+  it("gives a conversing command the terminal's input and pipes its output", async () => {
+    const given: unknown[] = [];
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
+    const sys = realSys({ spawn: ((...args: unknown[]) => (given.push(args[2]), child)) as unknown as typeof spawn });
+    const code = sys.converse('cmd', [], { cwd: '/w' }, () => {});
+    child.emit('close', 0, null);
+    assert.equal(await within(2000, code), 0);
+    assert.deepEqual(given, [{ cwd: '/w', env: process.env, stdio: ['inherit', 'pipe', 'pipe'] }]);
+  });
+
+  it('says 126 for a conversing command that cannot be run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'niyam-converse-'));
+    try {
+      const script = join(dir, 'not-executable');
+      writeFileSync(script, '#!/bin/sh\n', { mode: 0o644 });
+      assert.equal(await within(2000, realSys().converse(script, [], {}, () => {})), 126);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the machine helpers', () => {
+  it('turns the proxy on only when one is set, and on a Node that has the call', () => {
+    let calls = 0;
+    const net = { setGlobalProxyFromEnv: () => void (calls += 1) };
+    useProxy({ HTTPS_PROXY: 'http://proxy' }, net);
+    useProxy({ https_proxy: 'http://proxy' }, net);
+    useProxy({}, net);
+    assert.equal(calls, 2);
+    useProxy({ HTTPS_PROXY: 'http://proxy' }, {});
+  });
+
+  it('knows a timeout by its name alone', () => {
+    assert.equal(isTimeout(Object.assign(new Error('late'), { name: 'TimeoutError' })), true);
+    assert.equal(isTimeout(new Error('late')), false);
+    assert.equal(isTimeout(null), false);
+    assert.equal(isTimeout(undefined), false);
+  });
+
+  it("gives the innermost cause's code and message, or what there is of them", () => {
+    const why = (error: unknown) => notMade('GET', 'https://api.github.com/x?token=t', error).message.replace('GET api.github.com/x could not be made: ', '');
+    const deep = new Error('fetch failed', { cause: new Error('outer', { cause: Object.assign(new Error('other side closed'), { code: 'ECONNRESET' }) }) });
+    assert.equal(why(deep), 'ECONNRESET (other side closed)');
+    assert.equal(why({ code: 'E1', message: 'E1: already said' }), 'E1: already said');
+    assert.equal(why({ code: 'E1' }), 'E1');
+    assert.equal(why({ message: 'only this' }), 'only this');
+    assert.equal(why({ code: 5, message: 'a number is no code' }), 'a number is no code');
+    assert.equal(why({ code: 'E2', message: 5 }), 'E2');
+    assert.equal(why(Object.assign(new Error('top'), { cause: 'a string cause' })), 'top');
+    assert.equal(why(Object.assign(new Error('top'), { cause: null })), 'top');
+    assert.equal(why({}), '[object Object]');
+    assert.equal(why(null), 'null');
+    assert.equal(why('plain'), 'plain');
+    const error = new Error('x');
+    assert.equal(notMade('GET', 'https://h/p', error).cause, error);
+  });
+
+  it('exits as a shell would for a command that did not exit itself', () => {
+    assert.equal(exitCode({ signal: 'SIGTERM' }), 143);
+    assert.equal(exitCode({ signal: 'SIGNOTREAL' as NodeJS.Signals }), 128);
+    assert.equal(exitCode({ signal: null, error: Object.assign(new Error('e'), { code: 'ENOENT' }) }), 127);
+    assert.equal(exitCode({ signal: null, error: Object.assign(new Error('e'), { code: 'EACCES' }) }), 126);
+    assert.equal(exitCode({ signal: null, error: Object.assign(new Error('e'), { code: 'EPERM' }) }), 1);
+    assert.equal(exitCode({ signal: null }), 1);
+  });
+
+  it('resolves links in a path, keeps one it cannot, and has none for none', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-realpath-')));
+    try {
+      symlinkSync(dir, join(dir, 'link'));
+      assert.equal(realPath(join(dir, 'link')), dir);
+      assert.equal(realPath(join(dir, 'none')), join(dir, 'none'));
+      assert.equal(realPath(), '');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('finds the nearest part of a path that is there, stopping at the root', () => {
+    assert.equal(nearestPresent('/a/b/c', (path) => path === '/a'), '/a');
+    assert.equal(nearestPresent('/a/b/c', (path) => path === '/a/b/c'), '/a/b/c');
+    // A search that never stopped at the root would ask forever; this one gives up after a few.
+    let asked = 0;
+    assert.equal(
+      nearestPresent('/a/b/c', () => {
+        asked += 1;
+        if (asked > 10) throw new Error('asked past the root');
+        return false;
+      }),
+      '/',
+    );
   });
 });
 
