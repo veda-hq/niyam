@@ -5,7 +5,8 @@
 # `.github/` floor, and "guard": ["scripts/*.mjs"] in .github/niyam.json;
 # #578): a change to one passes `niyam-guard / judge` only when its approved
 # slice names the file under **Guards:**, unless Guard exempts it as a
-# mechanical pin move.
+# mechanical pin move: Dependabot's sha bumps, or an onboard's version moves
+# to a niyam release.
 /.github/workflows/shared-guard.yml @AlokBansal8
 /scripts/guard.mjs @AlokBansal8
 /scripts/guard.test.mjs @AlokBansal8
