@@ -26,12 +26,28 @@ describe('the macOS keychain', () => {
 
   it('refuses a token with characters the keychain prompt could misread', () => {
     assert.equal(KEYCHAIN.store(new FakeSys(), AGENT, 'a b'), false);
+    for (const token of ['ghp-x', 'x-ghp']) {
+      const sys = new FakeSys();
+      assert.equal(KEYCHAIN.store(sys, AGENT, token), false, token);
+      assert.deepEqual(sys.calls, [], token);
+    }
   });
 
-  it('reports a keychain that refused the token', () => {
+  it('reports a keychain that refused the token, even one that already holds it', () => {
     const sys = new FakeSys();
+    sys.setToken(AGENT, TOKEN);
     sys.execOverride = (call) => (call.args[0] === '-i' ? { code: 1, stdout: '', stderr: 'no' } : undefined);
     assert.equal(KEYCHAIN.store(sys, AGENT, TOKEN), false);
+  });
+
+  it('asks the keychain for the password of service niyam, and takes no token from a failed read', () => {
+    const sys = new FakeSys();
+    sys.setToken(AGENT, TOKEN);
+    assert.equal(KEYCHAIN.read(sys, AGENT), TOKEN);
+    assert.deepEqual(sys.calls.map((call) => [call.command, ...call.args]), [['/usr/bin/security', 'find-generic-password', '-s', 'niyam', '-a', AGENT, '-w']]);
+    sys.execOverride = () => ({ code: 1, stdout: `${TOKEN}\n`, stderr: '' });
+    assert.equal(KEYCHAIN.read(sys, AGENT), undefined);
+    assert.equal(KEYCHAIN.where, "this Mac's keychain");
   });
 
   it('reports a keychain that said yes but did not keep the token', () => {
@@ -94,6 +110,9 @@ describe('the keychain entry before niyam, which nothing reads (P-57)', () => {
     silent.undeletable.add(`process-rules/${AGENT}`);
     silent.execOverride = (call) => (call.args[0] === 'delete-generic-password' ? { code: 1, stdout: '', stderr: '' } : undefined);
     assert.equal(KEYCHAIN.dropLeftover?.(silent, AGENT), 'the keychain still holds it after the delete (exit 1)');
+    const said = withEntries({ 'process-rules': 'ghp_old' });
+    said.execOverride = (call) => (call.args[0] === 'delete-generic-password' ? { code: 1, stdout: '', stderr: '  busy \n' } : undefined);
+    assert.equal(KEYCHAIN.dropLeftover?.(said, AGENT), 'the keychain still holds it after the delete (busy)');
   });
 
   it("takes 0.6.10's session file, whose read falls back to the old entry, as an older one, not a stranger's", () => {

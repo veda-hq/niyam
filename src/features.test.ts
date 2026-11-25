@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { decisionsWeekly } from './decisions.ts';
 import { prDesign } from './design.ts';
 import { AGENT, FakeSys, ROOT, capture } from './fake.test.ts';
-import { DEFAULT_SCHEDULE, FEATURES, PERSONAL_REPO, featuresIn, isOn, isPersonal, notAdoptedLine, offLine, parseFeatures, renamedLines, scheduleIn } from './features.ts';
+import { DEFAULT_SCHEDULE, FEATURES, FIGMA_FILE_KEY, NEEDS_ISSUE_TYPES, PERSONAL_REPO, featuresIn, isOn, isPersonal, notAdoptedLine, offLine, parseFeatures, renamedLines, scheduleIn } from './features.ts';
 import { prIdentity } from './identity.ts';
 import { reviewsDue } from './reviews.ts';
 import { prePush, prWorkRules, propose } from './work.ts';
@@ -83,6 +83,53 @@ describe('features', () => {
     assert.equal(offLine('pr-design', 'figma'), 'pr-design: figma is off in .github/niyam.json; nothing to check');
   });
 
+  const ALL = 'identity, pr-identity, board, work-rules, figma, decisions, review';
+
+  it('reads a typed list with spaces around its names, and names every unknown one', () => {
+    assert.deepEqual(parseFeatures(' review , board'), ['identity', 'board', 'review']);
+    assert.deepEqual(parseFeatures('board'), ['identity', 'board']);
+    assert.throws(() => parseFeatures('board,x, y'), { message: `unknown feature x, y; the features are ${ALL}` });
+  });
+
+  it('reads listed names with spaces around them, settings of null as none, and names every unknown one', () => {
+    assert.deepEqual(featuresIn({ features: [' board '] }), ['identity', 'board']);
+    assert.deepEqual(featuresIn(null), [...FEATURES]);
+    assert.throws(() => featuresIn({ features: ['x', 'board', 'y'] }), { message: `.github/niyam.json: unknown feature "x", "y"; the features are ${ALL}` });
+  });
+
+  it('says what an older name with spaces around it is now, and nothing for settings of null', () => {
+    assert.deepEqual(renamedLines({ features: [' design '] }, 'niyam.json'), ['niyam.json lists "design", which is now named "figma"; run niyam onboard to rename it']);
+    assert.deepEqual(renamedLines(null), []);
+  });
+
+  it('names the features that need issue types', () => {
+    assert.deepEqual(NEEDS_ISSUE_TYPES, ['work-rules', 'figma', 'decisions']);
+  });
+
+  it('takes a Figma file key of letters and digits alone', () => {
+    assert.deepEqual(
+      ['abc123', 'Ab', 'x', '', 'ab-1', '-ab', 'ab-', 'a/b'].map((key) => FIGMA_FILE_KEY.test(key)),
+      [true, true, true, false, false, false, false, false],
+    );
+  });
+
+  it('reads every month and day by name, a month name in a range with a number, and a step of 1', () => {
+    for (const cron of [
+      '0 0 * JAN,FEB,MAR,APR,MAY,JUN,JUL,AUG,SEP,OCT,NOV,DEC SUN,MON,TUE,WED,THU,FRI,SAT',
+      '0 0 * 2-FEB *',
+      '0 0 * * 1-1',
+      '*/1 * * * *',
+    ]) {
+      assert.equal(scheduleIn({ schedule: cron }), cron);
+    }
+    assert.throws(() => scheduleIn({ schedule: '0 0 * 3-FEB *' }), /"schedule" must be a five-field cron/);
+  });
+
+  it('refuses a number JavaScript reads but cron does not', () => {
+    for (const minute of ['0x1', '1e1', '1x', 'x1']) {
+      assert.throws(() => scheduleIn({ schedule: `${minute} * * * *` }), /"schedule" must be a five-field cron/, minute);
+    }
+  });
 });
 
 describe('pull request checks on a base not adopted yet', () => {
@@ -292,4 +339,17 @@ describe('isPersonal', () => {
     const odd = new FakeSys().route('GET', '/repos/example-org/example-app', { status: 200, json: { owner: { type: 'Enterprise' } } });
     await assert.rejects(isPersonal(odd, 'example-org/example-app', 'ghs_run'), /cannot tell whether a personal account owns example-org\/example-app: GitHub names its owner a "Enterprise"/);
   });
+
+  for (const [what, answer] of [
+    ['a refusal that names an owner', { status: 403, json: { owner: { type: 'User' } } }],
+    ['an answer of null', { status: 200, json: null }],
+    ['an answer with no owner type', { status: 200, json: { owner: {} } }],
+  ] as const) {
+    it(`throws, naming the status, on ${what}`, async () => {
+      const sys = new FakeSys().route('GET', '/repos/example-org/example-app', answer);
+      await assert.rejects(isPersonal(sys, 'example-org/example-app', 'ghs_run'), {
+        message: `cannot tell whether a personal account owns example-org/example-app (HTTP ${answer.status})`,
+      });
+    });
+  }
 });

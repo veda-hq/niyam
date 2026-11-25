@@ -131,7 +131,7 @@ function cronField(text: string, { low, high, names }: { low: number; high: numb
   };
   return text.split(',').every((item) => {
     const match = /^(\*|[^-/]+(?:-[^-/]+)?)(?:\/(\d+))?$/.exec(item);
-    if (!match || (match[2] !== undefined && Number(match[2]) < 1)) return false;
+    if (!match || Number(match[2] ?? 1) < 1) return false;
     if (match[1] === '*') return true;
     const [from, to] = (match[1] as string).split('-').map(value);
     return from !== undefined && (to === undefined ? !(match[1] as string).includes('-') : to >= from);
@@ -142,8 +142,8 @@ function cronField(text: string, { low, high, names }: { low: number; high: numb
 export function scheduleIn(raw: unknown): string {
   const schedule = (raw as { schedule?: unknown } | null)?.schedule;
   if (schedule === undefined) return DEFAULT_SCHEDULE;
-  const fields = typeof schedule === 'string' ? schedule.trim().split(/\s+/) : [];
-  if (fields.length !== 5 || !fields.every((field, index) => cronField(field, CRON_FIELDS[index] as (typeof CRON_FIELDS)[number]))) {
+  const fields = typeof schedule === 'string' ? schedule.trim().split(/\s+/) : undefined;
+  if (fields?.length !== 5 ||!fields.every((field, index) => cronField(field, CRON_FIELDS[index] as (typeof CRON_FIELDS)[number]))) {
     throw new Error(`${SETTINGS_PATH}: "schedule" must be a five-field cron, such as "${DEFAULT_SCHEDULE}" (Mondays, 06:17 UTC)`);
   }
   const cron = fields.join(' ');

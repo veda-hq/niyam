@@ -3,10 +3,10 @@ import { describe, it } from 'node:test';
 
 import { launcherPath, launcherScript } from './agent.ts';
 import { releaseTarball } from './cloud.ts';
-import { FakeSys, HOME, capture } from './fake.test.ts';
+import { FakeSys, HOME, ROOT, capture } from './fake.test.ts';
 import { run } from './run.ts';
 import type { ExecResult } from './types.ts';
-import { installedFindings, upgrade } from './upgrade.ts';
+import { copiesOnPath, installedFindings, newestRelease, strayCopies, upgrade } from './upgrade.ts';
 import { packageVersion } from './version.ts';
 
 const LATEST = '/repos/veda-hq/niyam/releases/latest';
@@ -298,6 +298,157 @@ describe('upgrade', () => {
     const bad = capture();
     assert.equal(await run(['upgrade', 'now'], bad.io, () => sys), 2);
     assert.equal(bad.err[0], 'niyam: unexpected argument "now"');
+  });
+});
+
+describe('newestRelease', () => {
+  /** What newestRelease reads from GitHub answering `json` for the newest release. */
+  const newest = (json: unknown): ReturnType<typeof newestRelease> => newestRelease(new FakeSys().route('GET', LATEST, { status: 200, json }));
+
+  it('asks GitHub with a deadline', async () => {
+    const sys = machine();
+    await newestRelease(sys);
+    assert.deepEqual(sys.requests, [{ url: `https://api.github.com${LATEST}`, method: 'GET', timeoutMs: 15_000 }]);
+  });
+
+  it('reads a vX.Y.Z tag with numbers of any length, and refuses anything around it', async () => {
+    assert.deepEqual(await newest({ tag_name: 'v10.20.30', assets: [{ name: 'veda-hq-niyam-10.20.30.tgz' }] }), { version: '10.20.30', packaged: true });
+    for (const tag of ['release-v1.2.3', 'v1.2.3-rc.1', 'v1.2', ['v1.2.3']]) {
+      assert.deepEqual(await newest({ tag_name: tag }), { problem: `the newest release's tag, ${JSON.stringify(tag)}, is not vX.Y.Z` }, JSON.stringify(tag));
+    }
+  });
+
+  it('takes a release with no assets as not packaged', async () => {
+    assert.deepEqual(await newest({ tag_name: 'v1.2.3' }), { version: '1.2.3', packaged: false });
+    assert.deepEqual(await newest({ tag_name: 'v1.2.3', assets: [] }), { version: '1.2.3', packaged: false });
+  });
+});
+
+describe('copiesOnPath', () => {
+  /** A Mac whose niyam at each path prints what `runs` gives it. */
+  function onPath(path: string | undefined, runs: Record<string, ExecResult>): FakeSys {
+    const sys = new FakeSys();
+    sys.env = path === undefined ? {} : { PATH: path };
+    for (const file of Object.keys(runs)) sys.files.set(file, '#!/usr/bin/env node');
+    sys.execOverride = (call) => runs[call.command];
+    return sys;
+  }
+  const prints = (stdout: string, code = 0, stderr = ''): ExecResult => ({ code, stdout, stderr });
+
+  it('finds none with no PATH, even in a folder with a niyam', () => {
+    const sys = onPath(undefined, { [`${ROOT}/niyam`]: prints('1.2.3\n') });
+    assert.deepEqual(copiesOnPath(sys), []);
+    assert.deepEqual(sys.calls, []);
+  });
+
+  it('reads each folder once, trailing slashes and a relative dot folder included, and asks each copy its version with a deadline', () => {
+    const sys = onPath('/opt/a//:.bin:/opt/a:/opt/a/', { '/opt/a/niyam': prints('10.20.30\n'), [`${ROOT}/.bin/niyam`]: prints('1.2.3\n') });
+    assert.deepEqual(copiesOnPath(sys), [
+      { path: '/opt/a/niyam', version: '10.20.30' },
+      { path: `${ROOT}/.bin/niyam`, version: '1.2.3' },
+    ]);
+    assert.deepEqual(
+      sys.calls.map((call) => [call.command, call.timeoutMs]),
+      [
+        ['/opt/a/niyam', 15_000],
+        [`${ROOT}/.bin/niyam`, 15_000],
+      ],
+    );
+  });
+
+  it('says why a copy printed no version: what it printed, its first error line, or its exit code', () => {
+    const sys = onPath('/a:/b:/c:/d:/e', {
+      '/a/niyam': prints('v1.2.3\n'),
+      '/b/niyam': prints('1.2.3-dev\nmore\n'),
+      '/c/niyam': prints('1.2.3\n', 1, '\n  it broke\nthen this'),
+      '/d/niyam': prints('', 3),
+      '/e/niyam': prints('1.2\n'),
+    });
+    assert.deepEqual(copiesOnPath(sys), [
+      { path: '/a/niyam', problem: 'printed "v1.2.3"' },
+      { path: '/b/niyam', problem: 'printed "1.2.3-dev"' },
+      { path: '/c/niyam', problem: 'it broke' },
+      { path: '/d/niyam', problem: 'exit 3' },
+      { path: '/e/niyam', problem: 'printed "1.2"' },
+    ]);
+  });
+});
+
+describe('strayCopies', () => {
+  const at = (path: string, version?: string): { path: string; version?: string; problem?: string } => (version ? { path, version } : { path, problem: 'exit 1' });
+
+  it("keeps pnpm's copy when two are at the release", () => {
+    assert.deepEqual(strayCopies([at('/a/niyam', NEW), at('/b/niyam', NEW)], NEW, '/b/niyam'), [
+      '2 copies of niyam are on PATH, and the shell runs the first:',
+      `  /a/niyam  ${NEW}`,
+      `  /b/niyam  ${NEW}  ← keep`,
+      '  Remove /a/niyam, or uninstall what put it there, so the shell runs /b/niyam.',
+    ]);
+  });
+
+  it("keeps the copy at the release, not pnpm's copy at another", () => {
+    assert.deepEqual(strayCopies([at('/b/niyam', OLD), at('/a/niyam', NEW)], NEW, '/b/niyam').slice(1), [
+      `  /b/niyam  ${OLD}`,
+      `  /a/niyam  ${NEW}  ← keep`,
+      '  Remove /b/niyam, or uninstall what put it there, so the shell runs /a/niyam.',
+    ]);
+  });
+
+  it('keeps the copy at the release when pnpm installed nothing, and names every other one to remove', () => {
+    assert.deepEqual(strayCopies([at('/a/niyam', OLD), at('/b/niyam'), at('/c/niyam', NEW)], NEW).slice(1), [
+      `  /a/niyam  ${OLD}`,
+      '  /b/niyam  does not run (exit 1)',
+      `  /c/niyam  ${NEW}  ← keep`,
+      '  Remove /a/niyam and /b/niyam, or uninstall what put them there, so the shell runs /c/niyam.',
+    ]);
+  });
+
+  it("names every copy to remove when none is at the release pnpm put in its folder", () => {
+    assert.deepEqual(strayCopies([at('/a/niyam', OLD), at('/b/niyam', OLD)], NEW, '/p/niyam').at(-1), `  None of them is ${NEW}, which pnpm put in /p/niyam: remove /a/niyam and /b/niyam, and put /p on PATH (pnpm setup does).`);
+  });
+});
+
+describe('upgrade and pnpm', () => {
+  it('gives pnpm a deadline to install and to name its folder', async () => {
+    const sys = machine();
+    await upgraded(sys);
+    assert.deepEqual(
+      sys.calls.filter((call) => call.command === 'pnpm').map((call) => [call.args.join(' '), call.timeoutMs]),
+      [
+        [`add -g ${releaseTarball(NEW)}`, 300_000],
+        ['bin -g', 15_000],
+      ],
+    );
+  });
+
+  for (const [what, answer] of [
+    ['a relative folder', { code: 0, stdout: 'Library/pnpm\n', stderr: '' }],
+    ['a folder with a failure', { code: 1, stdout: '/opt/pnpm\n', stderr: '' }],
+  ] as const) {
+    it(`takes pnpm naming ${what} as naming none`, async () => {
+      const sys = machine({});
+      const inner = sys.execOverride;
+      sys.execOverride = (call) => (call.command === 'pnpm' && call.args[0] === 'bin' ? answer : inner(call));
+      const { code, out } = await upgraded(sys);
+      assert.equal(code, 0);
+      assert.equal(out.at(-1), 'upgrade: no niyam is on PATH; the hooks run the launcher niyam machine writes');
+    });
+  }
+
+  it("reads pnpm's folder without its trailing slashes", async () => {
+    const sys = machine({});
+    const inner = sys.execOverride;
+    sys.execOverride = (call) => (call.command === 'pnpm' && call.args[0] === 'bin' ? { code: 0, stdout: '/opt/pnpm//\n', stderr: '' } : inner(call));
+    assert.deepEqual((await upgraded(sys)).err, [
+      `upgrade: no niyam is on PATH: pnpm put ${NEW} in /opt/pnpm/niyam; put /opt/pnpm on PATH (pnpm setup does), then open a new shell`,
+    ]);
+  });
+
+  it("keeps the indent of pnpm's lines when the install fails", async () => {
+    const sys = machine();
+    const inner = sys.execOverride;
+    sys.execOverride = (call) => (call.command === 'pnpm' && call.args[0] === 'add' ? { code: 1, stdout: '', stderr: '  ERR_PNPM  \n' } : inner(call));
+    assert.deepEqual((await upgraded(sys)).err.slice(1), ['    ERR_PNPM']);
   });
 });
 
