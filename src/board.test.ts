@@ -1,27 +1,144 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { FIELDS, ISSUE_TYPES, LABELS, VIEWS, boardStarted, boardSwept, setUpBoard, stepDue, viewsChecklist } from './board.ts';
-import { BUILT_IN, Board, COPY_URL, OWNER_TOKEN, RestBoard, SLUG, STATUS_OPTIONS, STEP_OPTIONS, URL, defaultView, settledViews } from './fake-board.test.ts';
+import { FIELDS, ISSUE_TYPES, LABELS, VIEWS, boardStarted, boardSwept, graphql, setUpBoard, setUpViews, stepDue, viewsChecklist } from './board.ts';
+import type { BoardStep } from './board.ts';
+import { BUILT_IN, Board, COPY_URL, OWNER_TOKEN, RestBoard, SLUG, STATUS_OPTIONS, STEP_OPTIONS, URL, defaultView, repoJson, settledViews } from './fake-board.test.ts';
 import type { FakeItem } from './fake-board.test.ts';
 import { FakeSys, capture } from './fake.test.ts';
+import type { HttpResult } from './types.ts';
 
-async function setUp(sys: FakeSys, answers = ['y', 'y', 'y', 'y', 'y']): Promise<{ url: string | undefined; byHand: string[] | undefined; out: string[]; err: string[] }> {
+async function setUp(
+  sys: FakeSys,
+  answers = ['y', 'y', 'y', 'y', 'y'],
+): Promise<{ url: string | undefined; byHand: string[] | undefined; out: string[]; err: string[]; steps: BoardStep[] }> {
   sys.answers = [...answers];
   const { io, out, err } = capture();
-  const confirm = async (question: string) => /^y/.test(await sys.ask(question));
+  const steps: BoardStep[] = [];
+  const confirm = async (question: string, step: BoardStep) => {
+    steps.push(step);
+    return /^y/.test(await sys.ask(question));
+  };
   const board = await setUpBoard(sys, io, confirm, SLUG, 'example-owner', OWNER_TOKEN);
-  return { url: board?.url, byHand: board?.byHand, out, err };
+  return { url: board?.url, byHand: board?.byHand, out, err, steps };
 }
+
+/** Has `answer` give GitHub's GraphQL answer to the queries it answers, and the board answer the rest. */
+function intercept(sys: FakeSys, answer: (query: string, variables: Record<string, unknown>) => HttpResult | undefined): void {
+  const inner = sys.routes.get('POST https://api.github.com/graphql') as () => HttpResult;
+  sys.route('POST', '/graphql', () => {
+    const { query, variables } = sys.requests.at(-1)?.body as { query: string; variables: Record<string, unknown> };
+    return answer(query, variables) ?? inner();
+  });
+}
+
+/** The GraphQL requests whose query holds `operation`, by their query and variables. */
+const sent = (sys: FakeSys, operation: string): { query: string; variables: Record<string, unknown> }[] =>
+  sys.requests.flatMap((r) => (r.url.endsWith('/graphql') && (r.body as { query: string }).query.includes(operation) ? [r.body as { query: string; variables: Record<string, unknown> }] : []));
+
+describe('the work model', () => {
+  it('has these labels, views and steps by hand', () => {
+    assert.deepEqual(LABELS, [
+      { name: 'approved', color: '0e8a16', description: "The owner's approval to start" },
+      { name: 'needs-owner', color: 'd93f0b', description: 'Waits on the owner' },
+      { name: 'mechanical', color: 'c5def5', description: 'A change with no product decision in it' },
+      { name: 'veto', color: 'b60205', description: 'The owner may reverse this routine decision for a week' },
+      { name: 'expiring', color: 'fbca04', description: 'An override whose expiry is within 30 days' },
+      { name: 'cannot-run-here', color: 'bfd4f2', description: 'A decision check that reads files only a laptop has' },
+    ]);
+    assert.deepEqual(VIEWS, [
+      { name: 'Needs you', layout: 'TABLE_LAYOUT', filter: 'label:needs-owner is:open', show: ['Parent issue'], hide: ['Assignees'] },
+      { name: 'Board', layout: 'BOARD_LAYOUT', filter: 'type:Slice,Brief', show: ['Linked pull requests'], hide: [] },
+      { name: 'Work items', layout: 'TABLE_LAYOUT', filter: 'type:"Work item"', show: ['Sub-issues progress'], hide: [] },
+      { name: 'Decisions', layout: 'TABLE_LAYOUT', filter: 'type:Decision', show: [], hide: [] },
+      { name: 'Reviews due', layout: 'TABLE_LAYOUT', filter: '"Review date":<=@today', show: [], hide: [] },
+    ]);
+    assert.deepEqual(viewsChecklist('https://example.test/p'), [
+      "Finish the Project https://example.test/p by hand (GitHub's API cannot):",
+      '  [ ] Needs you: add the Type column (+ at the right of the headers → Type, then Save)',
+      '  [ ] Work items: group by Step',
+      '  [ ] Decisions: group by Decision',
+      '  [ ] Workflows → Auto-archive items: is:closed updated:<@today-7d',
+    ]);
+  });
+});
+
+describe('graphql', () => {
+  for (const [name, answer, message] of [
+    ['an error status, though it gives data', { status: 502, json: { data: {} } }, "GitHub's GraphQL API refused: HTTP 502"],
+    ['errors beside its data', { status: 200, json: { data: {}, errors: [{ message: 'one' }, { message: 'two' }] } }, "GitHub's GraphQL API refused: one; two"],
+    ['no answer at all', { status: 200, json: null }, "GitHub's GraphQL API refused: HTTP 200"],
+    ['an error status with no errors listed', { status: 502, json: {} }, "GitHub's GraphQL API refused: HTTP 502"],
+  ] as const) {
+    it(`throws when GitHub gives ${name}`, async () => {
+      const sys = new FakeSys();
+      sys.route('POST', '/graphql', answer);
+      await assert.rejects(graphql(sys, 'tok', 'query { viewer { login } }', {}), { message });
+    });
+  }
+});
+
+describe('setUpViews', () => {
+  /** A board with the Project's views as `change` leaves the settled ones; returns what setUpViews sent and the views after. */
+  async function views(change: (views: ReturnType<typeof settledViews>) => void): Promise<{ sent: string[] | undefined; after: ReturnType<typeof settledViews> }> {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    const had = settledViews();
+    change(had);
+    board.project = { fields: [...BUILT_IN, ...FIELDS.map((f) => f.name)], linked: true, views: had, grouped: true };
+    const result = await setUpViews(sys, OWNER_TOKEN, async () => true, 'P_1', 'example-app work');
+    assert.ok(sent(sys, 'views(first').every(({ query }) => query.includes('views(first: 50) { nodes { id name layout filter configuration { visibleFields(first: 50) { nodes { ... on ProjectV2FieldCommon { name } } } } } }')));
+    return { sent: result, after: board.project.views ?? [] };
+  }
+
+  it('sends nothing for views that are right', async () => {
+    assert.deepEqual((await views(() => {})).sent, []);
+  });
+
+  it('hides a column the spec hides, though it shows every column it asks for', async () => {
+    const { sent: names, after } = await views((had) => {
+      had[0]!.visible = ['Title', 'Assignees', 'Status', 'Parent issue'];
+    });
+    assert.deepEqual(names, ['Needs you']);
+    assert.deepEqual(after[0]?.visible, ['Title', 'Status', 'Parent issue']);
+  });
+
+  it('sends no columns for a view whose layout alone is wrong', async () => {
+    const { sent: names, after } = await views((had) => {
+      had[1]!.layout = 'TABLE_LAYOUT';
+    });
+    assert.deepEqual(names, []);
+    assert.equal(after[1]?.layout, 'BOARD_LAYOUT');
+  });
+
+  it("leaves out a visible column the Project's fields do not list", async () => {
+    const { sent: names, after } = await views((had) => {
+      had[0]!.visible = ['Title', 'Assignees', 'Labels'];
+    });
+    assert.deepEqual(names, ['Needs you']);
+    assert.deepEqual(after[0]?.visible, ['Title', 'Parent issue']);
+  });
+});
 
 describe('setUpBoard', () => {
   it('builds the Project, its fields and views when the template cannot be copied', async () => {
     const sys = new FakeSys();
     const board = new Board(sys);
     board.template = 'missing';
-    const { url, out, err } = await setUp(sys);
+    const { url, out, err, steps } = await setUp(sys);
     assert.deepEqual(err, []);
     assert.equal(url, URL);
+    assert.deepEqual(steps, ['issue types', 'labels', 'project', 'fields', 'views']);
+    assert.deepEqual(sys.asked.slice(1, 4), [
+      'Add the labels approved, needs-owner, mechanical, veto, expiring, cannot-run-here to example-org/example-app?',
+      'Create the Project "example-app work" for example-org from the niyam template, linked to example-org/example-app?',
+      'Add the fields Step, Decision, Review date to "example-app work"?',
+    ]);
+    assert.deepEqual(
+      sys.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/labels')).map((r) => r.body),
+      LABELS.map(({ name, color, description }) => ({ name, color, description })),
+    );
+    assert.ok(sys.requests.every((r) => r.token === OWNER_TOKEN));
     assert.deepEqual(board.titles, ['example-app work']);
     assert.deepEqual(board.issueTypes, ['Task', 'Bug', ...ISSUE_TYPES.map((t) => t.name)]);
     assert.deepEqual(board.labels, ['bug', ...LABELS.map((l) => l.name)]);
@@ -89,8 +206,9 @@ describe('setUpBoard', () => {
     board.issueTypes = ISSUE_TYPES.map((t) => t.name);
     board.labels = LABELS.map((l) => l.name);
     board.project = { fields: [...BUILT_IN, ...FIELDS.map((f) => f.name)], linked: true, views: settledViews(), grouped: true, options: { Step: ['Frame', 'Specify', 'Slice', 'build'] } };
-    const { err } = await setUp(sys, ['y']);
+    const { err, steps } = await setUp(sys, ['y']);
     assert.deepEqual(err, []);
+    assert.deepEqual(steps, ['fields']);
     assert.deepEqual(sys.asked, ['Add the option Done to the field Step in "example-app work"?']);
     assert.deepEqual(board.project.options, { Step: ['Frame', 'Specify', 'Slice', 'build', 'Done'] });
     const sent = sys.requests.find((r) => String((r.body as { query?: string } | undefined)?.query).includes('updateProjectV2Field('));
@@ -104,6 +222,100 @@ describe('setUpBoard', () => {
     // A rerun finds the option there and asks nothing.
     sys.asked = [];
     await setUp(sys, []);
+    assert.deepEqual(sys.asked, []);
+  });
+
+  it('says "options" for two a field lacks', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.issueTypes = ISSUE_TYPES.map((t) => t.name);
+    board.labels = LABELS.map((l) => l.name);
+    board.project = { fields: [...BUILT_IN, ...FIELDS.map((f) => f.name)], linked: true, views: settledViews(), grouped: true, options: { Step: ['Frame', 'Specify', 'Slice'] } };
+    await setUp(sys, ['n']);
+    assert.deepEqual(sys.asked, ['Add the options Build, Done to the field Step in "example-app work"?']);
+  });
+
+  it('says "workflow" for one that is off', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.copyAbsent = [];
+    board.copyOff = ['Pull request merged'];
+    const { byHand } = await setUp(sys, ['y', 'y', 'y']);
+    assert.deepEqual(byHand, [`Once for the board: turn on the workflow Pull request merged at ${COPY_URL}/workflows, which GitHub's API cannot.`]);
+  });
+
+  it('skips label entries GitHub gives without a name', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.issueTypes = ISSUE_TYPES.map((t) => t.name);
+    sys.route('GET', `/repos/${SLUG}/labels?per_page=100&page=1`, { status: 200, json: [null, { name: 5 }, ...LABELS.map((l) => ({ name: l.name }))] });
+    await setUp(sys);
+    assert.ok(!sys.requests.some((r) => r.method === 'POST' && r.url.endsWith('/labels')));
+  });
+
+  for (const [name, answer] of [
+    ['an error status', { status: 500, json: repoJson() }],
+    ['no answer', { status: 200, json: null }],
+    ['no node id', { status: 200, json: { ...repoJson(), node_id: 5 } }],
+    ['no name', { status: 200, json: { ...repoJson(), name: 5 } }],
+    ['no owner', { status: 200, json: { ...repoJson(), owner: null } }],
+  ] as const) {
+    it(`throws when GitHub's answer for the repository has ${name}`, async () => {
+      const sys = new FakeSys();
+      new Board(sys);
+      sys.route('GET', `/repos/${SLUG}`, answer);
+      await assert.rejects(setUp(sys), { message: `cannot read example-org/example-app as example-owner (HTTP ${answer.status})` });
+    });
+  }
+
+  it('builds the Project when GitHub shows no template organisation', async () => {
+    const sys = new FakeSys();
+    new Board(sys);
+    intercept(sys, (query) => (query.includes('projectV2(number') ? { status: 200, json: { data: { organization: null } } } : undefined));
+    const { out } = await setUp(sys);
+    assert.ok(out.includes('- the niyam template could not be copied (GitHub shows no Project 4 in athya-hq); building the Project instead'));
+  });
+
+  it("waits for every field of a copy, not only some of them", async () => {
+    const sys = new FakeSys();
+    new Board(sys);
+    let partial = true;
+    intercept(sys, (query, variables) => {
+      if (query !== 'query($id: ID!) { node(id: $id) { ... on ProjectV2 { fields(first: 50) { nodes { ... on ProjectV2FieldCommon { name } } } } } }' || variables.id !== 'P_2' || !partial) return undefined;
+      partial = false;
+      return { status: 200, json: { data: { node: { fields: { nodes: [{ name: 'Title' }, { name: 'Step' }] } } } } };
+    });
+    await setUp(sys, ['y', 'y', 'y']);
+    assert.deepEqual(sys.slept, [3000]);
+  });
+
+  for (const [name, groups] of [
+    ['only some of its views are grouped', { 'Work items': ['Step'], Decisions: [] }],
+    ['other views hold the grouping', { Board: ['Step'], Mine: ['Decision'], 'Work items': [], Decisions: [] }],
+    ['its views are grouped by other fields', { 'Work items': ['Status'], Decisions: ['Status'] }],
+  ] as const) {
+    it(`offers to replace a Project when ${name}`, async () => {
+      const sys = new FakeSys();
+      const board = new Board(sys);
+      board.issueTypes = ISSUE_TYPES.map((t) => t.name);
+      board.labels = LABELS.map((l) => l.name);
+      board.project = { fields: [...BUILT_IN, ...FIELDS.map((f) => f.name)], linked: true, views: settledViews(), grouped: true };
+      const nodes = Object.entries(groups).map(([view, by]) => ({ name: view, groupByFields: { nodes: (by as readonly string[]).map((field) => ({ name: field })) } }));
+      intercept(sys, (query) => (query.includes('groupByFields') ? { status: 200, json: { data: { node: { views: { nodes }, workflows: { nodes: [] } } } } } : undefined));
+      const { steps } = await setUp(sys, ['n']);
+      assert.match(sys.asked[0] ?? '', /^"example-app work" lacks what only the niyam template sets/);
+      assert.deepEqual(steps, ['replace']);
+    });
+  }
+
+  it('adds no option to a field the work model gives none, though the owner gave it some', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    board.issueTypes = ISSUE_TYPES.map((t) => t.name);
+    board.labels = LABELS.map((l) => l.name);
+    board.project = { fields: [...BUILT_IN, ...FIELDS.map((f) => f.name)], linked: true, views: settledViews(), grouped: true, options: { 'Review date': ['Soon'] } };
+    const { url } = await setUp(sys, []);
+    assert.equal(url, URL);
     assert.deepEqual(sys.asked, []);
   });
 
@@ -251,12 +463,34 @@ describe('setUpBoard', () => {
     assert.ok(board.project?.linked);
     const order = board.operations.filter((o) => o === 'updateProjectV2(' || o === 'copyProjectV2');
     assert.deepEqual(order, ['updateProjectV2(', 'copyProjectV2', 'updateProjectV2('], 'renamed before the copy, closed after the move');
+    assert.deepEqual(sent(sys, 'updateProjectV2('), [
+      { query: 'mutation($project: ID!, $title: String!) { updateProjectV2(input: { projectId: $project, title: $title }) { projectV2 { id } } }', variables: { project: 'P_1', title: 'example-app work (old)' } },
+      { query: 'mutation($project: ID!, $title: String!) { updateProjectV2(input: { projectId: $project, title: $title, closed: true }) { projectV2 { id } } }', variables: { project: 'P_1', title: 'example-app work (old)' } },
+    ]);
+    assert.ok(sent(sys, 'items(first').every(({ query }) => query.includes('... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } }')));
     assert.deepEqual({ title: board.old?.title, closed: board.old?.closed }, { title: 'example-app work (old)', closed: true });
     assert.deepEqual(out.slice(2, 4), [
       `✓ moved 4 items to the copy; closed the old Project as "example-app work (old)": ${URL}`,
       `✓ Project "example-app work": ${COPY_URL}`,
     ]);
     assert.ok(!out.some((line) => line.startsWith('Finish the Project')));
+  });
+
+  it('moves text and number values to a copy that has their fields, and a date to a field with options', async () => {
+    const sys = new FakeSys();
+    const board = new Board(sys);
+    older(board, [{ content: 'ISSUE_a', values: { Step: 'Build', 'Review date': '2026-11-01', Estimate: 3, Notes: 'n' } }]);
+    intercept(sys, (query) => {
+      // moveItems' read of the copy's fields: give it Notes and Estimate, and options on Review date that no value names.
+      if (!query.includes('options { id name } }')) return undefined;
+      const answer = board.graphql(sys.requests.at(-1)?.body as { query: string; variables: Record<string, unknown> }) as { status: number; json: { data: { node: { fields: { nodes: Record<string, unknown>[] } } } } };
+      const nodes = answer.json.data.node.fields.nodes;
+      for (const node of nodes) if (node.name === 'Review date') node.options = [{ id: 'O_x', name: 'x' }];
+      nodes.push({ id: 'F_Notes', name: 'Notes' }, { id: 'F_Estimate', name: 'Estimate' });
+      return answer;
+    });
+    await setUp(sys, ['y']);
+    assert.deepEqual(board.project?.items, [{ content: 'ISSUE_a', values: { Step: 'Build', 'Review date': '2026-11-01', Estimate: 3, Notes: 'n' } }]);
   });
 
   it('moves every page of items, and says "item" for one', async () => {
@@ -321,8 +555,9 @@ describe('setUpBoard', () => {
     const sys = new FakeSys();
     const board = new Board(sys);
     board.project = { fields: FIELDS.map((f) => f.name), linked: false, views: settledViews(), grouped: true };
-    const { url } = await setUp(sys, ['y', 'y', 'y']);
+    const { url, steps } = await setUp(sys, ['y', 'y', 'y']);
     assert.equal(url, URL);
+    assert.ok(steps.includes('link'));
     assert.ok(board.project.linked);
     assert.ok(sys.asked.includes('Link the Project "example-app work" to example-org/example-app?'));
   });
@@ -512,11 +747,15 @@ describe('boardStarted', () => {
     const board = new RestBoard(sys);
     board.projects[0]!.items = board.projects[0]!.items.filter((item) => item.issue !== 12);
     board.projects.push({ number: 5, title: 'roadmap', fields: { Title: null, Step: STEP_OPTIONS }, items: [{ issue: 12, values: {} }] });
+    board.projects.push({ number: 6, title: 'notes', fields: { Title: null }, items: [{ issue: 12, values: {} }] });
     board.workItems = [10];
     assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
       '✓ board: work item #10 is at Step Build in "example-app work"',
       '! board: slice #12 is not on the board: no open Project of example-org with a Status field holds it unarchived, so it did not move to In Progress',
     ]);
+    // A Project's items are read with the field ids it has, and not at all with neither field.
+    assert.ok(sys.requests.some((r) => r.url === 'https://api.github.com/orgs/example-org/projectsV2/5/items?per_page=100&fields=2'));
+    assert.ok(!sys.requests.some((r) => r.url.includes('/projectsV2/6/items')));
   });
 
   it("says when a Project's Status has no option In Progress, and still makes the other moves", async () => {
@@ -548,13 +787,165 @@ describe('boardStarted', () => {
   });
 
   it("moves no work item for a slice with no parent, or one that is not a Work item's", async () => {
-    for (const parent of [{ status: 404, json: { message: 'No parent issue found' } }, { status: 200, json: { number: 10, type: { name: 'Slice' } } }]) {
+    for (const parent of [
+      { status: 404, json: { message: 'No parent issue found' } },
+      // GitHub's 404 says no parent, whatever else it holds.
+      { status: 404, json: { message: 'No parent issue found', number: 10, type: { name: 'Work item' } } },
+      { status: 200, json: { number: 10, type: { name: 'Slice' } } },
+      { status: 200, json: { number: 10 } },
+      { status: 200, json: null },
+    ]) {
       const sys = new FakeSys();
       slice(sys, parent);
       const board = new RestBoard(sys);
-      board.workItems = [21];
-      assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), ['✓ board: slice #12 is In Progress in "example-app work"']);
+      // #10 is a Work item on the board, at Slice: only a slice it is the parent of moves it to Build.
+      board.workItems = [10, 21];
+      assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), ['✓ board: slice #12 is In Progress in "example-app work"'], JSON.stringify(parent));
     }
+  });
+
+  it('reads the parent at the issue URL GitHub gives, or builds it, with the token', async () => {
+    const sys = new FakeSys();
+    slice(sys);
+    sys.route('GET', `${ISSUE}/12`, { status: 200, json: { number: 12, state: 'open' } });
+    new RestBoard(sys);
+    assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+      '✓ board: slice #12 is In Progress in "example-app work"',
+      '✓ board: work item #10 is at Step Build in "example-app work"',
+      '✓ board: work item #20 had no Step; it is at Frame in "example-app work"',
+    ]);
+    assert.equal(sys.requests.find((r) => r.url === `${ISSUE}/12/parent`)?.token, 'tok');
+  });
+
+  it("names a move GitHub refuses, and makes the others", async () => {
+    const sys = new FakeSys();
+    slice(sys);
+    new RestBoard(sys).refuse = (method, path) => (method === 'PATCH' && path.endsWith('/items/100') ? { status: 403, json: { message: 'Resource not accessible by integration' } } : undefined);
+    assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+      `! board: slice #12 was not moved to In Progress in "example-app work" (GitHub's REST API refused PATCH /orgs/example-org/projectsV2/3/items/100: HTTP 403 Resource not accessible by integration)`,
+      '✓ board: work item #10 is at Step Build in "example-app work"',
+      '✓ board: work item #20 had no Step; it is at Frame in "example-app work"',
+    ]);
+  });
+
+  it('moves the parent first wherever it sits on the board, then the newest', async () => {
+    const sys = new FakeSys();
+    slice(sys);
+    const board = new RestBoard(sys);
+    board.workItems = [10, 20, 21, 30];
+    board.projects[0]!.items = [{ issue: 12, values: { Status: 'Todo' } }, { issue: 30, values: {} }, { issue: 21, values: {} }, { issue: 20, values: {} }, { issue: 10, values: {} }];
+    assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+      '✓ board: slice #12 is In Progress in "example-app work"',
+      '✓ board: work item #10 had no Step; it is at Build in "example-app work"',
+      '✓ board: work item #30 had no Step; it is at Frame in "example-app work"',
+      '✓ board: work item #21 had no Step; it is at Frame in "example-app work"',
+      '✓ board: work item #20 had no Step; it is at Frame in "example-app work"',
+    ]);
+  });
+
+  it('reads plain option names, and skips an option with none', async () => {
+    const repo = `https://api.github.com/repos/${SLUG}`;
+    const item = (id: number, number: number, type: string, field: number, value: string) => ({ id, content_type: 'Issue', content: { number, repository_url: repo, state: 'open', type: { name: type } }, fields: [{ id: field, value: { name: value } }] });
+    const fields = (status: unknown) => [
+      { id: 1, name: 'Title', data_type: 'title' },
+      { id: 2, name: 'Status', data_type: 'single_select', ...(status as object) },
+      { id: 3, name: 'Step', data_type: 'single_select', options: [{ id: '3_x', name: { html: 'x' } }, ...STEP_OPTIONS.map((option) => ({ id: `3_${option}`, name: option }))] },
+    ];
+    for (const [status, expected] of [
+      [{ options: STATUS_OPTIONS.map((option) => ({ id: `2_${option.replaceAll(' ', '-')}`, name: option })) }, ['✓ board: slice #12 is In Progress in "example-app work"', '✓ board: work item #10 is at Step Build in "example-app work"']],
+      [{}, ['✓ board: work item #10 is at Step Build in "example-app work"', `! board: Status in "example-app work" has no option In Progress, so slice #12 stays where it is; add the option to the Project's Status field`]],
+    ] as const) {
+      const sys = new FakeSys();
+      slice(sys);
+      new RestBoard(sys).refuse = (method, path) => {
+        if (method !== 'GET') return undefined;
+        if (path === '/orgs/example-org/projectsV2/3/fields') return { status: 200, json: fields(status) };
+        if (path === '/orgs/example-org/projectsV2/3/items') return { status: 200, json: [item(100, 12, 'Slice', 2, 'Todo'), item(101, 10, 'Work item', 3, 'Slice')] };
+        return undefined;
+      };
+      assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), expected);
+    }
+  });
+
+  it('skips a closed Project, whichever way GitHub marks it closed', async () => {
+    for (const marks of [{ state: 'closed', closed_at: null }, { state: 'open', closed_at: '2026-11-01T00:00:00Z' }]) {
+      const sys = new FakeSys();
+      slice(sys);
+      new RestBoard(sys).refuse = (method, path) => (path === '/orgs/example-org/projectsV2' ? { status: 200, json: [{ number: 3, title: 'example-app work', ...marks }] } : undefined);
+      assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+        '! board: slice #12 is not on the board: no open Project of example-org with a Status field holds it unarchived, so it did not move to In Progress',
+      ]);
+      assert.ok(!sys.requests.some((r) => r.url.includes('/projectsV2/3/')));
+    }
+  });
+
+  it('takes a Status that is not a single select for none', async () => {
+    const sys = new FakeSys();
+    slice(sys);
+    const board = new RestBoard(sys);
+    board.projects[0]!.fields = { Title: null, Status: null, Step: STEP_OPTIONS };
+    assert.deepEqual(await boardStarted(sys, 'tok', SLUG, 12), [
+      '✓ board: work item #10 is at Step Build in "example-app work"',
+      '✓ board: work item #20 had no Step; it is at Frame in "example-app work"',
+      '! board: slice #12 is not on the board: no open Project of example-org with a Status field holds it unarchived, so it did not move to In Progress',
+    ]);
+  });
+
+  it('follows a next page whose Link header has no space before rel', async () => {
+    const sys = new FakeSys();
+    const board = new RestBoard(sys);
+    let first = true;
+    board.refuse = (method, path) => {
+      if (path !== '/orgs/example-org/projectsV2' || !first) return undefined;
+      first = false;
+      return { status: 200, json: [], headers: { link: '<https://api.github.com/orgs/example-org/projectsV2?per_page=100&after=0>;rel="next"' } };
+    };
+    assert.deepEqual(await boardSwept(sys, 'tok', SLUG), ['✓ board: work item #20 had no Step; it is at Frame in "example-app work"']);
+  });
+
+  for (const [name, json] of [
+    ['no answer', null],
+    ['no owner', {}],
+  ] as const) {
+    it(`takes the owner from the slug when GitHub's answer for the repository has ${name}`, async () => {
+      const sys = new FakeSys();
+      new RestBoard(sys);
+      sys.route('GET', `/repos/${SLUG}`, { status: 200, json });
+      assert.deepEqual(await boardSwept(sys, 'tok', SLUG), ['✓ board: work item #20 had no Step; it is at Frame in "example-app work"']);
+    });
+  }
+
+  it('skips an item whose issue GitHub hides, and reads one with no fields or sub-issues', async () => {
+    const sys = new FakeSys();
+    const repo = `https://api.github.com/repos/${SLUG}`;
+    new RestBoard(sys).refuse = (method, path) =>
+      method === 'GET' && path === '/orgs/example-org/projectsV2/3/items'
+        ? {
+            status: 200,
+            json: [
+              { id: 100, content_type: 'Issue', content: null },
+              { id: 101, content_type: 'Issue', content: { number: 10 } },
+              { id: 102, content_type: 'Issue', content: { number: 20, repository_url: repo, state: 'open', type: { name: 'Work item' } } },
+              { id: 103, content_type: 'Issue', content: { number: 21, repository_url: repo, state: 'open', type: { name: 'Work item' } }, fields: [] },
+            ],
+          }
+        : undefined;
+    assert.deepEqual(await boardSwept(sys, 'tok', SLUG), [
+      '✓ board: work item #21 had no Step; it is at Frame in "example-app work"',
+      '✓ board: work item #20 had no Step; it is at Frame in "example-app work"',
+    ]);
+  });
+
+  it('names every option a Project lacks in its one line', async () => {
+    const sys = new FakeSys();
+    const board = new RestBoard(sys);
+    board.workItems = [10, 20, 21, 40, 43];
+    board.projects[0]!.fields.Step = ['Frame'];
+    board.projects[0]!.items.push({ issue: 40, state: 'closed', values: {} }, { issue: 43, subIssues: { total: 1, completed: 0 }, values: {} });
+    assert.deepEqual(await boardSwept(sys, 'tok', SLUG), [
+      '✓ board: work item #20 had no Step; it is at Frame in "example-app work"',
+      '! board: Step in "example-app work" has no option Slice, Done, so work items that belong there stay where they are; niyam onboard adds it',
+    ]);
   });
 
   it("throws when GitHub's REST API refuses a read, naming it", async () => {
@@ -567,6 +958,21 @@ describe('boardStarted', () => {
     slice(hidden, { status: 404, json: { message: 'Not Found' } });
     new RestBoard(hidden);
     await assert.rejects(boardStarted(hidden, 'tok', SLUG, 12), { message: `GitHub's REST API refused GET /repos/${SLUG}/issues/12/parent: HTTP 404 Not Found` });
+    // A message that says no parent counts only with a 404, and only as text.
+    const forbidden = new FakeSys();
+    slice(forbidden, { status: 403, json: { message: 'No parent access here' } });
+    new RestBoard(forbidden);
+    await assert.rejects(boardStarted(forbidden, 'tok', SLUG, 12), { message: `GitHub's REST API refused GET /repos/${SLUG}/issues/12/parent: HTTP 403 No parent access here` });
+    const listed = new FakeSys();
+    slice(listed, { status: 404, json: { message: ['No parent issue found'] } });
+    new RestBoard(listed);
+    await assert.rejects(boardStarted(listed, 'tok', SLUG, 12), { message: `GitHub's REST API refused GET /repos/${SLUG}/issues/12/parent: HTTP 404` });
+    for (const status of [199, 300]) {
+      const odd = new FakeSys();
+      slice(odd);
+      new RestBoard(odd).refuse = (method, path) => (path.endsWith('/fields') ? { status, json: [] } : undefined);
+      await assert.rejects(boardStarted(odd, 'tok', SLUG, 12), { message: `GitHub's REST API refused GET /orgs/example-org/projectsV2/3/fields?per_page=100: HTTP ${status}` });
+    }
     const bare = new FakeSys();
     slice(bare, { status: 500, json: null });
     new RestBoard(bare);
@@ -662,6 +1068,8 @@ describe('boardStarted', () => {
     assert.equal(stepDue(open('Slice', 1, 1)), 'Build');
     assert.equal(stepDue(open('Specify'), true), 'Build');
     assert.equal(stepDue(open('Build')), undefined);
+    assert.equal(stepDue(open('Frame')), undefined);
+    assert.equal(stepDue(open('Slice', 1)), undefined);
     assert.equal(stepDue(open('Done')), 'Frame');
     assert.equal(stepDue({ ...open('Build'), state: 'closed' }), 'Done');
     assert.equal(stepDue({ ...open('done'), state: 'closed' }), undefined);

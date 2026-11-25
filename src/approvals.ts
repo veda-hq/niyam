@@ -33,6 +33,6 @@ export interface Answer {
  */
 export function batchAnswers<T extends Answer>(comments: T[], owners: string[], number: number, since: string): T[] {
   return comments.filter(
-    (comment) => anyLogin(owners, comment.user?.login ?? undefined) && comment.created_at > since && approvedIn(comment.body ?? '').includes(number),
+    (comment) => anyLogin(owners, comment.user?.login ?? undefined) && comment.created_at > since && typeof comment.body === 'string' && approvedIn(comment.body).includes(number),
   );
 }

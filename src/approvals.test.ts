@@ -12,8 +12,12 @@ describe('approvedIn', () => {
     assert.deepEqual(approvedIn('  decision:   APPROVE #7, #8 and #7 again\r\n#9'), [7, 8]);
   });
 
+  it('approves nothing on a first line broken by a lone line separator, rather than read part of it', () => {
+    for (const body of ['Decision: approve #7\r#8', 'Decision: approve #7 #8']) assert.deepEqual(approvedIn(body), [], JSON.stringify(body));
+  });
+
   it('approves nothing unless the first line opens "Decision: approve"', () => {
-    for (const body of ['Decision: #7 is fine', 'Decision: approved #7', 'I approve #7', 'Proposal: approve #7', '\nDecision: approve #7', '', 'Decision: approve']) {
+    for (const body of ['Not yet. Decision: approve #7', 'Decision: #7 is fine', 'Decision: approved #7', 'I approve #7', 'Proposal: approve #7', '\nDecision: approve #7', '', 'Decision: approve']) {
       assert.deepEqual(approvedIn(body), [], body);
     }
   });
@@ -46,5 +50,9 @@ describe('batchAnswers', () => {
     ];
     assert.deepEqual(batchAnswers(comments, owners, 2925, at(2)), [mine]);
     assert.deepEqual(batchAnswers(comments, owners, 2748, at(2)), []);
+  });
+
+  it('keeps no answer made at the very time of the ask', () => {
+    assert.deepEqual(batchAnswers([{ body: NOV_8, user: { login: 'example-owner' }, created_at: at(2) }], owners, 2925, at(2)), []);
   });
 });
