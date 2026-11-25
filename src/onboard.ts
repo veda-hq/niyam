@@ -184,16 +184,15 @@ function unquoted(word: string): string {
   return match ? (match[2] as string) : word;
 }
 
-/** A path inside `root` with its `.` and `..` read, lexically (pnpm's links stay as written), or undefined when it leaves `root`. */
-function insideRoot(root: string, path: string): string | undefined {
+/** A path from `root` with its `.` and `..` read, lexically (pnpm's links stay as written). */
+function lexical(root: string, path: string): string {
   const parts: string[] = [];
   for (const part of (path.startsWith('/') ? path : `${root}/${path}`).split('/')) {
     if (part === '' || part === '.') continue;
     if (part === '..') parts.pop();
     else parts.push(part);
   }
-  const full = `/${parts.join('/')}`;
-  return full.startsWith(`${root}/`) ? full : undefined;
+  return `/${parts.join('/')}`;
 }
 
 /**
@@ -215,8 +214,11 @@ function blockDepths(lines: readonly string[]): number[] {
   return lines.map((line) => {
     const at = depth;
     const count = (pattern: RegExp, text: string) => text.match(pattern)?.length ?? 0;
-    const braces = line.replace(/\$\{[^}]*\}/g, '');
-    depth +=
+    // The line less its `${…}` expansions; join's commas count as no brace.
+    const braces = line.split(/\$\{[^}]*\}/).join();
+    // Not `+=`: only depth 0 counts, and `-=` would only flip the sign.
+    depth =
+      depth +
       count(/(?:^|[;&|(]\s*)(?:if|case|for|while|until)\b/g, line) -
       count(/(?:^|[;&|]\s*)(?:fi|esac|done)\b/g, line) +
       count(/\{/g, braces) -
@@ -237,26 +239,26 @@ function handedOffBody(sys: Sys, root: string, text: string): string | undefined
   let target = unquoted(handoff.word);
   const variable = /^\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})$/.exec(target);
   if (variable) {
-    // Every line that sets the variable, in any form (`export B=`, `B+=`, `x && B=`), counts: one alone, plain, before the hand-off.
+    // Every line before the hand-off that sets the variable, in any form (`export B=`, `B+=`, `x && B=`), counts: one
+    // alone, plain. A line after it cannot change the file the hand-off ran.
     const name = variable[1] ?? variable[2];
     const sets = new RegExp(`(?:^|[^\\w$])${name}\\+?=`);
-    const setting = lines.flatMap((line, at) => (sets.test(line) ? [{ line, at }] : []));
+    const setting = lines.slice(0, handoff.at).flatMap((line, at) => (sets.test(line) ? [{ line, at }] : []));
     const only = setting.length === 1 ? setting[0] : undefined;
-    const match = only && only.at < handoff.at && depths[only.at] === 0 ? ASSIGNMENT.exec(only.line) : null;
+    const match = only && depths[only.at] === 0 ? ASSIGNMENT.exec(only.line) : null;
     if (!match || match[1] !== name) return undefined;
     target = unquoted(match[2] as string);
   }
   if (/[$`*?\\]/.test(target)) return undefined;
-  const body = insideRoot(root, target);
-  if (body === undefined || !sys.exists(body)) return undefined;
-  let bodyText: string;
+  const body = lexical(root, target);
+  if (!body.startsWith(`${root}/`)) return undefined;
+  let runs = false;
   try {
-    bodyText = sys.read(body);
+    runs = RUNS_PRE_PUSH.test(sys.read(body));
   } catch {
-    // fail-open: a folder or a file it cannot read is a hand-off it cannot check, so the hook stays the client's own.
-    return undefined;
+    // fail-open: a missing file, a folder or a file it cannot read is a hand-off it cannot check, so the hook stays the client's own.
   }
-  return RUNS_PRE_PUSH.test(bodyText) ? body.slice(root.length + 1) : undefined;
+  return runs ? body.slice(root.length + 1) : undefined;
 }
 
 /**
@@ -400,9 +402,10 @@ export interface RuleNeeds {
  * own name the page does not describe, so it matches nothing here.
  */
 function deniesTool(by: string, tool: string, bare: string): boolean {
-  if (by === tool || by === bare || by === '*' || by === 'mcp__*') return true;
+  if (by === bare || by === '*' || by === 'mcp__*') return true;
   const prefix = `${bare}__`;
-  if (!by.startsWith(prefix) || !by.includes('*') || !tool.startsWith(prefix)) return false;
+  // The tool's own name is a glob with no `*`, which matches it alone.
+  if (!by.startsWith(prefix) || !tool.startsWith(prefix)) return false;
   const glob = by.slice(prefix.length).split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
   return new RegExp(`^${glob}$`).test(tool.slice(prefix.length));
 }
@@ -416,7 +419,8 @@ function deniesTool(by: string, tool: string, bare: string): boolean {
  */
 function ruleNeeds(settings: unknown, rules: readonly string[], server: string[]): RuleNeeds {
   const permissions = (settings as { permissions?: { allow?: unknown; deny?: unknown } } | null)?.permissions;
-  const listed = (value: unknown): string[] => (Array.isArray(value) ? value.filter((rule): rule is string => typeof rule === 'string') : []);
+  // [value] keeps it only when it is an array, and flat() unwraps it, so anything else lists nothing.
+  const listed = (value: unknown): string[] => [value].filter(Array.isArray).flat().filter((rule): rule is string => typeof rule === 'string');
   const allow = listed(permissions?.allow);
   const deny = listed(permissions?.deny);
   const bare = server[0]!;
@@ -658,8 +662,8 @@ const jobName = (id: string): string => `    name: ${JOB_NAMES[id]}`;
 /** The input naming the release each job pins. */
 export const REF_INPUT = `${CLI}-ref`;
 
-/** The workflow's head, down to its jobs, which every template shares; `asks` adds the needs-owner job's triggers. */
-function workflowHead(branch: string, version: string, comments: string[], schedule = DEFAULT_SCHEDULE, types = TRIGGER_TYPES, asks = true, settings: string = SETTINGS_PATH): string[] {
+/** The workflow's head, down to its jobs, with the needs-owner job's triggers. */
+function workflowHead(branch: string, version: string, comments: string[], schedule: string, settings: string): string[] {
   return [
     headerLine(version),
     ...comments,
@@ -667,14 +671,14 @@ function workflowHead(branch: string, version: string, comments: string[], sched
     '',
     'on:',
     '  pull_request:',
-    ...types,
+    ...TRIGGER_TYPES,
     '  push:',
     `    branches: [${JSON.stringify(branch)}]`,
-    ...(asks ? ASK_TRIGGERS : []),
+    ...ASK_TRIGGERS,
     scheduleComment(schedule, settings),
     '  schedule:',
     `    - cron: '${schedule}'`,
-    ...(asks ? HOURLY_CRON : []),
+    ...HOURLY_CRON,
     '  workflow_dispatch:',
     '',
     'permissions:',
@@ -766,8 +770,6 @@ export function workflow(branch: string, version: string, figma: boolean, schedu
         SPLIT_COMMENT,
       ],
       schedule,
-      TRIGGER_TYPES,
-      true,
       settings,
     ),
     '  # Pull request and push runs: read-only.',
