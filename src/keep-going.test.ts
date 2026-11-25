@@ -3,9 +3,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 
-import { sessionRecord } from './agent.ts';
+import { NO_TOKEN, pathsFor, sessionRecord, sessionScript } from './agent.ts';
 import { PROXY_TOKEN } from './cloud.ts';
 import { FakeSys, HOME, ROOT, capture, type Call } from './fake.test.ts';
 import { GITHUB_API } from './host.ts';
@@ -30,7 +30,9 @@ import {
   type PullRequest,
 } from './keep-going.ts';
 import { run } from './run.ts';
+import { removeFixtureRoot, maskProcessGitEnv } from './hermetic-git.ts';
 import { realSys } from './sys.ts';
+import type { Sys } from './types.ts';
 
 const HEAD = 'a'.repeat(40);
 const OLD = 'b'.repeat(40);
@@ -209,6 +211,45 @@ describe('the process checks', () => {
     assert.equal(carriedElsewhere(at('origin/feature\norigin/main\norigin/HEAD\norigin\n'), ROOT, 'feature', 'main'), false);
     assert.equal(carriedElsewhere(at('origin/group\n'), ROOT, 'feature', 'main'), true);
     assert.equal(carriedElsewhere(at(null), ROOT, 'feature', 'main'), true);
+    assert.equal(carriedElsewhere(at(''), ROOT, 'feature', 'main'), false, 'git naming no branch');
+    assert.equal(carriedElsewhere(at('origin/feature\norigin/group'), ROOT, 'feature', 'main'), true, 'one other branch among them');
+    const asked = at('');
+    carriedElsewhere(asked, ROOT, 'feature', 'main');
+    assert.deepEqual(asked.calls, [{ command: 'git', args: ['for-each-ref', '--contains', 'HEAD', '--format=%(refname:short)', 'refs/remotes/origin'], cwd: ROOT, timeoutMs: 20_000 }]);
+  });
+
+  it('reads no git verb without git, or past the end of the line', () => {
+    for (const words of [['push'], ['git'], ['git', '--no-pager']]) assert.equal(gitVerb(words), false, words.join(' '));
+  });
+
+  it('finds a push past a run of spaces, and takes no process whose id is not a number', () => {
+    assert.equal(pushInFlight(withProcesses('1 sh\n 11 git  push origin x', { 11: ROOT }), ROOT), true);
+    for (const table of ['1 sh\n 14 push now', '1 sh\n x1 git push', '1 sh\n 1x git push']) {
+      assert.equal(pushInFlight(withProcesses(table, { 14: ROOT, x1: ROOT, '1x': ROOT }), ROOT), false, table);
+    }
+  });
+
+  it('asks ps for every process and lsof for one working directory, and reads none from an answer naming no path', () => {
+    const sys = withProcesses(' 11 git push origin x', { 11: ROOT });
+    assert.equal(pushInFlight(sys, ROOT), true);
+    assert.deepEqual(sys.calls.map((call) => [call.command, call.args]), [['ps', ['-Ao', 'pid=,command=']], ['lsof', ['-a', '-p', '11', '-d', 'cwd', '-Fn']]]);
+    const nameless = new FakeSys();
+    nameless.execOverride = (call) => ({ code: 0, stdout: call.command === 'ps' ? ' 11 git push origin x' : 'p11\nfcwd\n', stderr: '' });
+    assert.equal(pushInFlight(nameless, ROOT), false);
+    // lsof would place any process here: only a git commit or push is asked about.
+    const anywhere = new FakeSys();
+    anywhere.execOverride = (call) => ({ code: 0, stdout: call.command === 'ps' ? ' 13 git log --grep push\n 14 node x' : `p1\nfcwd\nn${ROOT}\n`, stderr: '' });
+    assert.equal(pushInFlight(anywhere, ROOT), false);
+    assert.deepEqual(anywhere.calls.map((call) => call.command), ['ps']);
+  });
+
+  it('finds a snapshot shell on any line, past runs of spaces, asking ps only for a Claude process', () => {
+    const sys = withProcesses('1 0 /sbin/launchd\n  5  99 /bin/zsh -c source /h/.claude/shell-snapshots/snapshot-zsh-1.sh');
+    assert.equal(backgroundTask(sys, '99', ROOT), true);
+    assert.deepEqual(sys.calls.map((call) => [call.command, call.args]), [['ps', ['-Ao', 'pid=,ppid=,command=']]]);
+    const none = withProcesses('');
+    for (const pid of [undefined, '']) assert.equal(backgroundTask(none, pid, ROOT), false);
+    assert.deepEqual(none.calls, []);
   });
 });
 
@@ -463,6 +504,44 @@ describe('gather', () => {
       const got = await gather(unknown, ROOT, SETTINGS, false, undefined);
       assert.deepEqual([got.pr, got.left], ['unknown', []]);
       assert.ok(!unknown.requests.some((request) => request.url.includes('state=closed')));
+      assert.ok(!noSlice.requests.some((request) => request.url.includes('state=closed')), 'no slice, no closed pull requests read');
+      const noLog = sliced([closedPull()]);
+      noLog.execOverride = ((base) => (call: Call) => (call.args[0] === 'log' ? { code: 1, stdout: '', stderr: '' } : base(call)))(noLog.execOverride);
+      assert.deepEqual((await gather(noLog, ROOT, SETTINGS, false, undefined)).left, []);
+    });
+
+    it('names none with no head, a ref that is no string, or this branch, though that branch is on origin', async () => {
+      for (const head of [null, { ref: 7, repo: { full_name: 'example-org/example-app' } }, { ref: 'feature', repo: { full_name: 'example-org/example-app' } }]) {
+        const sys = sliced([closedPull({ head })], [], { 'old-try': 200, feature: 200 });
+        assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, [], JSON.stringify(head));
+      }
+    });
+
+    it('names one for a slice among those the branch names, held by no open pull request from here of that branch', async () => {
+      const two = sliced([closedPull()]);
+      two.execOverride = ((base) => (call: Call) => (call.args[0] === 'log' ? { code: 0, stdout: 'Fix it\n\nSlice: #13\nSlice: #12\n', stderr: '' } : base(call)))(two.execOverride);
+      assert.deepEqual((await gather(two, ROOT, SETTINGS, false, undefined)).left, [LEFT]);
+      for (const open of [{ head: null }, { head: { ref: 'other', repo: { full_name: 'example-org/example-app' } } }]) {
+        assert.deepEqual((await gather(sliced([closedPull()], [open]), ROOT, SETTINGS, false, undefined)).left, [LEFT], JSON.stringify(open));
+      }
+    });
+
+    it('asks for a branch named with a slash by its path', async () => {
+      const sys = sliced([closedPull({ head: { ref: 'claude/old-try', repo: { full_name: 'example-org/example-app' } } })], [], { 'claude/old-try': 200 });
+      sys.route('GET', `${REPO}/pulls?state=open&head=example-org%3Aclaude%2Fold-try&per_page=100`, { status: 200, json: [] });
+      assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, [{ ...LEFT, ref: 'claude/old-try' }]);
+    });
+
+    it('names one whose pull request names this slice among others', async () => {
+      assert.deepEqual((await gather(sliced([closedPull({ body: 'Slice: #99\nSlice: #12' })]), ROOT, SETTINGS, false, undefined)).left, [LEFT]);
+    });
+
+    it('names none where GitHub lists the open pull requests as no list, or refuses with one', async () => {
+      for (const answer of [{ status: 200, json: {} }, { status: 500, json: [] }]) {
+        const sys = sliced([closedPull()]);
+        sys.route('GET', OPEN, answer);
+        assert.deepEqual((await gather(sys, ROOT, SETTINGS, false, undefined)).left, [], JSON.stringify(answer));
+      }
     });
   });
 
@@ -579,11 +658,180 @@ describe('niyam keep-going', () => {
   });
 });
 
+describe('every edge of the settings, the decision and the hook (#616)', () => {
+  it('names the settings file and key in each refusal, and refuses each wrong shape', () => {
+    for (const value of [7, null, 'x']) assert.throws(() => keepGoingSettings({ keepGoing: value }), { message: '.github/niyam.json "keepGoing" must be an object' }, String(value));
+    assert.deepEqual(keepGoingSettings(7), keepGoingSettings({}), 'a file that holds no object has no "keepGoing"');
+    for (const [value, error] of [
+      [{ base: 'a b' }, /base must be a branch name/],
+      [{ base: 'ab//c' }, /base must be a branch name/],
+      [{ base: 7 }, /base must be a branch name/],
+      [{ trunks: [7] }, /trunks must be a list of branch names/],
+      [{ trunks: ['a b'] }, /trunks must be a list of branch names/],
+      [{ trunks: [['main']] }, /trunks must be a list of branch names/],
+      [{ printMode: [['OLD']] }, /printMode must be a list of variable names/],
+      [{ printMode: ['xA'] }, /printMode must be a list of variable names/],
+      [{ printMode: ['Ab'] }, /printMode must be a list of variable names/],
+      [{ owner: 7 }, /owner must be one line/],
+      [{ owner: '  ' }, /owner must be one line/],
+    ] as const) {
+      assert.throws(() => keepGoingSettings({ keepGoing: value }), error, JSON.stringify(value));
+    }
+    assert.equal(STOP_COMMAND, 'niyam keep-going --stop "<why, in plain English>"');
+  });
+
+  it("takes main when origin's default branch is on no origin", () => {
+    assert.equal(settingsAt(checkout({ 'symbolic-ref --quiet --short refs/remotes/origin/HEAD': 'upstream/trunk' }), ROOT).base, 'main');
+  });
+
+  it('asks a desktop session with no pull request to open one, and an unpushed one to push before carrying its PR', () => {
+    assert.match(reason(decide(facts({ desktop: true }), null, SETTINGS)), /no pull request yet: open it/);
+    const unpushed = reason(decide(facts({ remote: OLD, pr: open() }), null, SETTINGS));
+    assert.match(unpushed, /local commits are not on the remote: push them/);
+    assert.doesNotMatch(unpushed, /PR 7 is open/);
+  });
+
+  it('reads print mode from NIYAM_PRINT_MODE, and nothing past a branch with no work, a stop note there included', async () => {
+    const print = checkout();
+    pulls(print, []);
+    print.env = { ...print.env, NIYAM_PRINT_MODE: '1' };
+    assert.equal((await gather(print, ROOT, SETTINGS, false, undefined)).print, true);
+    const idle = checkout({ 'rev-list --count origin/main..HEAD': '0' });
+    idle.files.set(`${ROOT}/${STORE}/stop-note.json`, JSON.stringify({ branch: 'feature', head: HEAD, reason: 'r', at: 'x' }));
+    const got = await gather(idle, ROOT, SETTINGS, false, undefined);
+    assert.deepEqual([got.ahead, got.note, got.carried], [0, null, false]);
+    assert.ok(!idle.calls.some((call) => call.args[0] === 'for-each-ref'));
+  });
+
+  it("reads no pull request with the store's placeholder for a token", async () => {
+    const sys = checkout();
+    pulls(sys, [restPull()]);
+    sys.files.set(sessionRecord(HOME, 'mac-1') as string, `${JSON.stringify({ agent: 'ExampleBot' })}\n`);
+    sys.files.set(pathsFor(HOME, 'ExampleBot').session, sessionScript('ExampleBot', 42, pathsFor(HOME, 'ExampleBot')));
+    sys.setToken('ExampleBot', NO_TOKEN);
+    assert.equal(await readPr(sys, ROOT, 'feature', HEAD, 'mac-1'), 'unknown');
+    assert.equal(sys.requests.length, 0);
+  });
+
+  it('reads unknown from a page that is no list, a refusal with one, or a pull request with no number, state or head', async () => {
+    for (const answer of [{ status: 200, json: {} }, { status: 500, json: [] }]) {
+      const sys = checkout();
+      pulls(sys, () => answer);
+      assert.equal(await readPr(sys, ROOT, 'feature', HEAD, undefined), 'unknown', JSON.stringify(answer));
+    }
+    for (const bad of [restPull({ number: 'x' }), restPull({ state: 7 }), restPull({ head: null })]) {
+      const sys = checkout();
+      pulls(sys, [bad]);
+      assert.equal(await readPr(sys, ROOT, 'feature', HEAD, undefined), 'unknown', JSON.stringify(bad));
+    }
+  });
+
+  it('makes the folder for the stop note it writes', async () => {
+    const sys = checkout();
+    assert.equal(await keepGoing(sys, capture().io, ['--stop', 'x']), 0);
+    assert.ok(sys.dirs.includes(`${ROOT}/${STORE}`));
+  });
+
+  it('refuses a stop note where git names no commit', async () => {
+    const seen = capture();
+    assert.equal(await keepGoing(checkout({ 'rev-parse HEAD': null }), seen.io, ['--stop', 'x']), 1);
+    assert.deepEqual(seen.out, ['Not on a branch of a git checkout.']);
+  });
+
+  it("takes the project's folder when the input names no folder as a string, and lets a stop through with no input or an empty one", async () => {
+    const project = (): FakeSys => {
+      const sys = checkout();
+      pulls(sys, []);
+      sys.env = { ...sys.env, CLAUDE_PROJECT_DIR: `${ROOT}/sub` };
+      return sys;
+    };
+    for (const input of [JSON.stringify({ cwd: 7 }), JSON.stringify({ cwd: '' })]) {
+      const sys = project();
+      assert.match(await stopHook(sys, input), /no pull request yet: open it/, input);
+      assert.equal(sys.calls[0]?.cwd, `${ROOT}/sub`, input);
+    }
+    for (const input of ['', 'null', '0', 'false', '""']) {
+      const sys = project();
+      assert.equal(await stopHook(sys, input), '', input);
+      assert.deepEqual(sys.calls, [], input);
+    }
+    const nowhere = checkout();
+    pulls(nowhere, []);
+    assert.equal(await stopHook(nowhere, JSON.stringify({})), '');
+    assert.deepEqual(nowhere.calls, []);
+  });
+
+  it('lets a stop through where git names no toplevel, whatever is left on the branch', async () => {
+    const sys = checkout({ 'rev-parse --show-toplevel': null });
+    pulls(sys, []);
+    assert.equal(await stopHook(sys, JSON.stringify({ cwd: ROOT })), '');
+  });
+
+  it("keeps the count of a session with no usable id as unknown's, and a session id in a safe file name", async () => {
+    for (const [id, file] of [[7, 'unknown'], ['', 'unknown'], ['a.b', 'a_b']] as const) {
+      const sys = checkout();
+      pulls(sys, []);
+      await stopHook(sys, JSON.stringify({ cwd: ROOT, session_id: id }));
+      assert.ok(sys.files.has(`${ROOT}/${STORE}/${file}.json`), String(id));
+    }
+  });
+
+  it('writes nothing, and says why, where the count cannot be kept inside the checkout', async () => {
+    for (const refused of ['s1.json', 'stop-note.json']) {
+      const sys = checkout();
+      pulls(sys, []);
+      sys.confine = (root, path) => {
+        if (path.endsWith(`/${refused}`)) throw new Error(`refused to write ${path}`);
+      };
+      const said: string[] = [];
+      assert.equal(await stopHook(sys, JSON.stringify({ cwd: ROOT, session_id: 's1' }), (line) => said.push(line)), '', refused);
+      assert.deepEqual(said, [`niyam keep-going: refused to write ${ROOT}/${STORE}/${refused}`]);
+      assert.ok(![...sys.files.keys()].some((path) => path.startsWith(`${ROOT}/${STORE}/`)), refused);
+    }
+  });
+
+  it('reads nothing past stdin it cannot read, and passes on what the hook says on stderr', async () => {
+    const sys = checkout();
+    pulls(sys, []);
+    sys.env = { ...sys.env, CLAUDE_PROJECT_DIR: ROOT };
+    sys.readStdin = () => {
+      throw new Error('EBADF');
+    };
+    const seen = capture();
+    assert.equal(await keepGoing(sys, seen.io, []), 0);
+    assert.deepEqual([seen.out, sys.calls], [[], []]);
+    const told = checkout();
+    told.stdin = JSON.stringify({ cwd: ROOT, session_id: 'abc-123' });
+    const heard = capture();
+    assert.equal(await keepGoing(told, heard.io, []), 0);
+    assert.match(heard.err[0] ?? '', /^niyam could not act as the agent \(/);
+  });
+});
+
 describe('keep-going on real git', () => {
   const dirs: string[] = [];
+  // The machine's global git config (a trace target that writes into .git) must not reach the fixtures.
+  before(() => maskProcessGitEnv());
   after(() => {
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    for (const dir of dirs) removeFixtureRoot(dir);
   });
+  /**
+   * The real machine for `work` in `dir`, with no process table and no stdin: a mutant that read every process,
+   * or waited on the terminal, would only stall these tests; FakeSys covers those reads.
+   */
+  const machine = (work: string, dir: string): Sys => {
+    const real = realSys();
+    return {
+      ...real,
+      env: { PATH: process.env.PATH ?? '' },
+      cwd: work,
+      home: dir,
+      exec: (command, args, options) => (command === 'ps' ? { code: 0, stdout: '', stderr: '' } : real.exec(command, args, options)),
+      readStdin: () => {
+        throw new Error('no stdin in this test');
+      },
+    };
+  };
 
   it('lets a checkout with nothing started stop, holds one with work, and takes --stop at its commit', async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-keep-going-')));
@@ -603,7 +851,7 @@ describe('keep-going on real git', () => {
     git('add', 'a');
     git('commit', '-q', '-m', 'base');
     git('push', '-q', '-u', 'origin', 'main');
-    const sys = { ...realSys(), env: { PATH: process.env.PATH ?? '' }, cwd: work, home: dir };
+    const sys = machine(work, dir);
     assert.equal(await stopHook(sys, JSON.stringify({ cwd: work })), '');
     assert.equal(await stopHook(sys, JSON.stringify({ cwd: dir })), '');
     git('checkout', '-q', '-b', 'feature');
@@ -652,7 +900,7 @@ describe('keep-going on real git', () => {
     writeFileSync(join(work, 'a'), 'a\n');
     git('add', 'a');
     git('commit', '-q', '-m', 'work');
-    const sys = { ...realSys(), env: { PATH: process.env.PATH ?? '' }, cwd: work, home: dir };
+    const sys = machine(work, dir);
     mkdirSync(join(work, '.tmp'));
     symlinkSync(away, join(work, STORE));
     const seen = capture();

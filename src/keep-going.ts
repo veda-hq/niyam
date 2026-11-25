@@ -73,7 +73,8 @@ function oneLine(value: unknown, name: string): string {
 
 /** The settings, from the parsed settings file; throws naming the first bad key. */
 export function keepGoingSettings(raw: unknown): KeepGoingSettings {
-  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).keepGoing : undefined;
+  // Object() boxes a primitive and turns null into {}: neither has the key.
+  const value = (Object(raw) as { keepGoing?: unknown }).keepGoing;
   if (value === undefined) return { ...DEFAULTS };
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${where} must be an object`);
   const { base = DEFAULTS.base, trunks = DEFAULTS.trunks, printMode = DEFAULTS.printMode, owner = DEFAULTS.owner, tag = DEFAULTS.tag, ...rest } = value as Record<string, unknown>;
@@ -158,7 +159,7 @@ const noteHolds = (facts: Facts): facts is Facts & { note: StopNote } => facts.n
 
 /** Work the rule does not hold: nothing to merge, or not the session's. */
 function notStarted(facts: Facts, settings: KeepGoingSettings): boolean {
-  return !(facts.ahead !== null && facts.ahead > 0) || facts.branch === '' || facts.branch === settings.base || settings.trunks.includes(facts.branch) || facts.carried;
+  return !((facts.ahead ?? 0) > 0) || facts.branch === '' || facts.branch === settings.base || settings.trunks.includes(facts.branch) || facts.carried;
 }
 
 export function decide(facts: Facts, previous: Counter | null, settings: KeepGoingSettings): Decision {
@@ -252,7 +253,8 @@ export function pushInFlight(sys: Sys, root: string): boolean {
   return table
     .split('\n')
     .flatMap((line) => {
-      const [pid = '', ...words] = line.trim().split(/\s+/);
+      // split always gives one item at least.
+      const [pid, ...words] = line.trim().split(/\s+/) as [string, ...string[]];
       return /^\d+$/.test(pid) && gitVerb(words) ? [pid] : [];
     })
     .some((pid) => {
@@ -274,8 +276,8 @@ export function backgroundTask(sys: Sys, claudePid: string | undefined, root: st
   const table = out(sys, root, 'ps', ['-Ao', 'pid=,ppid=,command=']);
   if (table === null) return false;
   return table.split('\n').some((line) => {
-    const match = /^\s*\d+\s+(\d+)\s+(.*)$/.exec(line);
-    return match !== null && match[1] === claudePid && /\/shell-snapshots\/snapshot-/.test(match[2] as string);
+    const [, ppid, ...command] = line.trim().split(/\s+/);
+    return ppid === claudePid && command.some((word) => /\/shell-snapshots\/snapshot-/.test(word));
   });
 }
 
@@ -325,7 +327,8 @@ export async function readPr(sys: Sys, root: string, branch: string, head: strin
 
 /** Where to ask GitHub: origin's repository and the token to read it with; undefined when origin is not on GitHub or there is no token. */
 function reach(sys: Sys, root: string, session: string | undefined, err?: (line: string) => void): { slug: string; token: string } | undefined {
-  const slug = githubSlug(out(sys, root, 'git', ['config', '--get', 'remote.origin.url']) ?? '');
+  const url = out(sys, root, 'git', ['config', '--get', 'remote.origin.url']);
+  const slug = url === null ? undefined : githubSlug(url);
   if (!slug) return undefined;
   const token = tokenFor(sys, root, session, err);
   return token ? { slug, token } : undefined;
@@ -381,7 +384,9 @@ interface ListedPull {
  * none, so the hook fails open.
  */
 export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSettings, branch: string, { slug, token }: { slug: string; token: string }): Promise<LeftBranch[]> {
-  const slices = slicesNamed(out(sys, root, 'git', ['log', '--format=%B', `origin/${settings.base}..HEAD`]) ?? '', slug);
+  const log = out(sys, root, 'git', ['log', '--format=%B', `origin/${settings.base}..HEAD`]);
+  if (log === null) return [];
+  const slices = slicesNamed(log, slug);
   if (slices.length === 0) return [];
   let agents: string[];
   try {
@@ -390,20 +395,22 @@ export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSe
     // fail-open: settings the hook cannot read name no agent, so no closed branch is the session's to delete.
     return [];
   }
-  const list = async (query: string): Promise<ListedPull[] | undefined> => {
-    const got = await sys.http(`${GITHUB_API}/repos/${slug}/pulls?${query}`, { token, timeoutMs: 15_000 }).catch(() => {
+  const list = (query: string): Promise<ListedPull[] | undefined> =>
+    sys.http(`${GITHUB_API}/repos/${slug}/pulls?${query}`, { token, timeoutMs: 15_000 }).then(
+      (got) => (got.status === 200 && Array.isArray(got.json) ? (got.json as ListedPull[]) : undefined),
       // fail-open: GitHub not answering says nothing about closed branches, and the hook lets the session stop.
-      return undefined;
-    });
-    return got?.status === 200 && Array.isArray(got.json) ? (got.json as ListedPull[]) : undefined;
-  };
-  const here = (pull: ListedPull): boolean => typeof pull.head?.repo?.full_name === 'string' && pull.head.repo.full_name.toLowerCase() === slug.toLowerCase();
+      () => undefined,
+    );
+  const here = (pull: ListedPull): pull is ListedPull & { head: { ref?: unknown } } =>
+    typeof pull.head?.repo?.full_name === 'string' && pull.head.repo.full_name.toLowerCase() === slug.toLowerCase();
   const closed = await list('state=closed&sort=updated&direction=desc&per_page=100');
-  const candidates = (closed ?? []).flatMap((pull): LeftBranch[] => {
-    const ref = pull.head?.ref;
-    if (!Number.isInteger(pull.number) || pull.merged_at || typeof ref !== 'string' || ref === branch || !here(pull)) return [];
+  if (!closed) return [];
+  const candidates = closed.flatMap((pull): LeftBranch[] => {
+    if (!here(pull) || !Number.isInteger(pull.number) || pull.merged_at) return [];
+    const { ref } = pull.head;
+    if (typeof ref !== 'string' || ref === branch) return [];
     if (!anyLogin(agents, typeof pull.user?.login === 'string' ? pull.user.login : undefined)) return [];
-    if (!slicesNamed(typeof pull.body === 'string' ? pull.body : '', slug).some((slice) => slices.some((mine) => sameIssue(mine, slice)))) return [];
+    if (typeof pull.body !== 'string' || !slicesNamed(pull.body, slug).some((slice) => slices.some((mine) => sameIssue(mine, slice)))) return [];
     return [{ number: pull.number as number, url: pullUrl(slug, pull.number as number, pull.html_url), ref }];
   });
   // Each branch once, newest first, until LEFT_MOST are found (the rest show once those are gone) or READS_MOST reads
@@ -414,19 +421,20 @@ export async function leftBranches(sys: Sys, root: string, settings: KeepGoingSe
   for (const one of branches) {
     if (left.length >= LEFT_MOST || reads >= READS_MOST) break;
     reads++;
-    const ref = await sys.http(`${GITHUB_API}/repos/${slug}/git/ref/heads/${one.ref.split('/').map(encodeURIComponent).join('/')}`, { token, timeoutMs: 15_000 }).catch(() => {
+    const status = await sys.http(`${GITHUB_API}/repos/${slug}/git/ref/heads/${one.ref.split('/').map(encodeURIComponent).join('/')}`, { token, timeoutMs: 15_000 }).then(
+      (got) => got.status,
       // fail-open: a branch GitHub cannot be asked about is not held against the session.
-      return undefined;
-    });
+      () => undefined,
+    );
     // 404 alone says deleted already, so the scan goes on past it.
-    if (ref?.status === 404) continue;
+    if (status === 404) continue;
     // GitHub not answering, or answering anything but 200, stops the reads: the next would fare no better, and the hook fails open.
-    if (ref?.status !== 200) break;
+    if (status !== 200) break;
     reads++;
     // A branch an open pull request still builds from is not left over: asked by its own head, so no page can hide one.
     const open = await list(`state=open&head=${encodeURIComponent(`${slug.split('/')[0]}:${one.ref}`)}&per_page=100`);
     if (!open) break;
-    if (!open.some((pull) => here(pull) && pull.head?.ref === one.ref)) left.push(one);
+    if (!open.some((pull) => here(pull) && pull.head.ref === one.ref)) left.push(one);
   }
   return left;
 }
@@ -467,10 +475,16 @@ export async function gather(sys: Sys, root: string, settings: KeepGoingSettings
 }
 
 /** The hook: reads the Stop input, returns a block decision, a message, or nothing. Never throws. */
-export async function stopHook(sys: Sys, input: string, err?: (line: string) => void): Promise<string> {
+export function stopHook(sys: Sys, input: string, err?: (line: string) => void): Promise<string> {
+  return hook(sys, () => input, err);
+}
+
+/** The hook on the input `read` gives: input it cannot read or parse lets the stop through. */
+async function hook(sys: Sys, read: () => string, err: (line: string) => void = () => undefined): Promise<string> {
   try {
-    const data = JSON.parse(input || 'null') as { session_id?: unknown; cwd?: unknown; agent_id?: unknown } | null;
-    const cwd = typeof data?.cwd === 'string' && data.cwd ? data.cwd : sys.env.CLAUDE_PROJECT_DIR;
+    // No input throws here, and null on reading its cwd: both let the stop through.
+    const data = JSON.parse(read()) as { session_id?: unknown; cwd?: unknown; agent_id?: unknown };
+    const cwd = typeof data.cwd === 'string' && data.cwd ? data.cwd : sys.env.CLAUDE_PROJECT_DIR;
     if (!data || !cwd) return '';
     const root = out(sys, cwd, 'git', ['rev-parse', '--show-toplevel']);
     if (!root) return '';
@@ -482,7 +496,7 @@ export async function stopHook(sys: Sys, input: string, err?: (line: string) => 
       sys.confine(root, file);
       sys.confine(root, notePath(root));
     } catch (error) {
-      err?.(`niyam keep-going: ${error instanceof Error ? error.message : String(error)}`);
+      err(`niyam keep-going: ${error instanceof Error ? error.message : String(error)}`);
       return '';
     }
     const previous = sys.exists(file) ? (JSON.parse(sys.read(file)) as Counter) : null;
@@ -541,13 +555,8 @@ export async function keepGoing(sys: Sys, io: Output, args: readonly string[]): 
     io.out(message);
     return ok ? 0 : 1;
   }
-  let input = '';
-  try {
-    input = sys.readStdin();
-  } catch {
-    return 0;
-  }
-  const said = await stopHook(sys, input, (line) => io.err(line));
+  // stdin it cannot read lets the stop through, as input it cannot parse does.
+  const said = await hook(sys, () => sys.readStdin(), (line) => io.err(line));
   if (said) io.out(said);
   return 0;
 }
