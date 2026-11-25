@@ -421,18 +421,29 @@ async function readSlice(
  */
 function stateProblems(slice: IssueRef, here: string, closed: boolean, states: Issue[], names: IssueRef[]): string[] {
   const name = refName(slice, here);
-  // A State is a sub-issue of the slice, so it is in the slice's repository.
-  const ours = (ref: IssueRef): boolean => sameRepo(ref.repo, slice.repo);
   const problems = names.flatMap((ref) =>
-    ours(ref) && states.some((state) => state.number === ref.number && state.type?.name === 'State')
+    sameRepo(ref.repo, slice.repo) && states.some((state) => state.number === ref.number && state.type?.name === 'State')
       ? []
       : [`${refName(ref, here)} is not a State under slice ${name}; a "State: #N" line names a State sub-issue of the slice the pull request builds`],
   );
-  const open = states.some((state) => names.some((ref) => ours(ref) && ref.number === state.number) && state.type?.name === 'State' && state.state !== 'closed');
-  if (closed && !open) {
-    problems.push(`${name} is closed, so this pull request is a fix: file it as a State under ${name} and name it with a line "State: ${sameRepo(slice.repo, here) ? '#N' : `${slice.repo}#N`}"`);
+  if (closed && !namesOpenState(slice, states, names)) {
+    problems.push(`${name} is closed, so this pull request is a fix: file it as a State under ${name} with ${stateCommand(slice, here)} and name it with a line "State: ${sameRepo(slice.repo, here) ? '#N' : `${slice.repo}#N`}"`);
   }
   return problems;
+}
+
+/** Whether `names` name an open State among `states`, slice `slice`'s sub-issues: a State is in the slice's repository. */
+function namesOpenState(slice: IssueRef, states: Issue[], names: IssueRef[]): boolean {
+  return states.some((state) => names.some((ref) => sameRepo(ref.repo, slice.repo) && ref.number === state.number) && state.type?.name === 'State' && state.state !== 'closed');
+}
+
+/**
+ * The command that files a State under slice `slice`, run in a clone of its
+ * repository when that is not `here`. The slice is a bare number: pasted
+ * into bash, an unquoted `#12` would start a comment.
+ */
+function stateCommand(slice: IssueRef, here: string): string {
+  return `${sameRepo(slice.repo, here) ? '' : `(in a clone of ${slice.repo}) `}niyam state ${slice.number} --title "…"`;
 }
 
 /**
@@ -507,7 +518,9 @@ function secondPull(slug: string, slice: IssueRef, pull: OpenPull, here: boolean
  * carry the owner's say, a `Decision:` comment or a 👍 on the agent's
  * proposal; no other open pull request builds the slice; and, for a pull
  * request, whose States are in `mine.states`, each is a State under the slice
- * and a closed slice's names an open one.
+ * and a closed slice's names an open one. For a push, `mine.warnings` gets
+ * what does not stop it: a closed slice whose branch has no open pull request
+ * naming an open State under it, since that pull request will be refused.
  */
 export async function sliceProblems(
   sys: Sys,
@@ -515,7 +528,7 @@ export async function sliceProblems(
   slug: string,
   which: number | IssueRef,
   accounts: Settings,
-  mine: { pull?: number; branch?: string; states?: IssueRef[] },
+  mine: { pull?: number; branch?: string; states?: IssueRef[]; warnings?: string[] },
 ): Promise<string[]> {
   // A slice in this repository may be given by its number alone.
   const slice = typeof which === 'number' ? { repo: slug, number: which } : which;
@@ -525,15 +538,20 @@ export async function sliceProblems(
   if (mine.states) problems.push(...stateProblems(slice, slug, read.closed ?? false, read.states ?? [], mine.states));
 
   // The pull request being checked: by number, or by its branch in this repository (not a fork's of the same name).
+  let own: OpenPull | undefined;
   for (let page = 1; ; page++) {
     const pulls = await sys.http(`${API}/repos/${slug}/pulls?state=open&per_page=100&page=${page}`, { token });
     if (pulls.status !== 200 || !Array.isArray(pulls.json)) throw new Error(`cannot list open pull requests (HTTP ${pulls.status})`);
     for (const pull of pulls.json as OpenPull[]) {
       const here = pull.head.repo?.full_name.toLowerCase() === slug.toLowerCase();
+      if (pull.head.ref === mine.branch && here) own = pull;
       if (pull.number === mine.pull || (pull.head.ref === mine.branch && here)) continue;
       if (slicesNamed(pull.body ?? '', slug).some((one) => sameIssue(one, slice))) problems.push(secondPull(slug, slice, pull, here));
     }
     if (pulls.json.length < 100) break;
+  }
+  if (mine.warnings && !mine.states && read.closed && !namesOpenState(slice, read.states ?? [], statesNamed(own?.body ?? '', slug))) {
+    mine.warnings.push(`${refName(slice, slug)} is closed, so its next pull request is a fix and needs a State: ${stateCommand(slice, slug)}`);
   }
   return problems;
 }
@@ -830,7 +848,9 @@ export async function prePush(sys: Sys, io: Output, refLines: string, url: strin
   }
   if (branches.length > 1) return report(io, 'pre-push', [`one push builds one slice on one branch; this one pushes ${where}`]);
   const [slice] = slices as [IssueRef];
-  const problems = await sliceProblems(sys, token, slug, slice, accounts, { branch: branches[0] as string });
+  const warnings: string[] = [];
+  const problems = await sliceProblems(sys, token, slug, slice, accounts, { branch: branches[0] as string, warnings });
+  for (const warning of warnings) io.err(`⚠️  ${warning}`);
   if (problems.length === 0 && isOn(sys, root, 'board')) await moveBoard(sys, io, token, slug, slice);
   return report(io, 'pre-push', problems);
 }
@@ -1252,4 +1272,60 @@ async function proposeOne(
   if (removed.status !== 200 && removed.status !== 404) throw new Error(`cannot take ${NEEDS_OWNER} off #${slice} (HTTP ${removed.status})`);
   io.out(`✓ #${slice}: nothing waits on ${owner}`);
   return { code: 0, waiting: [] };
+}
+
+/** What GitHub said when it refused a write: its status and message. */
+function whyRefused(result: { status: number; json: unknown }): string {
+  const message = (result.json as { message?: unknown } | null)?.message;
+  return `HTTP ${result.status}${typeof message === 'string' && message ? `: ${message}` : ''}`;
+}
+
+/**
+ * Files a State under slice `slice`, run by an agent session: an issue of
+ * type State titled `title`, attached under the slice through GitHub's
+ * sub-issues API by its numeric id, which is not its number. Then it prints
+ * the line, `State: #M`, that names it under the pull request's `Slice:`
+ * line. It refuses an issue that is not a Slice. A pull request for an open
+ * slice needs no State, so for one it says so; the State waits for the fix
+ * after the slice closes. A State filed but not attached exits 1, with the
+ * call that attaches it.
+ */
+export async function fileState(sys: Sys, io: Output, slice: number, title: string): Promise<number> {
+  const { root, slug } = repoAt(sys);
+  if (!isOn(sys, root, 'work-rules')) {
+    io.out(offLine('state', 'work-rules'));
+    return 0;
+  }
+  const failed = (problem: string): number => {
+    io.err(`✗ ${problem}`);
+    return 1;
+  };
+  const token = sessionToken(sys);
+  if (!token) return failed('this session has no token; run niyam doctor');
+  if (await isPersonal(sys, slug, token)) {
+    io.out(offLine('state', 'work-rules', PERSONAL_REPO));
+    return 0;
+  }
+  const issue = await readIssue(sys, token, slug, slice);
+  if (!issue) return failed(`#${slice} is not an issue in ${slug}`);
+  if (issue.type?.name !== 'Slice') return failed(`#${slice} is not a Slice (its type is ${issue.type?.name ?? 'none'}); a State is filed under the slice it is part of`);
+
+  const filed = await sys.http(`${API}/repos/${slug}/issues`, { method: 'POST', token, body: { title, body: `Part of #${slice}.`, type: 'State' } });
+  const state = filed.json as { id?: unknown; number?: unknown; html_url?: unknown } | null;
+  if (filed.status !== 201 || typeof state?.id !== 'number' || typeof state.number !== 'number') return failed(`GitHub did not file the State (${whyRefused(filed)})`);
+  const url = typeof state.html_url === 'string' && state.html_url.startsWith('https://') ? state.html_url : issueUrl(slug, state.number);
+  const attached = await sys.http(`${API}/repos/${slug}/issues/${slice}/sub_issues`, { method: 'POST', token, body: { sub_issue_id: state.id } });
+  if (attached.status !== 201) {
+    return failed(
+      `#${state.number}, ${url}, was filed but not attached under #${slice} (${whyRefused(attached)}); attach it with: gh api --method POST repos/${slug}/issues/${slice}/sub_issues -F sub_issue_id=${state.id}`,
+    );
+  }
+  io.out(`✓ #${state.number}, ${url}: a State under #${slice}`);
+  io.out(
+    issue.state === 'closed'
+      ? `Put this line under the pull request's "Slice: #${slice}" line:`
+      : `#${slice} is open, so its pull request needs no State while it stays open; once it closes, the pull request that fixes it names this one under its "Slice: #${slice}" line:`,
+  );
+  io.out(`State: #${state.number}`);
+  return 0;
 }
