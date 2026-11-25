@@ -652,6 +652,13 @@ slice may be built:
   slice, and when the slice is closed already, so the pull request is a fix,
   it names at least one open State: the one the fix is filed as.
 
+A pull request already merged or closed merges nothing more, so Work rules
+passes it unjudged, saying so: `pr-work-rules: #N is merged; nothing to
+judge`, or `is closed` for one closed without merging. Work rules skips
+the `closed` event itself, but an event after it, such as an edit to a
+merged pull request's description, would otherwise read the slice the
+merge closed as a fix still owed (#649).
+
 A refusal that sends the agent to the owner about an issue or a comment,
 here, in Guard, in `propose` and in the needs-owner job, names its full
 `https://github.com/…` address, once, where it first names it: the
