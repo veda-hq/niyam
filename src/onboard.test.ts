@@ -18,17 +18,26 @@ import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { BY_HAND_WIDTH, wrap } from './layout.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, autoFixRuleNeeds, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
   CLOUD_SETUP_068,
+  GUARD_COMMAND_052,
   GUARD_COMMAND_0610,
+  GUARD_COMMAND_067,
   GUARD_COMMAND_069,
+  HOOK_COMMAND_020,
+  HOOK_COMMAND_050,
+  HOOK_COMMAND_052,
   HOOK_COMMAND_0610,
   HOOK_COMMAND_0616,
+  HOOK_COMMAND_067,
   HOOK_COMMAND_069,
+  PRE_PUSH_HOOK_050,
+  PRE_PUSH_HOOK_052,
   PRE_PUSH_HOOK_0610,
+  PRE_PUSH_HOOK_067,
   PRE_PUSH_HOOK_069,
   SETTINGS_068_MONO,
   SETTINGS_068_NIYAM,
@@ -395,7 +404,7 @@ describe('onboard', () => {
     assert.deepEqual([...sys.committed.keys()], []);
     const body = opened(sys)?.body ?? '';
     assert.ok(body.includes(`\n- \`${LEFTOVER_CLOUD_SETUP_PATH}\`: moved to ${CLOUD_SETUP_PATH}, which the Setup snippet since 0.6.10 runs\n`), body);
-    assert.ok(body.includes(`a Setup script pasted before niyam 0.6.10 runs ${LEFTOVER_CLOUD_SETUP_PATH}, which this pull request deletes; if yours is one, delete niyam's part of it, since sessions now install niyam themselves, or paste what niyam cloud-setup prints over it.`), body);
+    assert.ok(body.includes(`a Setup script pasted before niyam 0.6.10 runs ${LEFTOVER_CLOUD_SETUP_PATH}, which this pull request deletes; if yours is one, delete niyam's part of it, since sessions now install niyam themselves, or paste what niyam cloud-setup prints over it. If the repo has its own Setup script, put this first, then the repo's own: a repo's script may end with exit, and nothing after that runs.`), body);
     merge(sys);
     const again = await run(sys, []);
     assert.equal(again.code, 0);
@@ -740,6 +749,7 @@ describe('onboard', () => {
     assert.deepEqual(changes, [`replace ${OLDER_REVIEW_THREAD_RULE} with ${REVIEW_THREAD_RULE}, the CLI's own name`]);
     assert.deepEqual(labels, ['review rule']);
     assert.equal(REVIEW_THREAD_RULE, 'Bash(niyam review-thread *)');
+    assert.equal(OLDER_REVIEW_THREAD_RULE, 'Bash(process-rules review-thread *)');
     const both = JSON.stringify({ ...CLAUDE, permissions: { allow: [OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, ...ARTIFACT_RULES] } });
     assert.deepEqual(claudeSettings(both), { text: both, changes: [], labels: [] });
   });
@@ -783,6 +793,32 @@ describe('onboard', () => {
     assert.deepEqual(changes, ['allow mcp__claude-artifacts__publish_version, mcp__claude-artifacts__edit_version without a prompt, so agent sessions publish the page an ask to the owner links']);
     assert.deepEqual(labels, ['artifact rules']);
     assert.deepEqual(claudeSettings(text).changes, []);
+  });
+
+  it('reads no settings, no permissions, and lists that are not arrays or hold other than text, as naming no rule', () => {
+    const none = { missing: [...AUTO_FIX_RULES], denied: [], leftOut: [], deniedBy: [], leftOutBy: [] };
+    for (const settings of [null, {}, { permissions: {} }, { permissions: { allow: 'mcp__ccd_pr', deny: 'mcp__ccd_pr' } }, { permissions: { allow: [42, ['mcp__ccd_pr']], deny: [7, null] } }]) {
+      assert.deepEqual(autoFixRuleNeeds(settings), none, JSON.stringify(settings));
+    }
+  });
+
+  it("denies only by a glob after the server's own name, with the glob's other characters as written", () => {
+    const needs = (deny: string[]) => autoFixRuleNeeds({ permissions: { deny } });
+    assert.deepEqual(needs(['mcp__ccd_xx__*', 'mcp__ccd_pr__get.*', 'Bash(rm *)']), { missing: [...AUTO_FIX_RULES], denied: [], leftOut: [], deniedBy: [], leftOutBy: [] }, 'another server, a literal dot');
+    assert.deepEqual(needs(['Bash(rm *)', 'mcp__ccd_pr__get_*']), {
+      missing: ['mcp__ccd_pr__bind_pr', 'mcp__ccd_pr__set_monitor'],
+      denied: ['mcp__ccd_pr__get_status'],
+      leftOut: ['mcp__ccd_pr__get_status'],
+      deniedBy: ['mcp__ccd_pr__get_*'],
+      leftOutBy: ['mcp__ccd_pr__get_*'],
+    });
+    assert.deepEqual(autoFixRuleNeeds({ permissions: { allow: ['mcp__ccd_pr'], deny: ['mcp__ccd_pr__bind_pr'] } }), {
+      missing: [],
+      denied: ['mcp__ccd_pr__bind_pr'],
+      leftOut: [],
+      deniedBy: ['mcp__ccd_pr__bind_pr'],
+      leftOutBy: [],
+    }, 'the whole server allowed: nothing lacks, and nothing is left out');
   });
 
   it('adds no artifact rule where the whole artifacts server is allowed', () => {
@@ -1171,6 +1207,26 @@ describe('onboard', () => {
     for (const text of [HOOK_COMMAND, GUARD_COMMAND, PRE_PUSH_HOOK]) assert.doesNotMatch(text, /process-rules|PROCESS_RULES/);
   });
 
+  it('writes the pre-push hook as it reads, and knows each older hook as the release that wrote it wrote it', () => {
+    assert.deepEqual(PRE_PUSH_HOOK.split('\n'), [
+      '#!/bin/sh',
+      '# Written by niyam onboard: before an agent session pushes, that it pushes as the agent, then the work rules.',
+      "# Anyone else's push goes ahead. Without the CLI nothing can check an agent session's push, so it is refused.",
+      '[ -z "$NIYAM_AGENT" ] && [ "$CLAUDECODE" != 1 ] && exit 0',
+      'cli="$HOME/.config/niyam/bin/niyam"',
+      '[ -x "$cli" ] || cli=niyam',
+      'if ! command -v "$cli" >/dev/null 2>&1; then',
+      '  echo "niyam: the CLI is not installed, so this agent push cannot be checked" >&2',
+      '  exit 1',
+      'fi',
+      'exec "$cli" pre-push "$@"',
+      '',
+    ]);
+    assert.deepEqual(OLDER_PRE_PUSH_HOOKS, [PRE_PUSH_HOOK_0610, PRE_PUSH_HOOK_069, PRE_PUSH_HOOK_067, PRE_PUSH_HOOK_052, PRE_PUSH_HOOK_050]);
+    assert.deepEqual(OLDER_HOOK_COMMANDS, [HOOK_COMMAND_0616, HOOK_COMMAND_0610, HOOK_COMMAND_069, HOOK_COMMAND_067, HOOK_COMMAND_052, HOOK_COMMAND_020, HOOK_COMMAND_050]);
+    assert.deepEqual(OLDER_GUARD_COMMANDS, [GUARD_COMMAND_0610, GUARD_COMMAND_069, GUARD_COMMAND_067, GUARD_COMMAND_052]);
+  });
+
   it("replaces 0.6.16's SessionStart hook in place, which stopped a cloud session with no CLI (P-60)", async () => {
     assert.ok(OLDER_HOOK_COMMANDS.includes(HOOK_COMMAND_0616));
     assert.notEqual(HOOK_COMMAND, HOOK_COMMAND_0616);
@@ -1235,6 +1291,27 @@ describe('onboard', () => {
     const { out } = await run(sys);
     assert.ok(byHand(out).includes('Once on this Mac: add the line `niyam pre-push "$@"` to the pre-push git hook /shared/hooks/pre-push, which git runs from outside this repository.'), out.join('\n'));
     assert.ok(!sys.files.has('/shared/hooks/pre-push'));
+  });
+
+  it("asks git in the repository where the hook is, and reads a hook that runs the CLI however it is spaced as this release's", () => {
+    const sys = fresh();
+    sys.files.set(PRE_PUSH, '#!/bin/sh\nexec  niyam  pre-push "$@"\n');
+    const before = sys.calls.length;
+    assert.deepEqual(prePushHook(sys, ROOT), { path: '.git/hooks/pre-push', file: PRE_PUSH, state: 'ours' });
+    assert.deepEqual(sys.calls.slice(before), [
+      { command: 'git', args: ['rev-parse', '--git-path', 'hooks/pre-push'], cwd: ROOT },
+      { command: 'git', args: ['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd: ROOT },
+    ]);
+  });
+
+  it("takes a hook in git's own folder outside the repository, as a worktree's is, or in the repository outside git's folder, as its own to write", () => {
+    const answer = (stdout: string) => ({ code: 0, stdout, stderr: '' });
+    const worktree = fresh();
+    worktree.execOverride = (call) => (call.args[1] === '--git-path' ? answer('/main/.git/hooks/pre-push\n') : call.args.includes('--git-common-dir') ? answer('/main/.git\n') : undefined);
+    assert.deepEqual(prePushHook(worktree, ROOT), { path: '/main/.git/hooks/pre-push', file: '/main/.git/hooks/pre-push', state: 'missing' });
+    const husky = fresh();
+    husky.execOverride = (call) => (call.args[1] === '--git-path' ? answer('.husky/pre-push\n') : undefined);
+    assert.deepEqual(prePushHook(husky, ROOT), { path: '.husky/pre-push', file: `${ROOT}/.husky/pre-push`, state: 'missing' });
   });
 
   it('counts only a hook line that runs the rules, not a mention, nor the command before niyam (P-57)', async () => {
@@ -1305,6 +1382,50 @@ describe('onboard', () => {
         'exec dvara run ./hooks/../node_modules/@athya-hq/rules/dvara/hooks/pre-push "$@"',
       ]) {
         assert.equal(prePushHook(handingOff(`#!/bin/sh\n${line}\n`), ROOT).state, 'body', line);
+      }
+    });
+
+    it('follows a hand-off however its words are spaced, a variable of any name, and an indented assignment', () => {
+      for (const hook of [
+        '  exec  ./node_modules/.bin/dvara  run  node_modules/@athya-hq/rules/dvara/hooks/pre-push  "$@" ',
+        'BODY=node_modules/@athya-hq/rules/dvara/hooks/pre-push\nexec dvara run "$BODY" "$@"',
+        'BODY=node_modules/@athya-hq/rules/dvara/hooks/pre-push\nexec dvara run ${BODY} "$@"',
+        '  B=node_modules/@athya-hq/rules/dvara/hooks/pre-push \nexec dvara run "$B" "$@"',
+        'B=node_modules/@athya-hq/rules/dvara/hooks/pre-push\nexec dvara run "$B" "$@"\nB=other',
+        `${HANDOFF}  #node_modules/.bin/dvara run other "$@"`,
+      ]) {
+        assert.equal(prePushHook(handingOff(`#!/bin/sh\n${hook}\n`), ROOT).state, 'body', hook);
+      }
+    });
+
+    it('takes a hand-off after blocks closed on their own lines, on one line, by elif, and in an expansion as run', () => {
+      for (const before of [
+        'if [ -n "$X" ]; then\n  echo x\nelif [ -n "$Y" ]; then\n  echo y\nfi',
+        'true;if [ -n "$X" ]; then :;fi',
+        'true; if [ -n "$X" ]; then :; fi',
+        'echo done',
+        'echo "${X:-{}"',
+      ]) {
+        assert.equal(prePushHook(handingOff(HANDOFF.replace('exec node_modules', `${before}\nexec node_modules`)), ROOT).state, 'body', before);
+      }
+    });
+
+    it('leaves a hand-off it would read only by a looser match as the client\'s own, even where that match names a body', () => {
+      const PATH = 'node_modules/@athya-hq/rules/dvara/hooks/pre-push';
+      for (const [why, hook, planted] of [
+        ['a hand-off after a command', `true && dvara run ${PATH} "$@"`],
+        ['a hand-off followed by more', `dvara run ${PATH} "$@" || exit 1`],
+        ['a quote after a word', `dvara run x'${PATH}' "$@"`],
+        ['a word after a quote', `dvara run '${PATH}'x "$@"`],
+        ['a variable after a word', `B=${PATH}\ndvara run x$B "$@"`],
+        ['a variable before a path', `B=${PATH}\ndvara run $B/ "$@"`],
+        ['the variable only exported', `export B=${PATH}\ndvara run "$B" "$@"`],
+        ['the variable set inside another assignment', 'C=B=x\ndvara run "$B" "$@"', `${ROOT}/B=x`],
+        ['a glob', 'dvara run hooks/* "$@"', `${ROOT}/hooks/*`],
+      ] as const) {
+        const sys = handingOff(`#!/bin/sh\n${hook}\n`);
+        if (planted !== undefined) sys.files.set(planted, BODY_TEXT);
+        assert.equal(prePushHook(sys, ROOT).state, 'own', why);
       }
     });
 
@@ -2666,6 +2787,10 @@ describe('workflow', () => {
     assert.deepEqual(workflowPins(before), Array(4).fill('0.6.1'), 'only the niyam-ref lines');
     assert.deepEqual(workflowPins(oldIds(workflow('main', '0.6.1', false))), Array(4).fill('0.6.1'), 'only the uses: lines');
     assert.deepEqual(workflowUpdate(oldIds(workflow('main', '0.6.1', false)), 'main', '0.6.2', false), { kind: 'replace', text: workflow('main', '0.6.2', false) });
+  });
+
+  it('writes, at the same pin, what 0.6.8 wrote for veda-hq/niyam, but for the ids P-56 renamed', () => {
+    assert.equal(oldIds(workflow('main', '0.6.8', false)), WORKFLOW_068_NIYAM);
   });
 
   it("calls the product's shared checks on pull requests and the default branch", () => {
