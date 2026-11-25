@@ -46,7 +46,7 @@ interface FigmaNode {
 
 function walk(node: FigmaNode, visit: (node: FigmaNode) => void): void {
   visit(node);
-  for (const child of node.children ?? []) walk(child, visit);
+  node.children?.forEach((child) => walk(child, visit));
 }
 
 const area = (node: FigmaNode): number => (node.absoluteBoundingBox ? node.absoluteBoundingBox.width * node.absoluteBoundingBox.height : 0);
@@ -77,8 +77,10 @@ async function figma(sys: Sys, token: string, path: string, deadline: number): P
  * What is wrong with the frame a State links, or undefined when it is a frame
  * built from the design library: it exists, it is a frame, it holds at least
  * one instance of a library component, and no image covers most of it.
+ * `libraryKeys` may hold undefined, for a published component with no key,
+ * which no instance matches.
  */
-export async function frameProblem(sys: Sys, token: string, link: string, libraryKeys: Set<string>, deadline = figmaDeadline(sys)): Promise<string | undefined> {
+export async function frameProblem(sys: Sys, token: string, link: string, libraryKeys: ReadonlySet<string | undefined>, deadline = figmaDeadline(sys)): Promise<string | undefined> {
   const match = FRAME_LINK.exec(link);
   if (!match) return 'links no Figma frame (a figma.com/design link with node-id)';
   const [, file, a, b] = match as unknown as [string, string, string, string];
@@ -90,16 +92,16 @@ export async function frameProblem(sys: Sys, token: string, link: string, librar
   if (!found) return `links frame ${id}, which does not exist in Figma file ${file}`;
   const frame = found.document;
   if (frame.type !== 'FRAME') return `links a ${frame.type}, not a frame`;
-  let instances = 0;
+  let built = false;
   let captured = false;
   walk(frame, (node) => {
     const key = node.componentId ? found.components?.[node.componentId]?.key : undefined;
-    if (node.type === 'INSTANCE' && key && libraryKeys.has(key)) instances++;
+    if (node.type === 'INSTANCE' && key && libraryKeys.has(key)) built = true;
     const image = node.fills?.some((fill) => fill.type === 'IMAGE' && fill.visible !== false);
     if (image && area(frame) > 0 && area(node) >= CAPTURED_SHARE * area(frame)) captured = true;
   });
   if (captured) return 'links a captured image, not a frame built from the library';
-  if (instances === 0) return 'links a frame that uses no component from the design library';
+  if (!built) return 'links a frame that uses no component from the design library';
   return undefined;
 }
 
@@ -110,12 +112,18 @@ interface State {
   body: string;
 }
 
+/** One page of a slice's states, as GitHub's GraphQL API gives it, with the slice's parent. */
+interface StatesPage {
+  parent?: { number: number; body: string | null; issueType?: { name: string } | null } | null;
+  subIssues: { nodes: State[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } };
+}
+
 /** A work item's kind, from its `Kind:` line, bold or plain: `**Kind:** Process.` is Process. */
 const KIND_LINE = /^\s*(?:\*\*)?Kind:(?:\*\*)?\s*([A-Za-z]+)/mi;
 
 /** The kind a work item's body names, or undefined when it has no `Kind:` line. */
 export function workItemKind(body: string | null | undefined): string | undefined {
-  return KIND_LINE.exec(body ?? '')?.[1];
+  return body?.match(KIND_LINE)?.[1];
 }
 
 /** Figma frames are for this kind of work item only; a work item that names no kind is checked too. */
@@ -163,7 +171,7 @@ export async function prDesign(sys: Sys, io: Output): Promise<number> {
   const event = JSON.parse(sys.read(eventPath)) as { pull_request?: { number: number; body: string | null; user: { login: string } } };
   const pull = event.pull_request;
   const { agents } = loadSettings(sys, sys.cwd);
-  const [ref] = slicesNamed(pull?.body ?? '', slug);
+  const [ref] = pull?.body ? slicesNamed(pull.body, slug) : [];
   if (!pull || !anyLogin(agents, pull.user.login) || ref === undefined) {
     io.out('pr-design: not an agent pull request naming a slice; nothing to check');
     return 0;
@@ -174,8 +182,7 @@ export async function prDesign(sys: Sys, io: Output): Promise<number> {
 
   // Every state of the slice, 100 a page: GitHub's most.
   const [owner, name] = ref.repo.split('/');
-  const states: State[] = [];
-  for (let after: string | null = null; ; ) {
+  const statesPage = async (after: string | null): Promise<StatesPage> => {
     const { status, json } = await sys.http(`${API}/graphql`, {
       method: 'POST',
       token,
@@ -184,26 +191,28 @@ export async function prDesign(sys: Sys, io: Output): Promise<number> {
         variables: { owner, name, number: slice, after },
       },
     });
-    const issue = (json as { data?: { repository?: { issue?: { parent?: { number: number; body: string | null; issueType?: { name: string } | null } | null; subIssues: { nodes: State[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } } } | null } } } | null)?.data?.repository?.issue;
-    const page = issue?.subIssues;
-    if (status !== 200 || !page) throw new Error(`cannot read the states of ${label} (HTTP ${status})`);
-    // The work item's kind, read with the first page: only Experience work is designed in Figma.
-    const parent = issue.parent;
-    if (after === null && parent?.issueType?.name === 'Work item') {
-      const kind = workItemKind(parent.body);
-      if (kind && kind.toLowerCase() !== DESIGNED_KIND.toLowerCase()) {
-        io.out(`✓ pr-design: ${label} builds ${kind} work item #${parent.number}; frames are for ${DESIGNED_KIND} work`);
-        return 0;
-      }
+    const issue = (json as { data?: { repository?: { issue?: StatesPage | null } } } | null)?.data?.repository?.issue;
+    if (status !== 200 || !issue?.subIssues) throw new Error(`cannot read the states of ${label} (HTTP ${status})`);
+    return issue;
+  };
+  // Each page and the pages after it, read one by one.
+  const from = async ({ subIssues: page }: StatesPage): Promise<State[]> =>
+    page.pageInfo?.hasNextPage ? [...page.nodes, ...(await from(await statesPage(page.pageInfo.endCursor)))] : page.nodes;
+  const first = await statesPage(null);
+  // The work item's kind, read with the first page: only Experience work is designed in Figma.
+  const parent = first.parent;
+  if (parent?.issueType?.name === 'Work item') {
+    const kind = workItemKind(parent.body);
+    if (kind && kind.toLowerCase() !== DESIGNED_KIND.toLowerCase()) {
+      io.out(`✓ pr-design: ${label} builds ${kind} work item #${parent.number}; frames are for ${DESIGNED_KIND} work`);
+      return 0;
     }
-    states.push(...page.nodes);
-    if (!page.pageInfo?.hasNextPage) break;
-    after = page.pageInfo.endCursor;
   }
+  const states = await from(first);
 
   const deadline = figmaDeadline(sys);
   const published = (await figma(sys, figmaToken, `/files/${library}/components`, deadline)) as { meta?: { components?: { key?: string }[] } };
-  const keys = new Set((published.meta?.components ?? []).flatMap((component) => (component.key ? [component.key] : [])));
+  const keys = new Set(published.meta?.components?.map((component) => component.key));
 
   const problems: string[] = [];
   let checked = 0;

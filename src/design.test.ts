@@ -108,6 +108,30 @@ describe('frameProblem', () => {
     );
   });
 
+  it('asks nothing once the deadline is now', async () => {
+    const sys = new FakeSys();
+    figma(sys, frameReply([button]));
+    await assert.rejects(frameProblem(sys, 'figd_tok', LINK, KEYS, sys.now().getTime()), /^Error: Figma \/files\/FILE1\/nodes\?ids=12%3A34 not asked: the 120s/);
+    assert.deepEqual(sys.requests, []);
+  });
+
+  it('counts only an instance of a keyed library component, in a reply that may list no components', async () => {
+    const bare = frameReply([{ id: '4:1', type: 'INSTANCE', componentId: 'c:1' }]);
+    delete (bare.nodes as Record<string, Record<string, unknown>>)['12:34']?.components;
+    assert.equal(await problem(bare), 'links a frame that uses no component from the design library');
+    // A component node is not an instance of it.
+    assert.equal(await problem(frameReply([{ id: '4:2', type: 'COMPONENT', componentId: 'c:1' }])), 'links a frame that uses no component from the design library');
+    // A library may publish a component with no key, which no instance's missing key matches.
+    const sys = new FakeSys();
+    figma(sys, frameReply([{ id: '4:3', type: 'INSTANCE', componentId: 'c:3' }, { id: '4:4', type: 'INSTANCE' }]));
+    assert.equal(await frameProblem(sys, 'figd_tok', LINK, new Set(['lib-button', undefined])), 'links a frame that uses no component from the design library');
+  });
+
+  it('counts a node with any visible image fill covering half the frame or more as a capture', async () => {
+    const half = { id: '5:1', type: 'RECTANGLE', fills: [{ type: 'SOLID' }, { type: 'IMAGE' }], absoluteBoundingBox: box(100, 50) };
+    assert.equal(await problem(frameReply([button, half])), 'links a captured image, not a frame built from the library');
+  });
+
   it('passes on a failure other than running out of time', async () => {
     const sys = new FakeSys();
     sys.route('GET', `${FIGMA}/files/FILE1/nodes?ids=12%3A34`, () => {
@@ -165,7 +189,7 @@ describe('prDesign', () => {
   const SETTINGS = JSON.stringify({ owner: 'example-owner', agent: AGENT });
   const state = (number: number, body: string, extra: Record<string, unknown> = {}) => ({ number, issueType: { name: 'State' }, stateReason: null, body, ...extra });
 
-  function actions(states: unknown[] | null, user = AGENT, body: string | null = 'Slice: #12', parent: { number: number; body: string | null; issueType?: { name: string } } | null = null): FakeSys {
+  function actions(states: unknown[] | null, user = AGENT, body: string | null = 'Slice: #12', parent: { number: number; body: string | null; issueType?: { name: string } | null } | null = null): FakeSys {
     const sys = new FakeSys();
     sys.env = { GITHUB_EVENT_PATH: EVENT, GITHUB_REPOSITORY: 'example-org/example-app', GH_TOKEN: 'ghs_run', FIGMA_TOKEN: 'figd_tok', FIGMA_LIBRARY: 'LIB1' };
     sys.files.set(`${ROOT}/.github/niyam.json`, SETTINGS);
@@ -306,6 +330,51 @@ describe('prDesign', () => {
 
   it('needs the Actions environment', async () => {
     await assert.rejects(check(new FakeSys()), /pr-design runs in GitHub Actions/);
+    for (const name of ['GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GH_TOKEN'] as const) {
+      const sys = actions([state(30, LINK)]);
+      delete sys.env[name];
+      await assert.rejects(check(sys), { message: 'pr-design runs in GitHub Actions: GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set' }, name);
+    }
+  });
+
+  it('refuses settings it cannot read before anything else', async () => {
+    const sys = actions([state(30, LINK)]);
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 5, agent: AGENT, features: ['identity'] }));
+    await assert.rejects(check(sys), /\.github\/niyam\.json/);
+  });
+
+  it('is off on a repository a personal account owns', async () => {
+    const sys = actions([state(30, LINK)]);
+    sys.ownerType = 'User';
+    assert.deepEqual(await check(sys), {
+      code: 0,
+      out: ['pr-design: figma is off on a repository owned by a personal account, since GitHub has issue types for organisations only; nothing to check'],
+      err: [],
+    });
+  });
+
+  for (const [name, status, json] of [
+    ['no JSON', 200, null],
+    ['no data', 200, {}],
+    ['no repository', 200, { data: {} }],
+    ['a refusal with a page', 502, { data: { repository: { issue: { parent: null, subIssues: { nodes: [] } } } } }],
+  ] as const) {
+    it(`throws when GitHub answers the states with ${name}`, async () => {
+      const sys = actions(null);
+      sys.route('POST', '/graphql', { status, json });
+      await assert.rejects(check(sys), { message: `cannot read the states of #12 (HTTP ${status})` });
+    });
+  }
+
+  it('checks a slice whose parent has no issue type, and skips a sub-issue with none', async () => {
+    const sys = actions([state(34, 'no link yet'), { number: 35, issueType: null, stateReason: null, body: '' }], AGENT, 'Slice: #12', { number: 7, body: '**Kind:** Process.', issueType: null });
+    assert.deepEqual((await check(sys)).err, ['✗ state #34 links no Figma frame (a figma.com/design link with node-id)', 'pr-design: refused by the design check']);
+  });
+
+  it('reads a library whose published list names no components as none', async () => {
+    const sys = actions([state(30, LINK)]);
+    sys.route('GET', `${FIGMA}/files/LIB1/components`, { status: 200, json: { meta: {} } });
+    assert.equal((await check(sys)).err[0], '✗ state #30 links a frame that uses no component from the design library');
   });
 
   it("checks the slice's states past the first page", async () => {
