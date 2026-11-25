@@ -114,13 +114,16 @@ describe('realSys', () => {
 
   it('calls a Ctrl-C handler instead of ending, until it is taken off', () => {
     const seen: string[] = [];
-    const before = process.listenerCount('SIGINT');
+    const before = process.listeners('SIGINT');
     const off = sys.onInterrupt(() => seen.push('interrupted'));
-    assert.equal(process.listenerCount('SIGINT'), before + 1);
-    process.emit('SIGINT');
+    // Only the listener onInterrupt added is called: emitting SIGINT would reach every other listener in this
+    // process too, such as a test runner's, which may end the process.
+    const added = process.listeners('SIGINT').filter((listener) => !before.includes(listener));
+    assert.equal(added.length, 1);
+    (added[0] as (signal: NodeJS.Signals) => void)('SIGINT');
     assert.deepEqual(seen, ['interrupted']);
     off();
-    assert.equal(process.listenerCount('SIGINT'), before);
+    assert.deepEqual(process.listeners('SIGINT'), before);
   });
 
   it('leaves an interactive command the terminal, capturing nothing', () => {
