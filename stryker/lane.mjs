@@ -11,6 +11,10 @@
 // root, so the paths are used as they are. A hand run must name the suites
 // too: without them the tap runner's default finds every suite in the
 // checkout.
+import { fileURLToPath } from 'node:url';
+
+// Absolute, so it loads from whichever folder Stryker runs the suite in.
+const drainExit = fileURLToPath(new URL('./drain-exit.cjs', import.meta.url));
 
 /** @param {NodeJS.ProcessEnv} [env] */
 export function lane(env = process.env) {
@@ -21,8 +25,9 @@ export function lane(env = process.env) {
     tap: {
       ...(suites.length > 0 ? { testFiles: suites } : {}),
       // --test-force-exit ends a suite once its tests have run: a mutant that leaves a server or timer open
-      // (sys.ts's serve without close) would otherwise keep the process alive to the timeout.
-      nodeArgs: ['--test-reporter=tap', '--test-force-exit', '-r', '{{hookFile}}', '{{testFile}}'],
+      // (sys.ts's serve without close) would otherwise keep the process alive to the timeout. It can exit
+      // before stdout has written the end of the TAP stream, so drain-exit.cjs holds the exit until it has.
+      nodeArgs: ['--test-reporter=tap', '--test-force-exit', '-r', '{{hookFile}}', '-r', drainExit, '{{testFile}}'],
       forceBail: true,
     },
     coverageAnalysis: 'perTest',
