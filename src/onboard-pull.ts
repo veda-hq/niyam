@@ -1,5 +1,5 @@
 import { API, SETTINGS_PATH, pathsFor, sessionEnv } from './agent.ts';
-import type { Output, Sys } from './types.ts';
+import type { HttpResult, Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
 
 /** The branch onboard's pull request comes from: a run again updates the same one. */
@@ -34,8 +34,10 @@ const LEADING_EMOJI = /^(?:(\p{Regional_Indicator}{2}|\p{Extended_Pictographic}\
  * repository puts most on chores, else gitmoji's for configuration. Merge
  * commits are git's own words, so they count for neither style.
  */
-export function pullTitle(version: string, recent: readonly string[]): string {
+export function pullTitle(version: string, recent: readonly string[] | undefined): string {
   const title = `chore(niyam): onboard at v${version}`;
+  // GitHub did not say: no style to follow.
+  if (recent === undefined) return title;
   const subjects = recent.filter((subject) => !subject.startsWith('Merge '));
   const led = subjects.flatMap((subject) => {
     const match = LEADING_EMOJI.exec(subject);
@@ -226,10 +228,17 @@ export async function openPull(sys: Sys, io: Output, target: PullTarget, changes
   }
 }
 
-/** The default branch's latest commit subjects, newest first; none when GitHub does not say. */
-async function recentSubjects(sys: Sys, slug: string, branch: string, token: string): Promise<string[]> {
-  const { status, json } = await sys.http(`${API}/repos/${slug}/commits?sha=${encodeURIComponent(branch)}&per_page=20`, { token }).catch(() => ({ status: 0, json: undefined }));
-  if (status !== 200 || !Array.isArray(json)) return [];
+/** The default branch's latest commit subjects, newest first; undefined when GitHub does not say. */
+async function recentSubjects(sys: Sys, slug: string, branch: string, token: string): Promise<string[] | undefined> {
+  let answer: HttpResult;
+  try {
+    answer = await sys.http(`${API}/repos/${slug}/commits?sha=${encodeURIComponent(branch)}&per_page=20`, { token });
+  } catch {
+    // No answer: the title takes no style.
+    return undefined;
+  }
+  const { status, json } = answer;
+  if (status !== 200 || !Array.isArray(json)) return undefined;
   return json.flatMap((one: { commit?: { message?: unknown } }) => (typeof one?.commit?.message === 'string' ? [one.commit.message.split('\n')[0] as string] : []));
 }
 
