@@ -89,7 +89,8 @@ export function ownerStepArgs(args: readonly string[]): Step {
     }
     case 'required-checks': {
       const [where, ruleset, ...flags] = rest;
-      if (where === undefined || ruleset === undefined || where.startsWith('--') || ruleset.startsWith('--')) {
+      // A ruleset means a repository before it.
+      if (ruleset === undefined || (where as string).startsWith('--') || ruleset.startsWith('--')) {
         throw new Error(`owner-step required-checks takes a repository and a ruleset before any --check: ${STEP_USAGE[2]}`);
       }
       if (!(ruleset as string).trim()) throw new Error('owner-step required-checks needs a ruleset id or name');
@@ -107,9 +108,9 @@ export function ownerStepArgs(args: readonly string[]): Step {
   }
 }
 
-/** The scopes beyond gh's own (repo, read:org, gist) a step needs: issue types are an organisation setting. */
-export function stepScopes(step: Step): string[] {
-  return step.step === 'issue-types' ? ['admin:org'] : ['repo'];
+/** The scope beyond gh's own (repo, read:org, gist) a step needs: issue types are an organisation setting. */
+export function stepScope(step: Step): string {
+  return step.step === 'issue-types' ? 'admin:org' : 'repo';
 }
 
 /**
@@ -119,7 +120,7 @@ export function stepScopes(step: Step): string[] {
  */
 export function folderRoot(sys: Sys): string {
   const asked = sys.platform === 'darwin' ? sys.exec('getconf', ['DARWIN_USER_TEMP_DIR'], { timeoutMs: 5_000 }) : undefined;
-  const root = asked?.code === 0 ? asked.stdout.trim() : (sys.env.TMPDIR ?? '/tmp');
+  const root = asked?.code === 0 ? asked.stdout.trim() : sys.env.TMPDIR;
   return (root || '/tmp').replace(/\/+$/, '');
 }
 
@@ -127,8 +128,8 @@ export function folderRoot(sys: Sys): string {
 interface Answer {
   ok: boolean;
   json: unknown;
-  /** Response headers, names lowercased, when asked for. */
-  headers: Record<string, string>;
+  /** What gh printed: the status line and headers first, when asked for. */
+  printed: string;
   problem: string;
 }
 
@@ -162,25 +163,17 @@ function ghIn(sys: Sys, env: Record<string, string | undefined>): Gh {
     api(path, { method, body, include } = {}) {
       const args = ['api', path, '-H', 'X-GitHub-Api-Version: 2022-11-28', ...(method ? ['--method', method] : []), ...(body === undefined ? [] : ['--input', '-']), ...(include ? ['--include'] : [])];
       const run = sys.exec('gh', args, { env, timeoutMs: GH_MS, ...(body === undefined ? {} : { input: JSON.stringify(body) }) });
-      let text = run.stdout;
-      const headers: Record<string, string> = {};
-      if (include) {
-        const split = /\r?\n\r?\n/.exec(text);
-        const head = split ? text.slice(0, split.index) : text;
-        text = split ? text.slice(split.index + split[0].length) : '';
-        for (const line of head.split(/\r?\n/).slice(1)) {
-          const colon = line.indexOf(':');
-          if (colon > 0) headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
-        }
-      }
+      // With --include gh prints the status line and headers, then a blank line, then the body.
+      const split = include ? /\r?\n\r?\n/.exec(run.stdout) : null;
+      const text = split ? run.stdout.slice(split.index + split[0].length) : run.stdout;
       let json: unknown = null;
       try {
-        json = text.trim() ? JSON.parse(text) : null;
+        json = JSON.parse(text);
       } catch {
-        // Not JSON: the problem below says what gh said.
+        // Nothing, or not JSON: the problem below says what gh said.
       }
       const said = run.stderr.trim().split('\n')[0] || (json as { message?: unknown } | null)?.message;
-      return { ok: run.code === 0, json, headers, problem: typeof said === 'string' && said ? said : `gh exit ${run.code}` };
+      return { ok: run.code === 0, json, printed: run.stdout, problem: typeof said === 'string' && said ? said : `gh exit ${run.code}` };
     },
   };
 }
@@ -206,8 +199,8 @@ interface Change {
 interface Found {
   changes: Change[];
   notes: string[];
-  /** Said when there is nothing to change. */
-  already: string;
+  /** Said when there is nothing to change; a step that has changes to make need not give it. */
+  already?: string;
   /** What it will not change, and why: each a ✗. */
   skipped: Finding[];
 }
@@ -279,15 +272,14 @@ function label(gh: Gh, { repo, number, action, label: name }: Extract<Step, { st
   const exists = gh.api(`repos/${repo}/labels/${encodeURIComponent(name)}`);
   if (!exists.ok && /404|not found/i.test(exists.problem)) throw new Error(`${repo} has no label ${name}, and owner-step makes none; ${CLI} onboard does`);
   must(exists, `reading ${repo}'s label ${name}`);
-  const issue = (): { title: string; labels: string[] } => {
+  const issue = (): { title: string; has: boolean } => {
     const json = must(gh.api(`repos/${repo}/issues/${number}`), `reading ${where}`) as { title?: unknown; labels?: { name?: unknown }[] } | null;
-    const labels = (json?.labels ?? []).map((one) => one.name).filter((one): one is string => typeof one === 'string');
-    return { title: typeof json?.title === 'string' ? json.title : '', labels };
+    const has = json?.labels?.some((one) => typeof one.name === 'string' && same(one.name, name)) === true;
+    return { title: typeof json?.title === 'string' ? json.title : '', has };
   };
-  const labelsOn = (): string[] => issue().labels;
   const first = issue();
   const title = first.title ? ` "${first.title}"` : '';
-  const has = first.labels.some((one) => same(one, name));
+  const { has } = first;
   if (has === (action === 'add')) return { changes: [], notes: [], skipped: [], already: `${where} ${has ? 'has' : 'does not have'} the label ${name}` };
   return {
     changes: [
@@ -300,7 +292,7 @@ function label(gh: Gh, { repo, number, action, label: name }: Extract<Step, { st
               : gh.api(`repos/${repo}/issues/${number}/labels/${encodeURIComponent(name)}`, { method: 'DELETE' }),
             `${action === 'add' ? 'adding' : 'removing'} ${name}`,
           );
-          const now = labelsOn().some((one) => same(one, name));
+          const now = issue().has;
           if (now !== (action === 'add')) throw new Error(`GitHub shows ${where} ${now ? 'with' : 'without'} ${name} afterwards`);
           return action === 'add' ? `${where} has the label ${name}` : `${where} no longer has the label ${name}`;
         },
@@ -308,7 +300,6 @@ function label(gh: Gh, { repo, number, action, label: name }: Extract<Step, { st
     ],
     notes: [],
     skipped: [],
-    already: '',
   };
 }
 
@@ -340,11 +331,10 @@ function wantedChecks(gh: Gh, repo: string): { file: string; checks: string[] } 
   return { file, checks: featuresIn(settings).flatMap((feature) => FEATURE_CHECKS[feature] ?? []) };
 }
 
-/** The repository's workflow on its default branch, and its path. */
-function workflowIn(gh: Gh, repo: string): { path: string; text?: string } {
-  const text = fileIn(gh, repo, WORKFLOW_PATH);
+/** The repository's workflow, WORKFLOW_PATH, on its default branch, or undefined when it has none. */
+function workflowIn(gh: Gh, repo: string): string | undefined {
   // Line endings as LF, which the job patterns read, whatever the client's checkout committed.
-  return text === undefined ? { path: WORKFLOW_PATH } : { path: WORKFLOW_PATH, text: text.replaceAll('\r\n', '\n') };
+  return fileIn(gh, repo, WORKFLOW_PATH)?.replaceAll('\r\n', '\n');
 }
 
 /** The workflow's read-only job, by its id, `niyam`. */
@@ -363,13 +353,14 @@ const CALLS_CHECKS = /^\s+uses:\s*['"]?(?:([\w.-]+\/[\w.-]+)\/|\.\/)\.github\/wo
  * requiring it would hold every pull request.
  */
 function workflowJobs(gh: Gh, repo: string): Set<string> | { problem: string } {
-  const { path, text: workflow } = workflowIn(gh, repo);
+  const workflow = workflowIn(gh, repo);
   if (workflow === undefined) return { problem: `${repo} has no ${WORKFLOW_PATH} on its default branch` };
+  const path = WORKFLOW_PATH;
   const job = new RegExp(String.raw`${READ_ONLY_JOB}((?:(?: {3,}|[ 	]*#|[ 	]*
 ?$).*
 ?
 ?)*)`, 'm').exec(workflow)?.[1];
-  const calls = job === undefined ? null : CALLS_CHECKS.exec(job);
+  const calls = job?.match(CALLS_CHECKS);
   if (!calls) return { problem: `${path} has no ${CLI} job calling the shared checks` };
   const [, from = repo, ref] = calls;
   const answer = gh.api(`repos/${from}/contents/.github/workflows/checks.yml${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`);
@@ -401,10 +392,9 @@ interface CheckRun {
  * latest runs of the name (#358). A cancelled run nothing replaced stays.
  */
 function superseded(runs: CheckRun[]): CheckRun[] {
-  const at = (one: CheckRun): string => (typeof one.started_at === 'string' ? one.started_at : '');
-  return runs.filter(
-    (one) => one.conclusion !== 'cancelled' || !runs.some((other) => other.conclusion === 'success' && other.app?.id === one.app?.id && at(other) > at(one) && at(one) !== ''),
-  );
+  // A start GitHub did not give reads as NaN, which is after nothing and before nothing.
+  const at = (one: CheckRun): number => Date.parse(String(one.started_at));
+  return runs.filter((one) => one.conclusion !== 'cancelled' || !runs.some((other) => other.conclusion === 'success' && other.app?.id === one.app?.id && at(other) > at(one)));
 }
 
 /**
@@ -442,8 +432,9 @@ function passedOnPull(gh: Gh, repo: string, names: string[]): Map<string, Passed
     const app = apps[0];
     if (apps.length > 1) {
       found.set(name, { problem: `more than one app reported ${name} on ${where}, and a ruleset requires one app's` });
-    } else if (named.length > 0 && typeof app === 'number' && named.every((one) => one.conclusion === 'success')) {
-      const appName = named[0]?.app?.name;
+    } else if (typeof app === 'number' && named.every((one) => one.conclusion === 'success')) {
+      // One app, whose id is a number: every run named it.
+      const appName = (named[0] as { app: { name?: unknown } }).app.name;
       found.set(name, { app, appName: typeof appName === 'string' ? appName : `app ${app}`, pull: last.number });
     } else if (named.length > 0) {
       const how = [...new Set(named.map((one) => String(one.conclusion ?? 'not finished')))].join(', ');
@@ -476,11 +467,12 @@ async function sharedGuard(gh: Gh, repo: string, asked: boolean, what: string): 
   if (at === undefined) {
     return not(`${GUARD_CALLER_PATH} on the default branch is not the shared Guard's caller as onboard writes it`, `rename or delete a ${GUARD_CALLER_PATH} onboard did not write, then ${onboard}`);
   }
-  const pins = [...new Set(workflowPins(workflowIn(gh, repo).text ?? ''))];
+  const workflow = workflowIn(gh, repo);
+  const pins = workflow === undefined ? [] : [...new Set(workflowPins(workflow))];
   if (pins.length !== 1) return not(`${WORKFLOW_PATH} on the default branch pins ${pins.length === 0 ? 'no' : 'more than one'} release, so the caller's is not known to be the one`, onboard);
   if (at.version !== pins[0]) return not(`${GUARD_CALLER_PATH} calls the shared Guard at v${at.version}, but ${WORKFLOW_PATH} pins v${String(pins[0])}`, onboard);
-  const about = must(gh.api(`repos/${repo}`), `reading ${repo}`) as { default_branch?: unknown; private?: unknown; visibility?: unknown } | null;
-  const branch = about?.default_branch;
+  const about = (must(gh.api(`repos/${repo}`), `reading ${repo}`) ?? {}) as { default_branch?: unknown; private?: unknown; visibility?: unknown };
+  const branch = about.default_branch;
   if (typeof branch !== 'string' || !branch) return not(`GitHub did not say ${repo}'s default branch`, 'run this again');
   if (at.branch !== branch) return not(`${GUARD_CALLER_PATH} runs on pull requests into ${at.branch}, not the default branch ${branch}`, onboard);
   const passed = passedOnPull(gh, repo, [CALLER_CHECK]).get(CALLER_CHECK) as Passed;
@@ -488,7 +480,7 @@ async function sharedGuard(gh: Gh, repo: string, asked: boolean, what: string): 
     return { note: `${CALLER_CHECK} passed on ${repo}#${passed.pull}, reported by ${passed.appName}; ${GUARD_CALLER_PATH} runs it on pull requests into ${branch} alone, so a ruleset that also targets other branches would hold theirs` };
   }
   const why = 'app' in passed ? `${CALLER_CHECK} on ${repo}#${passed.pull} was reported by ${passed.appName}, not GitHub Actions` : passed.problem;
-  const visible = about?.private === false || about?.visibility === 'public';
+  const visible = about.private === false || about.visibility === 'public';
   const runs = `Guard runs from the default branch's copy of its caller, so it first reports on the pull request after the one that adds it${visible ? ', and from 2026-12-02 GitHub runs it in a public repository only once a policy allows pull_request_target' : ''}`;
   const merge = 'merge a pull request it passes on, then run this again';
   return not(`${why}; ${runs}`, visible ? `${policySteps(repo).byHand} Then ${merge}` : merge);
@@ -499,20 +491,23 @@ async function sharedGuard(gh: Gh, repo: string, asked: boolean, what: string): 
  * repository's settings turn on added; every other check and rule stays as
  * it is, and none is taken away.
  */
-async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Extract<Step, { step: 'required-checks' }>): Promise<Found> {
-  const listed = must(gh.api(`repos/${repo}/rulesets?includes_parents=false&per_page=100`), `listing ${repo}'s rulesets`) as { id?: unknown; name?: unknown }[] | null;
-  const matches = (listed ?? []).filter((one) => String(one.id) === ruleset || (typeof one.name === 'string' && same(one.name, ruleset)));
+async function requiredChecks(gh: Gh, { repo, ruleset, checks: named }: Extract<Step, { step: 'required-checks' }>): Promise<Found> {
+  const listed = (must(gh.api(`repos/${repo}/rulesets?includes_parents=false&per_page=100`), `listing ${repo}'s rulesets`) ?? []) as { id?: unknown; name?: unknown }[];
+  const matches = listed.filter((one) => String(one.id) === ruleset || (typeof one.name === 'string' && same(one.name, ruleset)));
   if (matches.length !== 1) {
-    const names = (listed ?? []).map((one) => `${String(one.name)} (${String(one.id)})`).join(', ') || 'none';
+    const names = listed.map((one) => `${String(one.name)} (${String(one.id)})`).join(', ') || 'none';
     throw new Error(`${matches.length === 0 ? 'no' : 'more than one'} ruleset of ${repo} is "${ruleset}"; its rulesets: ${names}`);
   }
-  const id = String(matches[0]?.id);
+  const id = String((matches[0] as { id?: unknown }).id);
   const read = (): { name: string; rules: Rule[] } => {
     const json = must(gh.api(`repos/${repo}/rulesets/${id}`), `reading the ruleset ${ruleset}`) as { name?: unknown; rules?: unknown } | null;
     if (!Array.isArray(json?.rules)) throw new Error(`GitHub did not give the ruleset ${ruleset}'s rules`);
     return { name: String(json.name), rules: json.rules as Rule[] };
   };
-  const contexts = (rules: Rule[]): string[] => rules.find((rule) => rule.type === 'required_status_checks')?.parameters?.required_status_checks?.map((check) => check.context) ?? [];
+  /** The ruleset's required checks, or undefined where it has no such rule or the rule lists none. */
+  const statusChecks = (rules: Rule[]): { context: string; integration_id?: number }[] | undefined =>
+    rules.find((rule) => rule.type === 'required_status_checks')?.parameters?.required_status_checks;
+  const contexts = (rules: Rule[]): string[] => statusChecks(rules)?.map((check) => check.context) ?? [];
   const others = (rules: Rule[]): string => JSON.stringify(rules.filter((rule) => rule.type !== 'required_status_checks'));
   const before = read();
   const { file, checks: turnedOn } = wantedChecks(gh, repo);
@@ -529,8 +524,7 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
   // The shared Guard's check, on its own proof (sharedGuard), never --check's, which any one app passes.
   const own = same(repo, PRODUCT);
   // Required already from another app, or from any, it is the spoof itself: it is bound to GitHub Actions, on the same proof.
-  const bound = (rules: Rule[]): { context: string; integration_id?: number }[] => rules.find((rule) => rule.type === 'required_status_checks')?.parameters?.required_status_checks ?? [];
-  const loose = (rules: Rule[]): { context: string; integration_id?: number } | undefined => bound(rules).find((check) => check.context === CALLER_CHECK && check.integration_id !== ACTIONS_APP);
+  const loose = (rules: Rule[]): { context: string; integration_id?: number } | undefined => statusChecks(rules)?.find((check) => check.context === CALLER_CHECK && check.integration_id !== ACTIONS_APP);
   const looseBefore = loose(before.rules);
   const from = looseBefore?.integration_id === undefined ? 'any app' : `app ${looseBefore.integration_id}`;
   const sound = had.includes(CALLER_CHECK) && looseBefore === undefined;
@@ -541,7 +535,8 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
   // In niyam's ruleset its own Guard check goes, the shared one in its place, once that has passed (#472).
   const swapsGuard = (check: string): boolean => own && guardRuns && check === OWN_GUARD;
   const guardAdded = guardRuns && !had.includes(CALLER_CHECK) ? [CALLER_CHECK] : [];
-  const target = (check: string): string | undefined => (stale(check) ? swaps.find((swap) => swap.from === check)?.to : swapsGuard(check) ? CALLER_CHECK : check);
+  const swapTo = new Map(swaps.map(({ from, to }) => [from, to]));
+  const target = (check: string): string | undefined => (stale(check) ? swapTo.get(check) : swapsGuard(check) ? CALLER_CHECK : check);
   // Each check the owner named, unless required already or a feature's: added only with proof that pull requests run it.
   const toProve = named.filter((check) => check !== CALLER_CHECK && !had.includes(check) && !turnedOn.includes(check));
   const proof = passedOnPull(gh, repo, toProve);
@@ -593,7 +588,7 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
           return to === undefined ? [] : [{ ...check, context: to }];
         })
         .filter((check, at, all) => all.findIndex((one) => one.context === check.context) === at);
-    const kept = moved(current.find((rule) => rule.type === 'required_status_checks')?.parameters?.required_status_checks ?? []).map((check) => check.context);
+    const kept = moved(statusChecks(current) ?? []).map((check) => check.context);
     const added = [...[...checks, ...guardAdded].map((context) => ({ context, integration_id: ACTIONS_APP })), ...proven].filter((check) => !kept.includes(check.context));
     return current.some((rule) => rule.type === 'required_status_checks')
       ? current.map((rule) =>
@@ -631,7 +626,6 @@ async function requiredChecks(gh: Gh, { repo, ruleset, checks: named = [] }: Ext
     ],
     notes,
     skipped,
-    already: '',
   };
 }
 
@@ -668,9 +662,9 @@ export async function ownerStep(sys: Sys, io: Output, args: readonly string[]): 
     io.err('owner-step: no terminal to ask in; run it in your own terminal');
     return 1;
   }
-  const scopes = stepScopes(step);
+  const scope = stepScope(step);
   io.out(`owner-step ${step.step}: ${about(step)}`);
-  io.out(`  One browser sign-in to a throwaway gh (scopes ${scopes.join(', ')}, beside gh's own), its folder deleted afterwards.`);
+  io.out(`  One browser sign-in to a throwaway gh (scopes ${scope}, beside gh's own), its folder deleted afterwards.`);
   io.out('  Nothing changes until you say yes.');
 
   const dir = sys.tempDir(`${folderRoot(sys)}/${FOLDER_PREFIX}`);
@@ -701,7 +695,7 @@ export async function ownerStep(sys: Sys, io: Output, args: readonly string[]): 
   const results: Finding[] = [];
   let code = 1;
   try {
-    code = await signedIn(sys, io, step, scopes, dir, env, results, () => interrupted);
+    code = await signedIn(sys, io, step, scope, dir, env, results, () => interrupted);
   } catch (error) {
     // A Ctrl-C that killed a gh call is handled once the event loop runs again.
     await settle(sys);
@@ -722,7 +716,7 @@ async function signedIn(
   sys: Sys,
   io: Output,
   step: Step,
-  scopes: string[],
+  scope: string,
   dir: string,
   env: Record<string, string | undefined>,
   results: Finding[],
@@ -730,7 +724,7 @@ async function signedIn(
 ): Promise<number> {
   const signIn = await sys.converse(
     'gh',
-    ['auth', 'login', '-h', GITHUB_HOST, '-p', 'https', '--skip-ssh-key', '-w', '-s', scopes.join(','), '--insecure-storage'],
+    ['auth', 'login', '-h', GITHUB_HOST, '-p', 'https', '--skip-ssh-key', '-w', '-s', scope, '--insecure-storage'],
     { env },
     signInLines(sys, (line) => io.out(`  ${line}`)),
   );
@@ -741,9 +735,9 @@ async function signedIn(
   const me = gh.api('user', { include: true });
   const login = (me.json as { login?: unknown } | null)?.login;
   if (!me.ok || typeof login !== 'string') throw new Error(`GitHub did not accept the sign-in (${me.problem}), so nothing changed`);
-  const granted = (me.headers['x-oauth-scopes'] ?? '').split(',').map((scope) => scope.trim());
-  const lacking = scopes.filter((scope) => !granted.includes(scope));
-  if (lacking.length > 0) throw new Error(`the sign-in did not grant ${lacking.join(', ')}, so nothing changed`);
+  // The token's scopes, in the header gh printed before the body: a JSON body has no line that starts so.
+  const granted = [...me.printed.matchAll(/^x-oauth-scopes:(.*)/gim)].flatMap((header) => (header[1] as string).split(',')).map((one) => one.trim());
+  if (!granted.includes(scope)) throw new Error(`the sign-in did not grant ${scope}, so nothing changed`);
   io.out(`  signed in as ${login}`);
   const notOwner = step.step === 'issue-types' ? (ownsOrg(gh, step.org) ? undefined : `${login} is not an owner of the organisation ${step.org}`) : notRepoOwner(gh, login, step.repo);
   if (notOwner) throw new Error(`${notOwner}; sign in to ${GITHUB_HOST} in the browser as the owner and run it again. Nothing changed`);
@@ -753,7 +747,7 @@ async function signedIn(
   results.push(...found.skipped);
   const skipped = found.skipped.length > 0 ? 1 : 0;
   if (found.changes.length === 0) {
-    if (!skipped) results.push({ mark: '✓', text: `nothing to change: ${found.already}` });
+    if (!skipped) results.push({ mark: '✓', text: `nothing to change: ${String(found.already)}` });
     return skipped;
   }
   io.out(`  owner-step will ${found.changes.length === 1 ? 'make this change' : `make these ${found.changes.length} changes`}:`);

@@ -36,9 +36,9 @@ export async function tagOnMain(sys: Sys, version: string, token?: string): Prom
   const limited = rateLimited(answer, read.token);
   if (limited) return { problem: `GitHub could not say whether the ${tag} tag is on ${RELEASE_BRANCH}: ${limited}` };
   if (answer.status !== 200) return { problem: `GitHub answered HTTP ${answer.status} when asked whether the ${tag} tag is on ${RELEASE_BRANCH}` };
-  const json = answer.json as { status?: unknown; base_commit?: { sha?: unknown } } | null;
-  const sha = typeof json?.base_commit?.sha === 'string' && /^[0-9a-f]{40}$/.test(json.base_commit.sha) ? json.base_commit.sha : undefined;
+  const json = (answer.json ?? {}) as { status?: unknown; base_commit?: { sha?: unknown } };
+  const sha = typeof json.base_commit?.sha === 'string' && /^[0-9a-f]{40}$/.test(json.base_commit.sha) ? json.base_commit.sha : undefined;
   if (sha === undefined) return { problem: `GitHub's comparison of the ${tag} tag with ${RELEASE_BRANCH} names no commit for the tag` };
-  if (json?.status === 'ahead' || json?.status === 'identical') return { sha };
-  return { problem: `the ${tag} tag is on commit ${sha.slice(0, 12)}, which is not on ${PRODUCT}'s ${RELEASE_BRANCH} (GitHub's comparison: ${JSON.stringify(json?.status ?? null)}); a release comes only from ${RELEASE_BRANCH}, so this tag is not one` };
+  if (json.status === 'ahead' || json.status === 'identical') return { sha };
+  return { problem: `the ${tag} tag is on commit ${sha.slice(0, 12)}, which is not on ${PRODUCT}'s ${RELEASE_BRANCH} (GitHub's comparison: ${JSON.stringify(json.status ?? null)}); a release comes only from ${RELEASE_BRANCH}, so this tag is not one` };
 }
