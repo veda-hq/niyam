@@ -8,7 +8,7 @@ import { after, before as beforeAll, describe, it } from 'node:test';
 import { parse } from 'yaml';
 
 import { type DocKind, type DocSettings, docSettings, kindNamed } from './doc-numbers.ts';
-import { capture } from './fake.test.ts';
+import { FakeSys, capture } from './fake.test.ts';
 import { hermeticGitEnv, maskProcessGitEnv, removeFixtureRoot } from './hermetic-git.ts';
 import {
   type Plan,
@@ -25,6 +25,7 @@ import {
   rewriteRelationships,
 } from './renumber-doc.ts';
 import { realSys } from './sys.ts';
+import type { ExecResult } from './types.ts';
 
 /** Two kinds of numbered document, each naming the other in its own folders, as a repository with both would. */
 const RAW_SETTINGS = {
@@ -244,6 +245,42 @@ describe('rewriteRelationships', () => {
     );
   });
 
+  describe('the edges of each shape', () => {
+    const adr = (text: string): string => rewriteRelationships(text, ADR, '0040', '0099', 'docs/adr/x.md');
+
+    it('reads a value of numbers and commas as a list however it is spaced, and any other value by its leading number', () => {
+      assert.equal(adr('supersedes: "0005, 0006, 0040"'), 'supersedes: "0005, 0006, 0099"');
+      assert.equal(adr('supersedes: "0005 , 0040"'), 'supersedes: "0005 , 0099"');
+      assert.equal(adr('supersedes: "0005,0040"'), 'supersedes: "0005,0099"');
+      for (const text of ['supersedes: see, 0040', 'supersedes: 1, 0040', 'supersedes: "see, 0040"']) assert.equal(adr(text), text);
+    });
+
+    it('takes an element as quoted only when the quotes enclose it whole', () => {
+      for (const text of ["superseded_by: [x '0040']", "superseded_by: ['0040' x]"]) assert.equal(adr(text), text);
+    });
+
+    it('reads a block item by its dash however it is spaced, and only an item that opens with a number', () => {
+      assert.equal(adr("superseded_by:\n  -  '0040'"), "superseded_by:\n  -  '0099'");
+      for (const text of ['superseded_by:\n  - see, 0040', 'superseded_by:\n  - 1, 0040', 'superseded_by:\n  prose - 0040']) assert.equal(adr(text), text);
+    });
+
+    it('takes a line with a line separator in it as no item or key, leaving it whole', () => {
+      for (const text of ['superseded_by:\n  - 0040 x', 'supersedes: 0040 x']) assert.equal(adr(text), text);
+    });
+
+    it('reads a key only at the start of its line, however far its value is spaced', () => {
+      assert.equal(adr("see supersedes: '0040'"), "see supersedes: '0040'");
+      assert.equal(adr("supersedes:  '0040'"), "supersedes:  '0099'");
+      assert.equal(adr("supersedes:  ['0040']"), "supersedes:  ['0099']");
+    });
+
+    it('follows a flow list only past the line that closes it, a bracket in a description being no close', () => {
+      assert.equal(adr("superseded_by:\n  ['0041 (see [x])',\n  '0040']"), "superseded_by:\n  ['0041 (see [x])',\n  '0099']");
+      assert.equal(adr("superseded_by: ['0041 (see [x])',\n  '0040']"), "superseded_by: ['0041 (see [x])',\n  '0099']");
+      assert.equal(adr("superseded_by:\n  ['0041'] # note\nsupersedes: '0040'"), "superseded_by:\n  ['0041'] # note\nsupersedes: '0099'");
+    });
+  });
+
   it('keeps the indentation of a nested key', () => {
     assert.equal(rewriteRelationships("prd_impact:\n  adr_refs: ['0007']", ADR, '0007', '0099', 'docs/specs/area/x.prd.md'), "prd_impact:\n  adr_refs: ['0099']");
   });
@@ -350,6 +387,20 @@ describe('residualBareRefs', () => {
   it('reads CRLF frontmatter, and nothing from a file without any', () => {
     assert.deepEqual(residualBareRefs(SETTINGS, "---\r\nrelated: '0023'\r\n---\r\n", '0023', 'docs/rfcs/x.md'), ["related: '0023'"]);
     assert.deepEqual(residualBareRefs(SETTINGS, "related: '0023'\n", '0023', 'docs/rfcs/x.md'), []);
+    assert.deepEqual(residualBareRefs(SETTINGS, "title\nrelated: '0023'\n---\n", '0023', 'docs/rfcs/x.md'), [], 'a file whose first line is no ---');
+    assert.deepEqual(residualBareRefs(SETTINGS, "---\nrelated: '0023'\nmore\n", '0023', 'docs/rfcs/x.md'), [], 'a block that never closes');
+  });
+
+  it('reads the frontmatter alone, up to the first line that opens with ---, keeping a carriage return inside a line', () => {
+    assert.deepEqual(residualBareRefs(SETTINGS, "---\ntitle: x\n---\nrelated: '0023'\n", '0023', 'docs/rfcs/x.md'), [], 'the body is no frontmatter');
+    assert.deepEqual(residualBareRefs(SETTINGS, "---\nrelated: '0023'\n--- end\n", '0023', 'docs/rfcs/x.md'), ["related: '0023'"]);
+    assert.deepEqual(residualBareRefs(SETTINGS, "---\nrelated: 'a\rb 0023'\n---\n", '0023', 'docs/rfcs/x.md'), ["related: 'a\rb 0023'"]);
+  });
+
+  it('takes a key only at the start of a line, a dash only as an item, and a blank line as no break in a block', () => {
+    assert.deepEqual(residualBareRefs(SETTINGS, '---\nsee supersedes: 0023\n---\n', '0023', 'docs/rfcs/x.md'), ['see supersedes: 0023']);
+    assert.deepEqual(residualBareRefs(SETTINGS, '---\nchild_rfcs:\n  prose - 0023\n---\n', '0023', 'docs/rfcs/x.md'), ['prose - 0023']);
+    assert.deepEqual(residualBareRefs(SETTINGS, "---\nchild_rfcs:\n  \n  - '0023'\n---\n", '0023', 'docs/rfcs/x.md'), []);
   });
 });
 
@@ -369,6 +420,12 @@ describe('isHistory', () => {
     assert.equal(isHistory(settings, 'CHANGELOG.md'), true);
     assert.equal(isHistory(settings, 'docs/CHANGELOG.md'), false);
     assert.equal(isHistory(docSettings({ ...RAW_SETTINGS, history: [] }), 'docs/work/x.md'), false);
+    assert.equal(isHistory(settings, 'CHANGELOG.md.orig'), false, 'a file pattern is no prefix');
+  });
+
+  it('reads ! only at the start of a pattern, as its exception', () => {
+    assert.equal(isHistory(docSettings({ ...RAW_SETTINGS, history: ['docs/', 'adocs/'] }), 'docs/x.md'), true, 'a pattern with no ! excepts nothing');
+    assert.equal(isHistory(docSettings({ ...RAW_SETTINGS, history: ['!docs/'] }), '!docs/x.md'), false, 'an exception keeps nothing itself, though a path starts with its text');
   });
 });
 
@@ -534,6 +591,51 @@ describe('applyPlan (in a fixture repository)', () => {
     assert.throws(() => applyPlan(sysAt(root), root, ADR, p), /^Error: git mv docs\/adr\/0057-a\.md docs\/adr\/0058-a\.md: .+/);
     assert.equal(read(root, 'docs/adr/0057-a.md'), "---\nadr: '0057'\n---\n");
     assert.equal(read(root, 'docs/adr/0058-a.md'), 'squatter\n');
+  });
+});
+
+describe('applyPlan (on a FakeSys disk)', () => {
+  const ROOT = '/repo';
+  const P: Plan = { from: '0057', to: '0058', oldPath: 'docs/adr/0057-a.md', newPath: 'docs/adr/0058-a.md', oldName: '0057-a.md', newName: '0058-a.md', tracked: true, referencing: ['README.md', 'notes.md'], residual: [] };
+
+  /** A FakeSys holding the document and two files that cite it, one rewritten meanwhile, whose git mv answers `moved`. */
+  function disk(moved: ExecResult) {
+    const sys = new FakeSys();
+    sys.files.set(`${ROOT}/docs/adr/0057-a.md`, "---\nadr: '0057'\n---\n");
+    sys.files.set(`${ROOT}/README.md`, 'See ADR-0057.\n');
+    sys.files.set(`${ROOT}/notes.md`, 'Rewritten meanwhile.\n');
+    sys.execOverride = (call) => {
+      if (call.command !== 'git' || call.args[0] !== 'mv') return undefined;
+      if (moved.code === 0) {
+        sys.files.set(`${ROOT}/${call.args[2] ?? ''}`, sys.read(`${ROOT}/${call.args[1] ?? ''}`));
+        sys.files.delete(`${ROOT}/${call.args[1] ?? ''}`);
+      }
+      return moved;
+    };
+    const log: string[] = [];
+    const { confine, write } = sys;
+    sys.confine = (root, path) => {
+      log.push(`confine ${root} ${path}`);
+      confine.call(sys, root, path);
+    };
+    sys.write = (path, data, mode) => {
+      log.push(`write ${path}`);
+      write.call(sys, path, data, mode);
+    };
+    return { sys, log };
+  }
+
+  it('confines each file to the toplevel before it writes it, and writes only those the rewrite changes', () => {
+    const { sys, log } = disk({ code: 0, stdout: '', stderr: '' });
+    assert.deepEqual(applyPlan(sys, ROOT, ADR, P), ['docs/adr/0058-a.md', 'README.md']);
+    assert.deepEqual(log, [`confine ${ROOT} ${ROOT}/docs/adr/0058-a.md`, `write ${ROOT}/docs/adr/0058-a.md`, `confine ${ROOT} ${ROOT}/README.md`, `write ${ROOT}/README.md`]);
+    assert.deepEqual([sys.files.get(`${ROOT}/docs/adr/0058-a.md`), sys.files.get(`${ROOT}/README.md`), sys.files.get(`${ROOT}/notes.md`)], ["---\nadr: '0058'\n---\n", 'See ADR-0058.\n', 'Rewritten meanwhile.\n']);
+  });
+
+  it('names what git mv said, trimmed, when it refuses, and writes nothing', () => {
+    const { sys, log } = disk({ code: 128, stdout: '', stderr: 'fatal: destination exists\n' });
+    assert.throws(() => applyPlan(sys, ROOT, ADR, P), { message: 'git mv docs/adr/0057-a.md docs/adr/0058-a.md: fatal: destination exists' });
+    assert.deepEqual(log, []);
   });
 });
 

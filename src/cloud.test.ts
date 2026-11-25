@@ -6,13 +6,16 @@ import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { keyBody, noreplyEmail, pathsFor } from './agent.ts';
+import { authorVars, configVars, keyBody, noreplyEmail, pathsFor, signingConfig } from './agent.ts';
+import { SSH_SIGN, signerScript } from './ssh-sign.ts';
+import { newKey, privateKeyText, publicLine, signMessage } from './sshsig.ts';
 import { realSys } from './sys.ts';
-import type { Sys } from './types.ts';
-import { CLOUD_DIR, CLOUD_NODE, CLOUD_NODE_SHA256, FROM_SETUP, INSTALL_FAILED as FAILED, PROXY_TOKEN, SIGNING_KEY_VAR, cloudRepoScript, cloudSigning, cloudScriptVersion, cloudSetup, cloudSetupHelp, cloudSetupSnippet, cloudToken, fileFromSetup, ranFromSetup, releaseTarball, repoReleases } from './cloud.ts';
+import type { ExecResult, HttpResult, Sys } from './types.ts';
+import { CLOUD_DIR, CLOUD_NODE, CLOUD_NODE_SHA256, FROM_SETUP, INSTALL_FAILED as FAILED, PROXY_TOKEN, SIGNING_KEY_VAR, cloudLogin, cloudRepoScript, cloudSigning, cloudScriptVersion, cloudSetup, cloudSetupHelp, cloudSetupSnippet, cloudToken, fileFromSetup, ranFromSetup, releaseSha256, releaseTarball, repoReleases } from './cloud.ts';
+import { tarballName } from './names.ts';
 import { CLOUD_SETUP_068 } from './older-texts.test.ts';
 import { workflow } from './onboard.ts';
-import { AGENT, AGENT_ID, FakeSys, capture } from './fake.test.ts';
+import { AGENT, AGENT_ID, FakeSys, HOME, capture } from './fake.test.ts';
 import { CLOUD_SETUP_PATH, LEFTOVER_CLOUD_SETUP_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
 
 const SHA = 'ab'.repeat(32);
@@ -20,10 +23,97 @@ const SHA = 'ab'.repeat(32);
 describe('cloudToken', () => {
   it("takes a token the environment set, else the proxy's placeholder, never the lock's; 0.6.9's lock token is one GitHub refuses (P-57)", () => {
     const sys = new FakeSys();
+    assert.equal(PROXY_TOKEN, 'proxy-injected', "the placeholder Claude Code's cloud environments docs name");
     for (const [token, used] of [[undefined, PROXY_TOKEN], ['', PROXY_TOKEN], ['niyam-no-agent-token', PROXY_TOKEN], ['process-rules-no-agent-token', 'process-rules-no-agent-token'], ['ghp_set', 'ghp_set']] as const) {
       sys.env = { GH_TOKEN: token };
       assert.equal(cloudToken(sys), used, String(token));
     }
+  });
+});
+
+describe('cloudLogin', () => {
+  /** What cloudLogin says when GitHub's `/user` answers `answer`, and the requests it made. */
+  async function asked(answer: HttpResult | (() => HttpResult), env: Record<string, string | undefined> = {}) {
+    const sys = new FakeSys();
+    sys.env = env;
+    sys.route('GET', '/user', answer);
+    return { result: await cloudLogin(sys), requests: sys.requests };
+  }
+
+  it("asks GitHub's /user once, with the session's token, and names the login with a valid id", async () => {
+    const { result, requests } = await asked({ status: 200, json: { login: AGENT, id: AGENT_ID } });
+    assert.deepEqual(result, { login: AGENT, id: AGENT_ID });
+    assert.deepEqual(requests, [{ url: 'https://api.github.com/user', method: 'GET', token: PROXY_TOKEN }]);
+    assert.deepEqual((await asked({ status: 200, json: { login: AGENT, id: 1 } }, { GH_TOKEN: 'ghp_set' })).requests, [{ url: 'https://api.github.com/user', method: 'GET', token: 'ghp_set' }]);
+    assert.deepEqual((await asked({ status: 200, json: { login: AGENT, id: 1 } })).result, { login: AGENT, id: 1 }, 'the smallest id is one');
+  });
+
+  it('names the login alone when the id is not a positive safe integer', async () => {
+    for (const id of [undefined, 0, -1, 1.5, '42', Number.MAX_SAFE_INTEGER + 1, null]) {
+      assert.deepEqual((await asked({ status: 200, json: { login: AGENT, id } })).result, { login: AGENT }, String(id));
+    }
+  });
+
+  it('says what GitHub answered when it names no login', async () => {
+    for (const [status, json] of [[401, null], [200, null], [200, { id: 42 }], [200, { login: 7, id: 42 }], [500, { login: AGENT, id: 42 }], [201, { login: AGENT, id: 42 }]] as const) {
+      assert.deepEqual((await asked({ status, json })).result, { problem: `GitHub answered HTTP ${status} when asked who this session is` }, `${status} ${JSON.stringify(json)}`);
+    }
+  });
+
+  it('says why GitHub could not be asked', async () => {
+    const thrown = (error: unknown) => () => {
+      throw error;
+    };
+    assert.deepEqual((await asked(thrown(new Error('timed out')))).result, { problem: 'GitHub could not be asked who this session is (timed out)' });
+    assert.deepEqual((await asked(thrown('offline'))).result, { problem: 'GitHub could not be asked who this session is (offline)' });
+  });
+});
+
+describe('releaseSha256', () => {
+  const TAG = 'https://api.github.com/repos/veda-hq/niyam/releases/tags/v9.8.7';
+  const NAME = tarballName('9.8.7');
+  /** What releaseSha256 says when GitHub answers `answer` for v9.8.7, and the requests it made. */
+  async function released(answer: HttpResult | (() => HttpResult)) {
+    const sys = new FakeSys();
+    sys.route('GET', TAG, answer);
+    return { result: await releaseSha256(sys, '9.8.7', 'ghp_owner'), requests: sys.requests };
+  }
+  const noSha = { problem: `the v9.8.7 release names no sha256 for ${NAME}` };
+
+  it("reads the sha256 GitHub records for the release's archive, asking with the token given", async () => {
+    const { result, requests } = await released({ status: 200, json: { assets: [{ name: 'other.tgz', digest: `sha256:${'cd'.repeat(32)}` }, { name: NAME, digest: `sha256:${SHA}` }] } });
+    assert.deepEqual(result, { sha256: SHA });
+    assert.deepEqual(requests, [{ url: TAG, method: 'GET', token: 'ghp_owner' }]);
+  });
+
+  it('names no sha256 for an archive the release lacks, or a digest that is not one', async () => {
+    for (const json of [
+      null,
+      {},
+      { assets: [] },
+      { assets: [{ name: 'other.tgz', digest: `sha256:${SHA}` }] },
+      { assets: [{ name: NAME }] },
+      { assets: [{ name: NAME, digest: 42 }] },
+      { assets: [{ name: NAME, digest: [`sha256:${SHA}`] }] },
+      { assets: [{ name: NAME, digest: SHA }] },
+      { assets: [{ name: NAME, digest: `sha512:${SHA}` }] },
+      { assets: [{ name: NAME, digest: `xsha256:${SHA}` }] },
+      { assets: [{ name: NAME, digest: `sha256:${SHA}0` }] },
+      { assets: [{ name: NAME, digest: `sha256:${SHA.slice(1)}` }] },
+      { assets: [{ name: NAME, digest: `sha256:${SHA.toUpperCase()}` }] },
+      { assets: [{ name: NAME, digest: `sha256:${'g'.repeat(64)}` }] },
+    ]) {
+      assert.deepEqual((await released({ status: 200, json })).result, noSha, JSON.stringify(json));
+    }
+  });
+
+  it('says what GitHub answered for a release it does not serve, and why it could not be asked', async () => {
+    assert.deepEqual((await released({ status: 404, json: { assets: [{ name: NAME, digest: `sha256:${SHA}` }] } })).result, { problem: 'GitHub answered HTTP 404 for the v9.8.7 release' });
+    const thrown = (error: unknown) => () => {
+      throw error;
+    };
+    assert.deepEqual((await released(thrown(new Error('timed out')))).result, { problem: 'GitHub could not be asked for the v9.8.7 release (timed out)' });
+    assert.deepEqual((await released(thrown('offline'))).result, { problem: 'GitHub could not be asked for the v9.8.7 release (offline)' });
   });
 });
 
@@ -50,6 +140,12 @@ describe('the cloud files under their names since P-56, the ones before not read
       for (const [path, text] of Object.entries(marks)) sys.files.set(path, text);
       assert.equal(fileFromSetup(sys), file, JSON.stringify(marks));
     }
+    const unreadable = new FakeSys();
+    unreadable.files.set(FROM_SETUP, `/home/u/example-app/${CLOUD_SETUP_PATH}\n`);
+    unreadable.read = () => {
+      throw new Error('EACCES');
+    };
+    assert.equal(fileFromSetup(unreadable), undefined, 'a mark that cannot be read names none');
   });
 
   it("reads the repo's workflow and cloud setup file under their names alone", () => {
@@ -63,6 +159,20 @@ describe('the cloud files under their names since P-56, the ones before not read
     assert.deepEqual(at({}), none);
     assert.deepEqual(at({ '.github/workflows/process-rules.yml': workflow('main', '0.6.8', false), [LEFTOVER_CLOUD_SETUP_PATH]: CLOUD_SETUP_068 }), none);
     assert.deepEqual(at({ [WORKFLOW_PATH]: workflow('main', '0.7.0', false), [CLOUD_SETUP_PATH]: cloudRepoScript('0.7.0', SHA) }), { ...none, pinned: '0.7.0', scripted: '0.7.0' });
+    const two = workflow('main', '0.7.0', false).replace('checks.yml@v0.7.0', 'checks.yml@v0.7.1');
+    assert.notEqual(two, workflow('main', '0.7.0', false));
+    assert.deepEqual(at({ [WORKFLOW_PATH]: two, [CLOUD_SETUP_PATH]: cloudRepoScript('0.7.0', SHA) }), { ...none, scripted: '0.7.0' }, 'a workflow that pins two releases pins none');
+    assert.deepEqual(at({ [WORKFLOW_PATH]: 'name: niyam\n', [CLOUD_SETUP_PATH]: '#!/bin/bash\n' }), none, 'nor one that pins no release, beside a setup file onboard did not write');
+  });
+
+  it('reads nothing from a workflow or setup file that is there but cannot be read', () => {
+    const sys = new FakeSys();
+    sys.files.set(`/repo/${WORKFLOW_PATH}`, workflow('main', '0.7.0', false));
+    sys.files.set(`/repo/${CLOUD_SETUP_PATH}`, cloudRepoScript('0.7.0', SHA));
+    sys.read = () => {
+      throw new Error('EACCES');
+    };
+    assert.deepEqual(repoReleases(sys, '/repo'), { pinned: undefined, scripted: undefined, workflow: WORKFLOW_PATH, script: CLOUD_SETUP_PATH });
   });
 });
 
@@ -70,6 +180,8 @@ describe('cloudScriptVersion', () => {
   it('reads the release the cloud setup file installs, and nothing from another file', () => {
     assert.equal(cloudScriptVersion(cloudRepoScript('9.8.7', SHA)), '9.8.7');
     assert.equal(cloudScriptVersion('#!/bin/bash\necho hi\n'), undefined);
+    assert.equal(cloudScriptVersion(cloudRepoScript('10.20.30', SHA)), '10.20.30', 'each part of the version any number of digits');
+    assert.equal(cloudScriptVersion('#!/bin/bash\necho "# niyam 1.2.3 for Claude cloud sessions"\n'), undefined, 'only a line of its own that opens with the comment');
   });
 });
 
@@ -90,6 +202,44 @@ describe('cloudRepoScript', () => {
     assert.ok(script.includes(`echo "${SHA}  $dir/niyam.tgz" | sha256sum -c --quiet -\n`));
     assert.ok(script.includes(`at the version ${WORKFLOW_PATH} pins`));
     assert.equal(spawnSync('bash', ['-n', '-c', script]).status, 0, 'bash reads it');
+  });
+
+  it('is, word for word, the script onboard writes', () => {
+    assert.equal(
+      script,
+      [
+        '#!/bin/bash',
+        '# niyam 9.8.7 for Claude cloud sessions: Node 24.21.0 and the CLI, as niyam on PATH.',
+        '# niyam onboard writes this file at the version .github/workflows/niyam.yml pins, and writes it again on every run.',
+        '# The SessionStart hook runs it when a session has no niyam, session-start when it has another release,',
+        '# and the Setup script when it holds what niyam cloud-setup prints. Change it by running onboard, not by hand.',
+        'set -euo pipefail',
+        'dir=/opt/niyam',
+        'node=24.21.0',
+        'case "$(uname -m)" in x86_64) arch=x64 sum=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6 ;; aarch64 | arm64) arch=arm64 sum=6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2 ;; *) echo "niyam: no Node for $(uname -m)" >&2; exit 1 ;; esac',
+        'bin="$dir/node-v$node-linux-$arch/bin/node"',
+        'mkdir -p "$dir"',
+        'if [ "$("$bin" --version 2>/dev/null)" != "v$node" ]; then',
+        '  curl -fsSL --connect-timeout 10 --max-time 120 -o "$dir/node.tar.xz" "https://nodejs.org/dist/v$node/node-v$node-linux-$arch.tar.xz"',
+        '  echo "$sum  $dir/node.tar.xz" | sha256sum -c --quiet -',
+        '  tar -xJ -f "$dir/node.tar.xz" -C "$dir"',
+        '  rm "$dir/node.tar.xz"',
+        'fi',
+        'curl -fsSL --connect-timeout 10 --max-time 120 -o "$dir/niyam.tgz" https://github.com/veda-hq/niyam/releases/download/v9.8.7/veda-hq-niyam-9.8.7.tgz',
+        `echo "${'ab'.repeat(32)}  $dir/niyam.tgz" | sha256sum -c --quiet -`,
+        'cli="$dir/cli-9.8.7"',
+        'rm -rf "$cli"',
+        'mkdir -p "$cli"',
+        'tar -xz -f "$dir/niyam.tgz" -C "$cli"',
+        'rm "$dir/niyam.tgz"',
+        'rm -f /usr/local/bin/niyam /usr/local/bin/process-rules',
+        String.raw`printf '#!/bin/sh\nexec %s %s "$@"\n' "$bin" "$cli/package/dist/cli.js" > /usr/local/bin/niyam`,
+        'chmod 755 /usr/local/bin/niyam',
+        'if [ -n "${NIYAM_SETUP:-}" ]; then printf \'%s\\n\' "$0" > /opt/niyam/from-setup; fi',
+        'niyam version </dev/null',
+        '',
+      ].join('\n'),
+    );
   });
 
   describe('run by a real shell, with the downloads stood in for', () => {
@@ -202,6 +352,25 @@ describe('cloudRepoScript', () => {
 
 describe('cloudSetupSnippet', () => {
   const snippet = cloudSetupSnippet();
+
+  it('is, word for word, the snippet cloud-setup prints', () => {
+    assert.equal(
+      snippet,
+      [
+        '#!/bin/bash',
+        "# niyam for Claude cloud sessions: runs the clone's .github/niyam/cloud-setup.sh, which niyam onboard keeps at the version the repo pins. Paste once; put the repo's own setup after it.",
+        `bash <<'NIYAM' || echo "niyam: the install failed, so sessions start without niyam; the rest of the Setup script still runs." >&2`,
+        'file=.github/niyam/cloud-setup.sh',
+        'for script in "$PWD/$file" "$PWD"/*/"$file" /home/*/*/"$file" /root/*/"$file"; do',
+        '  if [ -f "$script" ]; then NIYAM_SETUP=1 exec bash "$script" </dev/null; fi',
+        'done',
+        'echo "niyam: no .github/niyam/cloud-setup.sh in the clone under $PWD; run niyam onboard, which writes it" >&2',
+        'exit 1',
+        'NIYAM',
+        '',
+      ].join('\n'),
+    );
+  });
 
   it('names no version, so a new release needs no new paste', () => {
     assert.doesNotMatch(snippet, /\d+\.\d+\.\d+/);
@@ -372,6 +541,122 @@ async function signsInClone(dir: string): Promise<void> {
   const platformKey = readFileSync(`${dir}/platform`).toString('base64');
   assert.match(JSON.stringify(cloudSigning(sysWith(platformKey), repo, AGENT, AGENT_ID, [keyBody(agentPub)])), /NIYAM_SIGNING_KEY's public half is not one of the cloud signing keys/, 'another key than the one pinned');
 }
+
+describe('cloudSigning, in-process, with git stood in for', () => {
+  const ROOT = '/repo';
+  const key = newKey();
+  const pem = privateKeyText(key, 'agent').trim();
+  const body = publicLine(key);
+  const { dir, key: keyPath } = pathsFor(HOME, AGENT);
+  const signer = `${dir}/${SSH_SIGN}`;
+  const HEADERS = `tree tree1\nauthor ${AGENT} <a> 1 +0000\ncommitter ${AGENT} <a> 1 +0000`;
+  const MESSAGE = '\n\nniyam: a probe\n';
+  /** A raw commit object signed by `by`, as `git cat-file commit` prints one. */
+  const signedCommit = (by = key): string => {
+    const armored = signMessage(by, Buffer.from(`${HEADERS}${MESSAGE}`, 'utf8'), 'git');
+    return `${HEADERS}\ngpgsig ${armored.trimEnd().split('\n').join('\n ')}${MESSAGE}`;
+  };
+  const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: '' });
+  const failed = (stderr: string): ExecResult => ({ code: 3, stdout: '', stderr });
+
+  /** A FakeSys whose environment holds `given` as the key (null: none), and whose git answers each probe step as `git` says. */
+  function signingSys(given: string | null = Buffer.from(`${pem}\n`).toString('base64'), git: Record<string, ExecResult> = {}) {
+    const sys = new FakeSys();
+    sys.env = { PATH: '/bin', OTHER: 'kept', GH_TOKEN: 'niyam-no-agent-token', GIT_TERMINAL_PROMPT: '0', ...(given === null ? {} : { [SIGNING_KEY_VAR]: given }) };
+    const steps: Record<string, ExecResult> = { mktree: ok('tree1\n'), 'commit-tree': ok('c0ffee\n'), 'cat-file': ok(signedCommit()), ...git };
+    sys.execOverride = (call) => (call.command === 'git' ? steps[call.args[0] ?? ''] : undefined);
+    return sys;
+  }
+  const sign = (sys: FakeSys, pinned: readonly string[] = ['ssh-ed25519 AAAAother', body], id: number | null = AGENT_ID) => cloudSigning(sys, ROOT, AGENT, id ?? undefined, pinned);
+  const VARS = [...authorVars(AGENT, AGENT_ID), ...configVars([['gpg.ssh.program', signer], ...signingConfig(`${keyPath}.pub`)])];
+
+  it("writes the key, its public half and niyam's signer, and gives the agent's variables once a probe commit verifies", () => {
+    const sys = signingSys();
+    assert.deepEqual(sign(sys), { vars: VARS });
+    assert.deepEqual(sys.dirs, [dir, `${HOME}/.ssh`]);
+    assert.equal(sys.files.get(keyPath), `${pem}\n`);
+    assert.equal(sys.modes.get(keyPath), 0o600);
+    assert.equal(sys.files.get(`${keyPath}.pub`), `${body} ${AGENT} cloud signing\n`);
+    assert.equal(sys.modes.get(`${keyPath}.pub`), 0o644);
+    assert.equal(sys.files.get(signer), signerScript(sys.runtime.node, sys.runtime.cli));
+    assert.equal(sys.modes.get(signer), 0o755);
+    // The probe runs in the clone, as the session's commands do: the lock and the key's variable unset, the rest kept.
+    const env = { PATH: '/bin', OTHER: 'kept', ...Object.fromEntries(VARS) };
+    assert.deepEqual(sys.calls, [
+      { command: 'git', args: ['mktree'], cwd: ROOT, env },
+      { command: 'git', args: ['commit-tree', '-S', 'tree1', '-m', "niyam: a probe of the agent's signing, never on a branch"], cwd: ROOT, env },
+      { command: 'git', args: ['cat-file', 'commit', 'c0ffee'], cwd: ROOT, env },
+    ]);
+  });
+
+  it('takes the key base64 on one line, or as is with its line breaks real or written as \\n, around any space', () => {
+    for (const given of [Buffer.from(pem).toString('base64'), `  ${pem}\n`, pem.replaceAll('\n', '\\n'), ` ${pem.replaceAll('\n', '\\n')}\\n `]) {
+      const sys = signingSys(given);
+      assert.deepEqual(sign(sys), { vars: VARS }, given);
+      assert.equal(sys.files.get(keyPath), `${pem}\n`, given);
+    }
+  });
+
+  it('says what is missing before it writes anything: the key, or the account id', () => {
+    const none = `the cloud environment's variables have no NIYAM_SIGNING_KEY, ${AGENT}'s cloud signing key (niyam's README, "Claude cloud sessions", says how to add one)`;
+    for (const given of [null, '', ' \n ']) {
+      const sys = signingSys(given);
+      assert.deepEqual(sign(sys), { problem: none }, JSON.stringify(given));
+      assert.deepEqual([sys.dirs, sys.calls], [[], []]);
+    }
+    const sys = signingSys();
+    assert.deepEqual(sign(sys, [body], null), { problem: `GitHub named no account id for ${AGENT}` });
+    assert.deepEqual([sys.dirs, sys.calls], [[], []]);
+  });
+
+  it('refuses what is not an OpenSSH private key, or one it cannot read', () => {
+    const notKey = { problem: 'NIYAM_SIGNING_KEY is not an OpenSSH private key, base64 on one line or as is' };
+    const [begin, ...rest] = pem.split('\n');
+    const end = rest.at(-1) ?? '';
+    for (const text of ['not a key', `${begin}\n${rest.slice(0, -1).join('\n')}`, `${rest.slice(0, -1).join('\n')}\n${end}`, `${begin}${rest.join('\n')}`, `${begin}\n${rest.slice(0, -1).join('\n')}${end}`, `x${pem}`, `${pem}x`]) {
+      assert.deepEqual(sign(signingSys(Buffer.from(text).toString('base64'))), notKey, text);
+    }
+    const unreadable = sign(signingSys(`${begin}\nAAAA\n${end}`));
+    assert.ok('problem' in unreadable && unreadable.problem.startsWith('NIYAM_SIGNING_KEY cannot be used: '), JSON.stringify(unreadable));
+  });
+
+  it('gives nothing for a key the settings do not pin, or when they pin none, writing nothing', () => {
+    const pin = `.github/niyam.json's "cloudSigningKeys"`;
+    const repin = `niyam onboard on the owner's Mac pins the ones GitHub lists`;
+    const sys = signingSys();
+    assert.deepEqual(sign(sys, []), { problem: `${pin} pins no cloud signing key for ${AGENT}, and this session cannot ask GitHub for ${AGENT}'s signing keys; ${repin}` });
+    assert.deepEqual(sign(sys, ['ssh-ed25519 AAAAother']), { problem: `NIYAM_SIGNING_KEY's public half is not one of the cloud signing keys ${pin} pins for ${AGENT}; ${repin}` });
+    assert.deepEqual([sys.dirs, sys.calls], [[], []]);
+  });
+
+  it('says why the key could not be written, and probes nothing', () => {
+    for (const [thrown, why] of [[new Error('read-only'), 'read-only'], ['disk full', 'disk full']] as const) {
+      const sys = signingSys();
+      sys.write = () => {
+        throw thrown;
+      };
+      assert.deepEqual(sign(sys), { problem: `writing NIYAM_SIGNING_KEY to ${keyPath} failed (${why})` });
+      assert.deepEqual(sys.calls, []);
+    }
+  });
+
+  it("names the probe's step that failed, by the last line it printed or its exit code", () => {
+    const probe = (why: string) => ({ problem: `a probe commit signed with NIYAM_SIGNING_KEY did not verify as that key (${why})` });
+    for (const step of ['mktree', 'commit-tree', 'cat-file']) {
+      assert.deepEqual(sign(signingSys(undefined, { [step]: failed('warning: one\nfatal: two\n\n') })), probe(`git ${step}: fatal: two`), step);
+      assert.deepEqual(sign(signingSys(undefined, { [step]: failed(' \n') })), probe(`git ${step}: exit 3`), step);
+      assert.deepEqual(sign(signingSys(undefined, { [step]: failed('only') })), probe(`git ${step}: only`), step);
+    }
+    assert.deepEqual(sign(signingSys(undefined, { 'cat-file': ok(`${HEADERS}${MESSAGE}`) })), probe('the probe commit has no signature'));
+    assert.deepEqual(sign(signingSys(undefined, { 'cat-file': ok(signedCommit(newKey())) })), probe('its signature: another key made it'));
+  });
+
+  it('takes the tree and commit git names, trimmed, into the next step', () => {
+    const sys = signingSys(undefined, { mktree: ok('  tree1 \n'), 'commit-tree': ok(' c0ffee\n') });
+    assert.ok('vars' in sign(sys));
+    assert.deepEqual(sys.calls.map((call) => call.args), [['mktree'], ['commit-tree', '-S', 'tree1', '-m', "niyam: a probe of the agent's signing, never on a branch"], ['cat-file', 'commit', 'c0ffee']]);
+  });
+});
 
 describe('cloudSetup', () => {
   it('prints the Setup snippet with its instructions as comment lines on standard output, and nothing on standard error (#333)', () => {
