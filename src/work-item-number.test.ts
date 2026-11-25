@@ -253,6 +253,7 @@ describe('checkWorkItemNumbers: the event issue', () => {
       answering(() => '{"number":203,"title":"0153 — x","type":5}'),
       shape,
     );
+    assert.deepEqual(answering(() => '{"number":203,"title":5,"type":"Work item"}'), shape, 'a title that is not text');
   });
 });
 
@@ -346,6 +347,17 @@ describe('planMoves', () => {
     ];
     assert.deepEqual([...planMoves(bare, kind, sources(items), null)], []);
     assert.deepEqual([...planMoves(SETTINGS, RFC, sources(items), null).keys()], [600]);
+    const unnumbered = [
+      { number: 5, title: 'no number', workNumber: null },
+      { number: 6, title: 'nor this', workNumber: null },
+    ];
+    assert.deepEqual([...planMoves(SETTINGS, RFC, sources(unnumbered), null)], [], 'two unnumbered items share no number');
+  });
+
+  it('moves nothing for settings that name no Work items', () => {
+    const none = docSettings({ reservations: RESERVATIONS, kinds: KINDS });
+    const kind = none.kinds.rfc ?? assert.fail('no rfc kind');
+    assert.deepEqual([...planMoves(none, kind, sources([{ number: 600, title: '0145 — x', workNumber: '0145' }]), null)], []);
   });
 
   it('leaves an event issue nothing holds, and moves one something does', () => {
@@ -398,7 +410,26 @@ describe('checkWorkItemNumbers: incomplete sources', () => {
       top.renumbers.map((move) => move.title),
       ['9998 — two', '9999 — three'],
     );
-    for (const next of ['9999', 'abc', '0160.5', '0000']) assert.deepEqual(at(next), { ok: false, error: `no room for 2 number(s) from ${next}` });
+    for (const next of ['9999', 'abc', '0160.5', '0000', 'x1234', '01234']) assert.deepEqual(at(next), { ok: false, error: `no room for 2 number(s) from ${next}` });
+    const bottom = at('0001');
+    assert.ok(bottom.ok);
+    assert.deepEqual(
+      bottom.renumbers.map((move) => move.title),
+      ['0001 — two', '0002 — three'],
+    );
+  });
+
+  it('renumbers a title that starts with spaces, keeping the rest of it', () => {
+    const items = [
+      { number: 600, title: '0160 — one' },
+      { number: 601, title: '  0160 — two' },
+    ];
+    const result = check(PLAIN, new GitHub(items), { allocate: answer('0170') });
+    assert.ok(result.ok);
+    assert.deepEqual(
+      result.renumbers.map((move) => move.title),
+      ['0170 — two'],
+    );
   });
 
   it('names every source the allocator could not read', () => {
@@ -519,7 +550,7 @@ describe('workItemArgs', () => {
   });
 
   it('throws on a missing, malformed or repeated --issue, or anything else', () => {
-    for (const args of [['--issue'], ['--issue', '#3'], ['--issue=0'], ['--issue=']]) assert.throws(() => workItemArgs(args), /^Error: work-item-number --issue needs an issue number$/);
+    for (const args of [['--issue'], ['--issue', '#3'], ['--issue=0'], ['--issue='], ['--issue=12x'], ['--issue', '123456789']]) assert.throws(() => workItemArgs(args), /^Error: work-item-number --issue needs an issue number$/);
     assert.throws(() => workItemArgs(['--issue', '1', '--issue=2']), /^Error: work-item-number takes one --issue$/);
     assert.throws(() => workItemArgs(['--dry']), /^Error: work-item-number: unexpected argument "--dry"$/);
   });

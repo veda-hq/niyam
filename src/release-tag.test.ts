@@ -89,7 +89,7 @@ describe('tagOnMain (P-61)', () => {
     assert.deepEqual(await tagOnMain(sys, '0.6.9'), { problem: 'GitHub could not be asked whether the v0.6.9 tag is on main (socket hang up)' });
     sys.route('GET', COMPARE, { status: 403, json: { message: 'Forbidden' } });
     assert.deepEqual(await tagOnMain(sys, '0.6.9'), { problem: 'GitHub answered HTTP 403 when asked whether the v0.6.9 tag is on main' });
-    for (const json of [null, { status: 'ahead' }, { status: 'ahead', base_commit: { sha: 'main' } }]) {
+    for (const json of [null, { status: 'ahead' }, { status: 'ahead', base_commit: { sha: 'main' } }, { status: 'ahead', base_commit: { sha: `${TAG_SHA}0` } }, { status: 'ahead', base_commit: { sha: `x${TAG_SHA}` } }]) {
       sys.route('GET', COMPARE, { status: 200, json });
       assert.deepEqual(await tagOnMain(sys, '0.6.9'), { problem: "GitHub's comparison of the v0.6.9 tag with main names no commit for the tag" }, JSON.stringify(json));
     }

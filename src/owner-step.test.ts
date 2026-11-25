@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { type Call, FakeSys, capture } from './fake.test.ts';
 import { guardCaller } from './guard-caller.ts';
 import { ISSUE_TYPES } from './issue-types.ts';
-import { FOLDER_PREFIX, REVOKE, folderRoot, leftBehind, ownerStep, ownerStepArgs, stepScopes } from './owner-step.ts';
+import { FOLDER_PREFIX, REVOKE, folderRoot, leftBehind, ownerStep, ownerStepArgs, stepScope } from './owner-step.ts';
 import { run } from './run.ts';
 import type { ExecResult } from './types.ts';
 
@@ -62,6 +62,38 @@ function cleaned(sys: FakeSys, out: string[]): void {
   assert.equal(sys.interrupts.length, 0);
 }
 
+/** `sys`'s gh answering `gh api <path>`, a read, as given here: its own stdout, stderr and exit code. */
+function rawly(sys: FakeSys, path: string, reply: ExecResult | (() => ExecResult)): void {
+  const inner = sys.execOverride;
+  sys.execOverride = (call) => (call.command === 'gh' && call.args[0] === 'api' && call.args[1] === path && !call.args.includes('--method') ? (typeof reply === 'function' ? reply() : reply) : inner(call));
+}
+
+/** Each command run from now on, with the names of the options it was given. */
+function optionsOf(sys: FakeSys): { command: string; keys: string[] }[] {
+  const seen: { command: string; keys: string[] }[] = [];
+  const exec = sys.exec.bind(sys);
+  sys.exec = (command, args, options = {}) => {
+    seen.push({ command, keys: Object.keys(options) });
+    return exec(command, args, options);
+  };
+  return seen;
+}
+
+/** A route that answers `first` the first time and `later` every time after. */
+function once(first: Reply, later: Reply): Reply {
+  let asked = 0;
+  return (body) => {
+    const reply = asked++ === 0 ? first : later;
+    return typeof reply === 'function' ? reply(body) : reply;
+  };
+}
+
+/** What a run printed after the sign-in's own lines: from "signed in as", or from the first result when it stopped before. */
+const afterSignIn = (out: string[]): string[] => out.slice(Math.max(0, out.findIndex((line) => /^ {2}signed in as |^[✓✗] /.test(line))));
+
+const REVOKED = 'The GitHub CLI token stays valid on GitHub until you revoke it: https://github.com/settings/applications';
+const HEADER = ['-H', 'X-GitHub-Api-Version: 2022-11-28'];
+
 describe('owner-step arguments', () => {
   it('reads each step', () => {
     assert.deepEqual(ownerStepArgs(['issue-types', 'veda-hq']), { step: 'issue-types', org: 'veda-hq' });
@@ -73,8 +105,8 @@ describe('owner-step arguments', () => {
       ruleset: 'main',
       checks: ['veda-checks / Checks', 'Guard'],
     });
-    assert.deepEqual(stepScopes({ step: 'issue-types', org: 'x' }), ['admin:org']);
-    assert.deepEqual(stepScopes({ step: 'required-checks', repo: 'a/b', ruleset: 'main', checks: [] }), ['repo']);
+    assert.equal(stepScope({ step: 'issue-types', org: 'x' }), 'admin:org');
+    assert.equal(stepScope({ step: 'required-checks', repo: 'a/b', ruleset: 'main', checks: [] }), 'repo');
   });
 
   it('refuses anything else as bad usage, before any sign-in', async () => {
@@ -105,6 +137,29 @@ describe('owner-step arguments', () => {
       assert.match(err.join('\n'), why);
       assert.equal(sys.temps.length, 0);
     }
+  });
+
+  it('says exactly what is wrong, with the usage line of the step', () => {
+    const usage =
+      'owner-step takes one of: issue-types <org>; label <owner/repo> <number> <add|remove> <approved|do-not-merge>; required-checks <owner/repo> <ruleset id or name> [--check <name>]…';
+    const cases: [string[], string][] = [
+      [[], usage],
+      [['tea'], `owner-step has no step "tea"; ${usage}`],
+      [['issue-types'], 'owner-step issue-types takes one argument: issue-types <org>'],
+      [['label', 'veda-hq/niyam', '7'], 'owner-step label takes 4 arguments: label <owner/repo> <number> <add|remove> <approved|do-not-merge>'],
+      [['label', 'veda-hq/niyam', '7x', 'add', 'approved'], 'owner-step label needs an issue or pull request number, not "7x"'],
+      [['label', '-bad/app', '7', 'add', 'approved'], 'owner-step label needs a repository as owner/name, not "-bad/app"'],
+      [['label', 'veda-hq/niyam/x', '7', 'add', 'approved'], 'owner-step label needs a repository as owner/name, not "veda-hq/niyam/x"'],
+      [['required-checks', 'veda-hq/niyam', ' '], 'owner-step required-checks needs a ruleset id or name'],
+      [['required-checks', '--check', 'Guard', 'main'], 'owner-step required-checks takes a repository and a ruleset before any --check: required-checks <owner/repo> <ruleset id or name> [--check <name>]…'],
+    ];
+    for (const [args, message] of cases) assert.throws(() => ownerStepArgs(args), { message }, args.join(' '));
+  });
+
+  it('takes one-letter logins and owners, and names the page that revokes the token', () => {
+    assert.deepEqual(ownerStepArgs(['issue-types', 'x']), { step: 'issue-types', org: 'x' });
+    assert.deepEqual(ownerStepArgs(['label', 'x/y', '7', 'remove', 'do-not-merge']), { step: 'label', repo: 'x/y', number: 7, action: 'remove', label: 'do-not-merge' });
+    assert.equal(REVOKE, 'https://github.com/settings/applications');
   });
 });
 
@@ -394,6 +449,273 @@ describe('owner-step', () => {
     assert.equal(await ownerStep(nobody.sys, fourth.io, ['label', 'veda-hq/niyam', '9', 'add', 'approved']), 1);
     assert.match(fourth.out.join('\n'), /✗ GitHub did not say who owns veda-hq\/niyam/);
   });
+
+  it('says exactly what it does, and asks gh exactly so, in the throwaway folder alone', async () => {
+    let listed = types({ 'Work item': true, State: false, Decision: true, Brief: true });
+    const { sys, api } = world({
+      'GET user/memberships/orgs/veda-hq': ADMIN,
+      'GET orgs/veda-hq/issue-types': () => listed,
+      'POST orgs/veda-hq/issue-types': (body) => {
+        listed = { status: 200, json: [...(listed.json as object[]), { id: 9, ...(body as object) }] };
+        return { status: 201, json: body };
+      },
+      'PUT orgs/veda-hq/issue-types/2': (body) => {
+        listed = { status: 200, json: (listed.json as { id: number }[]).map((type) => (type.id === 2 ? { ...type, ...(body as object) } : type)) };
+        return { status: 200, json: body };
+      },
+    });
+    sys.env = { PATH: '/usr/bin', GH_TOKEN: 'ghp_agent' };
+    const options = optionsOf(sys);
+    const { io, out } = capture();
+    assert.equal(await ownerStep(sys, io, ['issue-types', 'veda-hq']), 0);
+    const slice = ISSUE_TYPES.find((type) => type.name === 'Slice') ?? assert.fail('no Slice');
+    const state = ISSUE_TYPES.find((type) => type.name === 'State') ?? assert.fail('no State');
+    assert.deepEqual(out.slice(0, 3), [
+      "owner-step issue-types: the work model's issue types in veda-hq",
+      "  One browser sign-in to a throwaway gh (scopes admin:org, beside gh's own), its folder deleted afterwards.",
+      '  Nothing changes until you say yes.',
+    ]);
+    assert.deepEqual(afterSignIn(out), [
+      '  signed in as example-owner',
+      '  owner-step will make these 2 changes:',
+      `    add the issue type Slice (green) to veda-hq: ${slice.description}`,
+      '    enable the issue type State in veda-hq, now disabled',
+      '✓ veda-hq has the issue type Slice, enabled',
+      '✓ veda-hq has the issue type State, enabled',
+      '✓ deleted the throwaway gh folder and the token in it',
+      REVOKED,
+    ]);
+    assert.deepEqual(
+      api.map((call) => [call.args, call.input === undefined ? undefined : JSON.parse(call.input)]),
+      [
+        [['api', 'user', ...HEADER, '--include'], undefined],
+        [['api', 'user/memberships/orgs/veda-hq', ...HEADER], undefined],
+        [['api', 'orgs/veda-hq/issue-types', ...HEADER], undefined],
+        [['api', 'orgs/veda-hq/issue-types', ...HEADER, '--method', 'POST', '--input', '-'], { ...slice, is_enabled: true }],
+        [['api', 'orgs/veda-hq/issue-types', ...HEADER], undefined],
+        [['api', 'orgs/veda-hq/issue-types/2', ...HEADER, '--method', 'PUT', '--input', '-'], { name: 'State', description: state.description, color: state.color, is_enabled: true }],
+        [['api', 'orgs/veda-hq/issue-types', ...HEADER], undefined],
+      ],
+    );
+    const env = {
+      PATH: '/usr/bin',
+      GH_CONFIG_DIR: DIR,
+      GH_PAGER: 'cat',
+      GH_NO_UPDATE_NOTIFIER: '1',
+      GH_TOKEN: undefined,
+      GITHUB_TOKEN: undefined,
+      GH_ENTERPRISE_TOKEN: undefined,
+      GITHUB_ENTERPRISE_TOKEN: undefined,
+      GH_HOST: undefined,
+      GIT_CONFIG_GLOBAL: `${DIR}/gitconfig`,
+    };
+    for (const call of sys.calls.filter((one) => one.command === 'gh')) assert.deepEqual(call.env, env, call.args.join(' '));
+    assert.ok(api.every((call) => call.timeoutMs === 60_000));
+    // gh reads a body only where there is one.
+    assert.deepEqual(
+      options.filter((one) => one.command === 'gh').map((one) => one.keys.join(' ')),
+      ['env interactive', 'env timeoutMs', 'env timeoutMs', 'env timeoutMs', 'env timeoutMs input', 'env timeoutMs', 'env timeoutMs input', 'env timeoutMs'],
+    );
+    assert.deepEqual(
+      sys.calls.filter((call) => call.command === 'getconf').map((call) => [call.args, call.timeoutMs]),
+      [[['DARWIN_USER_TEMP_DIR'], 5_000]],
+    );
+  });
+
+  it('reads headers gh prints with bare line feeds, and the scopes only from them', async () => {
+    const all = types(Object.fromEntries(ISSUE_TYPES.map((type) => [type.name, true])));
+    const lf = world({ 'GET user/memberships/orgs/veda-hq': ADMIN, 'GET orgs/veda-hq/issue-types': all });
+    rawly(lf.sys, 'user', { code: 0, stdout: 'HTTP/2.0 200 OK\nX-Oauth-Scopes: admin:org, gist\n\n{"login":"example-owner"}', stderr: '' });
+    const first = capture();
+    assert.equal(await ownerStep(lf.sys, first.io, ['issue-types', 'veda-hq']), 0, first.out.join('\n'));
+    assert.match(first.out.join('\n'), /signed in as example-owner/);
+
+    const bio = world({ 'GET user/memberships/orgs/veda-hq': ADMIN, 'GET orgs/veda-hq/issue-types': all });
+    rawly(bio.sys, 'user', { code: 0, stdout: 'HTTP/2.0 200 OK\r\nX-Oauth-Scopes: gist\r\n\r\n{"login":"example-owner","bio":"x-oauth-scopes: admin:org, gist"}', stderr: '' });
+    const second = capture();
+    assert.equal(await ownerStep(bio.sys, second.io, ['issue-types', 'veda-hq']), 1);
+    assert.deepEqual(afterSignIn(second.out), ['✗ the sign-in did not grant admin:org, so nothing changed', '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+
+    // A body with a blank line in it, from a call that asked for no headers, is still the body.
+    const spaced = world({ 'GET orgs/veda-hq/issue-types': all });
+    rawly(spaced.sys, 'user/memberships/orgs/veda-hq', { code: 0, stdout: '{"role": "admin",\n\n"state": "active"}', stderr: '' });
+    const third = capture();
+    assert.equal(await ownerStep(spaced.sys, third.io, ['issue-types', 'veda-hq']), 0, third.out.join('\n'));
+  });
+
+  it("says what gh said about a call that failed, else gh's exit code", async () => {
+    const repo = { 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' } } }, 'GET user/memberships/orgs/veda-hq': ADMIN };
+    for (const [reply, said] of [
+      [{ code: 1, stdout: '', stderr: '\n  gh: boom\nmore\n' }, 'gh: boom'],
+      [{ code: 1, stdout: '{"message": 42}', stderr: '' }, 'gh exit 1'],
+      [{ code: 1, stdout: '{"message": ""}', stderr: '' }, 'gh exit 1'],
+      [{ code: 1, stdout: '{"message": "Server Error"}', stderr: '' }, 'Server Error'],
+    ] as [ExecResult, string][]) {
+      const { sys } = world(repo, 'repo');
+      rawly(sys, 'repos/veda-hq/niyam/labels/approved', reply);
+      const { io, out } = capture();
+      assert.equal(await ownerStep(sys, io, ['label', 'veda-hq/niyam', '9', 'add', 'approved']), 1);
+      assert.deepEqual(afterSignIn(out).slice(1, 2), [`✗ reading veda-hq/niyam's label approved: ${said}`], said);
+    }
+  });
+
+  it('fails a sign-in GitHub answers with no login, or that gh says failed, asking GitHub nothing more', async () => {
+    for (const [user, why] of [
+      [{ status: 200 }, 'gh exit 0'],
+      [{ status: 200, json: { login: 5 } }, 'gh exit 0'],
+    ] as [Reply, string][]) {
+      const { sys, api } = world({ 'GET user': user });
+      const { io, out } = capture();
+      assert.equal(await ownerStep(sys, io, ['issue-types', 'veda-hq']), 1);
+      assert.deepEqual(afterSignIn(out), [`✗ GitHub did not accept the sign-in (${why}), so nothing changed`, '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+      assert.equal(api.length, 1);
+    }
+    // gh exited 1, though the token is in the folder.
+    const failed = world();
+    const login = failed.sys.execOverride;
+    failed.sys.execOverride = (call) => {
+      if (call.args[1] !== 'login') return login(call);
+      failed.sys.files.set(`${DIR}/hosts.yml`, `github.com:\n    oauth_token: ${SECRET}\n`);
+      return { code: 1, stdout: '', stderr: '' };
+    };
+    const said = capture();
+    assert.equal(await ownerStep(failed.sys, said.io, ['issue-types', 'veda-hq']), 1);
+    assert.deepEqual(afterSignIn(said.out), ['✗ the GitHub sign-in in the browser did not finish, so nothing changed', '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+    assert.equal(failed.api.length, 0);
+  });
+
+  it('stops at a Ctrl-C that comes as the sign-in finishes, deleting the folder at once, and asks GitHub nothing', async () => {
+    const { sys, api } = world();
+    const login = sys.execOverride;
+    let deletedAtOnce = false;
+    sys.execOverride = (call) => {
+      if (call.args[1] !== 'login') return login(call);
+      sys.files.set(`${DIR}/hosts.yml`, `github.com:\n    oauth_token: ${SECRET}\n`);
+      sys.interrupt();
+      deletedAtOnce = sys.removed.includes(DIR);
+      sys.files.set(`${DIR}/hosts.yml`, `github.com:\n    oauth_token: ${SECRET}\n`);
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const { io, out } = capture();
+    assert.equal(await ownerStep(sys, io, ['issue-types', 'veda-hq']), 130);
+    assert.ok(deletedAtOnce, "the Ctrl-C's handler deletes the folder itself");
+    assert.equal(api.length, 0);
+    assert.deepEqual(afterSignIn(out), ['✗ stopped by Ctrl-C; nothing changed', '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+  });
+
+  it('exits 130 for a Ctrl-C during a call that then fails, and for one whose folder could not be deleted', async () => {
+    const refusing = (made: () => FakeSys): Reply => () => {
+      made().interrupt();
+      return { status: 401, json: { message: 'Bad credentials' } };
+    };
+    const during: ReturnType<typeof world> = world({ 'GET user': refusing(() => during.sys) });
+    const first = capture();
+    assert.equal(await ownerStep(during.sys, first.io, ['issue-types', 'veda-hq']), 130);
+    assert.deepEqual(afterSignIn(first.out), ['✗ stopped by Ctrl-C; nothing changed', '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+
+    const stuck: ReturnType<typeof world> = world({ 'GET user': refusing(() => stuck.sys) });
+    const exists = stuck.sys.exists.bind(stuck.sys);
+    stuck.sys.exists = (path) => path === DIR || exists(path);
+    const second = capture();
+    assert.equal(await ownerStep(stuck.sys, second.io, ['issue-types', 'veda-hq']), 130);
+
+    // No token was left in it: the ✗ says only that the folder is there.
+    const declined = world();
+    declined.sys.ghToken = undefined;
+    const kept = declined.sys.exists.bind(declined.sys);
+    declined.sys.exists = (path) => path === DIR || kept(path);
+    const third = capture();
+    assert.equal(await ownerStep(declined.sys, third.io, ['issue-types', 'veda-hq']), 1);
+    assert.deepEqual(afterSignIn(third.out), ['✗ the GitHub sign-in in the browser did not finish, so nothing changed', `✗ could not delete the throwaway gh folder ${DIR} → rm -rf ${DIR}`, REVOKED]);
+  });
+
+  it('says a Ctrl-C at the yes stopped it before any change', async () => {
+    const { sys, api } = world({ 'GET user/memberships/orgs/veda-hq': ADMIN, 'GET orgs/veda-hq/issue-types': types(Object.fromEntries(ISSUE_TYPES.filter((type) => type.name !== 'Brief').map((type) => [type.name, true]))) });
+    sys.choose = () => {
+      sys.interrupt();
+      return Promise.resolve(true);
+    };
+    const { io, out } = capture();
+    assert.equal(await ownerStep(sys, io, ['issue-types', 'veda-hq']), 130);
+    assert.deepEqual(afterSignIn(out).slice(3), ['✗ stopped by Ctrl-C; nothing changed', '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+    assert.ok(!api.some((call) => call.args.includes('--method')));
+  });
+
+  it("owns an organisation only as an active admin, and says so of a repository's organisation", async () => {
+    for (const membership of [{ status: 200 }, { status: 200, json: { role: 'admin', state: 'pending' } }] as Reply[]) {
+      const { sys } = world({ 'GET user/memberships/orgs/veda-hq': membership, 'GET orgs/veda-hq/issue-types': types({}) });
+      const { io, out } = capture();
+      assert.equal(await ownerStep(sys, io, ['issue-types', 'veda-hq']), 1);
+      assert.deepEqual(afterSignIn(out).slice(1, 2), ['✗ example-owner is not an owner of the organisation veda-hq; sign in to github.com in the browser as the owner and run it again. Nothing changed']);
+    }
+    const member = world({ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' } } }, 'GET user/memberships/orgs/veda-hq': { status: 200, json: { role: 'member', state: 'active' } } }, 'repo');
+    const second = capture();
+    assert.equal(await ownerStep(member.sys, second.io, ['label', 'veda-hq/niyam', '9', 'add', 'approved']), 1);
+    assert.deepEqual(afterSignIn(second.out).slice(1, 2), [
+      '✗ example-owner is not an owner of the organisation veda-hq, which owns veda-hq/niyam; sign in to github.com in the browser as the owner and run it again. Nothing changed',
+    ]);
+    const nobody = world({ 'GET repos/veda-hq/niyam': { status: 200 } }, 'repo');
+    const third = capture();
+    assert.equal(await ownerStep(nobody.sys, third.io, ['label', 'veda-hq/niyam', '9', 'add', 'approved']), 1);
+    assert.match(third.out.join('\n'), /✗ GitHub did not say who owns veda-hq\/niyam;/);
+  });
+
+  it('says exactly when there is nothing to change, or a type does not stick, or GitHub refuses one', async () => {
+    const names = ISSUE_TYPES.map((type) => type.name).join(', ');
+    const all = world({ 'GET user/memberships/orgs/veda-hq': ADMIN, 'GET orgs/veda-hq/issue-types': types(Object.fromEntries(ISSUE_TYPES.map((type) => [type.name, true]))) });
+    const first = capture();
+    assert.equal(await ownerStep(all.sys, first.io, ['issue-types', 'veda-hq']), 0);
+    assert.deepEqual(afterSignIn(first.out), ['  signed in as example-owner', `✓ nothing to change: veda-hq has every work model issue type, enabled: ${names}`, '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+
+    const others = Object.fromEntries(ISSUE_TYPES.filter((type) => type.name !== 'Brief').map((type) => [type.name, true]));
+    const unseen = world({ 'GET user/memberships/orgs/veda-hq': ADMIN, 'GET orgs/veda-hq/issue-types': types(others), 'POST orgs/veda-hq/issue-types': { status: 201, json: {} } });
+    const second = capture();
+    assert.equal(await ownerStep(unseen.sys, second.io, ['issue-types', 'veda-hq']), 1);
+    const brief = ISSUE_TYPES.find((type) => type.name === 'Brief') ?? assert.fail('no Brief');
+    assert.deepEqual(afterSignIn(second.out).slice(3, 4), [`✗ add the issue type Brief (gray) to veda-hq: ${brief.description}: GitHub does not show Brief enabled in veda-hq afterwards`]);
+
+    const refused = world({ 'GET user/memberships/orgs/veda-hq': ADMIN, 'GET orgs/veda-hq/issue-types': types({ ...others, State: false, Brief: true }), 'PUT orgs/veda-hq/issue-types/3': { status: 422, json: { message: 'Validation Failed' } } });
+    const third = capture();
+    assert.equal(await ownerStep(refused.sys, third.io, ['issue-types', 'veda-hq']), 1);
+    assert.deepEqual(afterSignIn(third.out).slice(3, 4), ['✗ enable the issue type State in veda-hq, now disabled: enabling State: gh: Validation Failed (HTTP 422)']);
+  });
+
+  it('says exactly what it does to a label, and what GitHub showed when it did not stick', async () => {
+    const repo = { 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' } } }, 'GET user/memberships/orgs/veda-hq': ADMIN, 'GET repos/veda-hq/niyam/labels/approved': { status: 200, json: {} } };
+    const has = world({ ...repo, 'GET repos/veda-hq/niyam/issues/240': { status: 200, json: { title: 't', labels: [{ name: 'Approved' }] } } }, 'repo');
+    const first = capture();
+    assert.equal(await ownerStep(has.sys, first.io, ['label', 'veda-hq/niyam', '240', 'add', 'approved']), 0);
+    assert.equal(first.out[0], 'owner-step label: add the label approved to veda-hq/niyam#240');
+    assert.deepEqual(afterSignIn(first.out), ['  signed in as example-owner', '✓ nothing to change: veda-hq/niyam#240 has the label approved', '✓ deleted the throwaway gh folder and the token in it', REVOKED]);
+
+    // An issue GitHub gives with no body, or no labels: it has none, and its title is not known.
+    for (const issue of [{ status: 200 }, { status: 200, json: { title: 't' } }] as Reply[]) {
+      const bare = world({ ...repo, 'GET repos/veda-hq/niyam/issues/9': issue, 'POST repos/veda-hq/niyam/issues/9/labels': { status: 500, json: { message: 'Server Error' } } }, 'repo');
+      const said = capture();
+      assert.equal(await ownerStep(bare.sys, said.io, ['label', 'veda-hq/niyam', '9', 'add', 'approved']), 1);
+      const title = (issue as { json?: { title?: string } }).json?.title;
+      const plan = `add the label approved to veda-hq/niyam#9${title ? ` "${title}"` : ''}`;
+      assert.deepEqual(afterSignIn(said.out), [
+        '  signed in as example-owner',
+        '  owner-step will make this change:',
+        `    ${plan}`,
+        `✗ ${plan}: adding approved: gh: Server Error (HTTP 500)`,
+        '✓ deleted the throwaway gh folder and the token in it',
+        REVOKED,
+      ]);
+    }
+
+    const removing = { ...repo, 'GET repos/veda-hq/niyam/labels/do-not-merge': { status: 200, json: {} }, 'GET repos/veda-hq/niyam/issues/3': { status: 200, json: { labels: [{ name: 'do-not-merge' }] } } };
+    const stays = world({ ...removing, 'DELETE repos/veda-hq/niyam/issues/3/labels/do-not-merge': { status: 200, json: [] } }, 'repo');
+    const second = capture();
+    assert.equal(await ownerStep(stays.sys, second.io, ['label', 'veda-hq/niyam', '3', 'remove', 'do-not-merge']), 1);
+    assert.equal(second.out[0], 'owner-step label: remove the label do-not-merge off veda-hq/niyam#3');
+    assert.deepEqual(afterSignIn(second.out).slice(3, 4), ['✗ take the label do-not-merge off veda-hq/niyam#3: GitHub shows veda-hq/niyam#3 with do-not-merge afterwards']);
+    const refused = world({ ...removing, 'DELETE repos/veda-hq/niyam/issues/3/labels/do-not-merge': { status: 403, json: { message: 'Forbidden' } } }, 'repo');
+    const third = capture();
+    assert.equal(await ownerStep(refused.sys, third.io, ['label', 'veda-hq/niyam', '3', 'remove', 'do-not-merge']), 1);
+    assert.deepEqual(afterSignIn(third.out).slice(3, 4), ['✗ take the label do-not-merge off veda-hq/niyam#3: removing do-not-merge: gh: Forbidden (HTTP 403)']);
+  });
 });
 
 const encoded = (text: string): { status: number; json: unknown } => ({ status: 200, json: { content: Buffer.from(text).toString('base64') } });
@@ -631,6 +953,111 @@ describe('owner-step required-checks', () => {
     assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 0, out.join('\n'));
     assert.deepEqual(made.now(), [checks('niyam / PR identity', 'niyam / Work rules')]);
   });
+
+  const notAdding = (check: string, why: string): string => `✗ not adding ${check}: ${why}, so it would never report and would hold every pull request → niyam onboard there, then run this again`;
+
+  it("finds the job's call to the shared checks only on a line of its own, however it is spaced", async () => {
+    const commented = WORKFLOW.replace('    uses: veda-hq', '    # uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.5\n    uses: veda-hq');
+    for (const workflow of [commented, WORKFLOW.replace('uses: veda-hq', 'uses:  veda-hq')]) {
+      const made = rulesWorld([checks()], { 'GET repos/veda-hq/niyam/contents/.github/workflows/niyam.yml': encoded(workflow) });
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 0, out.join('\n'));
+      assert.deepEqual(made.now(), [checks('niyam / PR identity', 'niyam / Work rules')]);
+    }
+  });
+
+  it('says exactly why the shared checks could not be read', async () => {
+    const own = './.github/workflows/checks.yml';
+    const cases: [Record<string, Reply>, string][] = [
+      [{ 'GET repos/veda-hq/niyam/contents/.github/workflows/checks.yml?ref=v0.6.6': { status: 200 } }, 'GitHub did not give the shared checks veda-hq/niyam@v0.6.6 that .github/workflows/niyam.yml calls (gh exit 0)'],
+      [{ 'GET repos/veda-hq/niyam/contents/.github/workflows/checks.yml?ref=v0.6.6': { status: 200, json: {} } }, 'GitHub did not give the shared checks veda-hq/niyam@v0.6.6 that .github/workflows/niyam.yml calls (gh exit 0)'],
+      [
+        { 'GET repos/veda-hq/niyam/contents/.github/workflows/niyam.yml': encoded(WORKFLOW.replace('veda-hq/niyam/.github/workflows/checks.yml@v0.6.6', own)) },
+        'GitHub did not give the shared checks veda-hq/niyam that .github/workflows/niyam.yml calls (gh: Not Found (HTTP 404))',
+      ],
+    ];
+    for (const [extra, why] of cases) {
+      const made = rulesWorld([checks()], extra);
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 1, why);
+      assert.ok(out.includes(notAdding('niyam / PR identity', why)), out.join('\n'));
+    }
+  });
+
+  it("reads the shared checks' job names, and only theirs", async () => {
+    const stepNamed = ['jobs:', '  identity:', '    name: PR identity', '    steps:', '      - uses: ./x', '        name: Work rules', ''].join('\n');
+    const made = rulesWorld([checks()], { 'GET repos/veda-hq/niyam/contents/.github/workflows/checks.yml?ref=v0.6.6': encoded(stepNamed) });
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 1);
+    assert.ok(out.includes(notAdding('niyam / Work rules', 'the shared checks .github/workflows/niyam.yml calls run no Work rules job')), out.join('\n'));
+
+    const tight = rulesWorld([checks()], { 'GET repos/veda-hq/niyam/contents/.github/workflows/checks.yml?ref=v0.6.6': encoded(SHARED.replace("name: 'Work rules'", "name:'Work rules'")) });
+    const second = capture();
+    assert.equal(await ownerStep(tight.sys, second.io, ['required-checks', 'veda-hq/niyam', 'main']), 0, second.out.join('\n'));
+  });
+
+  it("refuses settings or a ruleset GitHub gives with no body, and finds a ruleset among nameless ones", async () => {
+    for (const [extra, why] of [
+      [{ 'GET repos/veda-hq/niyam/contents/.github/niyam.json': { status: 200 } }, "✗ GitHub did not give veda-hq/niyam's .github/niyam.json"],
+      [{ 'GET repos/veda-hq/niyam/rulesets/5': { status: 200 } }, "✗ GitHub did not give the ruleset main's rules"],
+    ] as [Record<string, Reply>, string][]) {
+      const made = rulesWorld([], extra);
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 1);
+      assert.ok(out.includes(why), out.join('\n'));
+    }
+    const nameless = rulesWorld([checks('niyam / PR identity', 'niyam / Work rules')], { 'GET repos/veda-hq/niyam/rulesets?includes_parents=false&per_page=100': { status: 200, json: [{ id: 6 }, { id: 5, name: 'main' }] } });
+    const { io, out } = capture();
+    assert.equal(await ownerStep(nameless.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 0, out.join('\n'));
+  });
+
+  it('fills a status-checks rule that lists no checks, keeping its other parameters, and writes a new one in full', async () => {
+    const added = [{ context: 'niyam / PR identity', integration_id: 15368 }, { context: 'niyam / Work rules', integration_id: 15368 }];
+    for (const [rule, parameters] of [
+      [{ type: 'required_status_checks' }, {}],
+      [{ type: 'required_status_checks', parameters: { strict_required_status_checks_policy: true } }, { strict_required_status_checks_policy: true }],
+    ] as [unknown, object][]) {
+      const made = rulesWorld([{ type: 'deletion' }, rule]);
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 0, out.join('\n'));
+      assert.ok(out.includes('  before: none'), out.join('\n'));
+      assert.deepEqual(made.now(), [{ type: 'deletion' }, { type: 'required_status_checks', parameters: { ...parameters, required_status_checks: added } }]);
+    }
+    const none = rulesWorld([{ type: 'deletion' }]);
+    const { io, out } = capture();
+    assert.equal(await ownerStep(none.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 0, out.join('\n'));
+    assert.equal(out[0], "owner-step required-checks: the required checks of veda-hq/niyam's ruleset main");
+    assert.deepEqual(none.now(), [{ type: 'deletion' }, { type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, do_not_enforce_on_create: false, required_status_checks: added } }]);
+  });
+
+  it('says exactly that nothing changes, reading no workflow it does not need', async () => {
+    const made = rulesWorld([checks('niyam / Work rules', 'niyam / PR identity')]);
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 0);
+    assert.ok(out.includes('✓ nothing to change: the ruleset main requires every check .github/niyam.json turns on'), out.join('\n'));
+    assert.ok(!made.api.some((call) => /workflows\/(?:niyam|checks)\.yml/.test(call.args[1] ?? '')));
+  });
+
+  it('puts a check before P-53 in its place where the workflow runs its job, though every feature check is required', async () => {
+    const made = rulesWorld([checks('niyam / PR identity', 'niyam / Work rules', 'process-rules / Design frames')]);
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, ['required-checks', 'veda-hq/niyam', 'main']), 0, out.join('\n'));
+    assert.ok(out.includes('    make the ruleset main of veda-hq/niyam require niyam / Design frames in place of process-rules / Design frames'), out.join('\n'));
+    assert.deepEqual(made.now(), [checks('niyam / PR identity', 'niyam / Work rules', 'niyam / Design frames')]);
+  });
+
+  it('says what GitHub said when it refused the write, and every check a result still requires', async () => {
+    const refused = rulesWorld([checks('niyam / PR identity')], { 'PUT repos/veda-hq/niyam/rulesets/5': { status: 422, json: { message: 'Validation Failed' } } });
+    const first = capture();
+    assert.equal(await ownerStep(refused.sys, first.io, ['required-checks', 'veda-hq/niyam', 'main']), 1);
+    assert.ok(first.out.includes('✗ make the ruleset main of veda-hq/niyam also require niyam / Work rules: updating the ruleset main: gh: Validation Failed (HTTP 422)'), first.out.join('\n'));
+
+    const both = ['process-rules / PR identity', 'process-rules / Work rules'];
+    const kept = rulesWorld([checks(...both)], {}, () => [checks(...both, 'niyam / PR identity', 'niyam / Work rules')]);
+    const second = capture();
+    assert.equal(await ownerStep(kept.sys, second.io, ['required-checks', 'veda-hq/niyam', 'main']), 1);
+    assert.match(second.out.join('\n'), /GitHub shows the ruleset still requiring process-rules \/ PR identity, process-rules \/ Work rules afterwards/);
+  });
 });
 
 describe('owner-step folders', () => {
@@ -644,6 +1071,18 @@ describe('owner-step folders', () => {
     assert.equal(folderRoot(sys), '/tmp');
     sys.env = { TMPDIR: '' };
     assert.equal(folderRoot(sys), '/tmp');
+    sys.env = { TMPDIR: '/var/tmp//' };
+    assert.equal(folderRoot(sys), '/var/tmp');
+  });
+
+  it('hold a token when gh wrote one, however it spaced it', () => {
+    const { sys } = world();
+    sys.files.set(`${ROOT}/${FOLDER_PREFIX}ab/hosts.yml`, 'github.com:\n    oauth_token:gho_x\n');
+    sys.files.set(`${ROOT}/${FOLDER_PREFIX}cd/hosts.yml`, 'github.com:\n    oauth_token:\n');
+    assert.deepEqual(
+      leftBehind(sys).map((found) => found.text),
+      [`an owner-step folder left behind holds a GitHub token: ${ROOT}/${FOLDER_PREFIX}ab`, `an owner-step folder left behind: ${ROOT}/${FOLDER_PREFIX}cd`],
+    );
   });
 
   it('left behind are doctor ▲s, saying when one still holds a token and never what it is', () => {
@@ -739,6 +1178,21 @@ describe('owner-step required-checks --check', () => {
       [{ [PULLS]: { status: 200, json: [{ number: 9, merged_at: null, head: { sha: 'nine' } }] } }, /no pull request merged into main is among veda-hq\/niyam's 30 most recently updated/],
       [{ [PULLS]: { status: 502, json: { message: 'Bad Gateway' } } }, /GitHub did not list veda-hq\/niyam's pull requests \(gh: Bad Gateway \(HTTP 502\)\)/],
       [{ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' } } } }, /GitHub did not say veda-hq\/niyam's default branch/],
+      // A later failure, or cancelled before a later failure: neither is a success that replaced it.
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'failure', ACTIONS, '2026-11-15T10:01:46Z'), run(VEDA, 'success', ACTIONS, '2026-11-15T10:02:01Z')) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(failure, success\)/],
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'cancelled', ACTIONS, '2026-11-15T10:01:46Z'), run(VEDA, 'failure', ACTIONS, '2026-11-15T10:02:01Z')) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(cancelled, failure\)/],
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success', ACTIONS, '2026-11-15T10:01:46Z'), run(VEDA, 'cancelled', ACTIONS, '2026-11-15T10:01:46Z')) }, /veda-checks \/ Checks did not pass on veda-hq\/niyam#8, the last pull request merged into main \(success, cancelled\)/],
+      // A run GitHub gives with no app is another app's.
+      [{ [runsAt('eight', VEDA)]: ran({ name: VEDA, conclusion: 'success', started_at: '2026-11-15T10:02:01Z' }, run(VEDA, 'cancelled', ACTIONS, '2026-11-15T10:01:46Z')) }, /more than one app reported veda-checks \/ Checks on veda-hq\/niyam#8, the last pull request merged into main, and a ruleset requires one app's/],
+      [{ [runsAt('eight', VEDA)]: ran(run(VEDA, 'success', ACTIONS, '2026-11-15T10:01:46Z'), { name: VEDA, conclusion: 'cancelled', started_at: '2026-11-15T10:02:01Z' }) }, /more than one app reported veda-checks \/ Checks on veda-hq\/niyam#8, the last pull request merged into main, and a ruleset requires one app's/],
+      // Pull requests GitHub lists without a number, a head, or the head's sha.
+      [{ [PULLS]: { status: 200, json: [{ merged_at: '2026-11-14T10:00:00Z', head: { sha: 'eight' } }] } }, /no pull request merged into main is among veda-hq\/niyam's 30 most recently updated/],
+      [{ [PULLS]: { status: 200, json: [{ number: 8, merged_at: '2026-11-14T10:00:00Z', head: {} }] } }, /no pull request merged into main is among veda-hq\/niyam's 30 most recently updated/],
+      [{ [PULLS]: { status: 200, json: [{ number: 8, merged_at: '2026-11-14T10:00:00Z' }] } }, /no pull request merged into main is among veda-hq\/niyam's 30 most recently updated/],
+      // A default branch that is no name, or no body at all once the owner is known.
+      [{ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 5 } } }, /GitHub did not say veda-hq\/niyam's default branch/],
+      [{ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: '' } } }, /GitHub did not say veda-hq\/niyam's default branch/],
+      [{ 'GET repos/veda-hq/niyam': once({ status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 'main' } }, { status: 200 }) }, /GitHub did not say veda-hq\/niyam's default branch/],
     ];
     for (const [extra, why] of cases) {
       const made = setUp([checks('niyam / PR identity')], extra);
@@ -775,8 +1229,22 @@ describe('owner-step required-checks --check', () => {
     const made = setUp([checks('niyam / PR identity', VEDA)]);
     const { io, out } = capture();
     assert.equal(await ownerStep(made.sys, io, step(VEDA, 'niyam / PR identity')), 0, out.join('\n'));
-    assert.match(out.join('\n'), /✓ nothing to change: the ruleset main requires every check \.github\/niyam\.json turns on, and veda-checks \/ Checks/);
+    assert.ok(out.includes('✓ nothing to change: the ruleset main requires every check .github/niyam.json turns on, and veda-checks / Checks'), out.join('\n'));
     assert.ok(!made.api.some((call) => call.args[1]?.includes('/pulls') || call.args[1]?.includes('/check-runs')));
+  });
+
+  it('names an app GitHub gives no name for by its id', async () => {
+    const made = setUp([checks('niyam / PR identity')], { [runsAt('eight', 'Lint')]: ran(run('Lint', 'success', { id: 42 } as never)) });
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, step('Lint')), 0, out.join('\n'));
+    assert.ok(out.includes('  Lint passed on veda-hq/niyam#8, reported by app 42; a check that runs only for some paths would hold a pull request it skips'), out.join('\n'));
+  });
+
+  it('asks proof for a named check before P-53 that the ruleset requires, since it never reports', async () => {
+    const made = setUp([checks('niyam / PR identity', 'process-rules / Old')]);
+    const { io, out } = capture();
+    assert.equal(await ownerStep(made.sys, io, step('process-rules / Old')), 1, out.join('\n'));
+    assert.match(out.join('\n'), /✗ not adding process-rules \/ Old: GitHub did not give the checks of veda-hq\/niyam#8/);
   });
 });
 
@@ -889,6 +1357,13 @@ describe("owner-step required-checks, the shared Guard's check (#471)", () => {
       [{ 'GET repos/veda-hq/niyam/contents/.github/workflows/niyam.yml': encoded('jobs: {}\n') }, /\.github\/workflows\/niyam\.yml on the default branch pins no release/],
       [{ 'GET repos/veda-hq/niyam/contents/.github/workflows/niyam.yml': encoded(WORKFLOW.replace('niyam-ref: v0.6.6', 'niyam-ref: v0.6.7')) }, /pins more than one release/],
       [{ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' } } } }, /GitHub did not say veda-hq\/niyam's default branch → run this again/],
+      [{ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 5 } } }, /GitHub did not say veda-hq\/niyam's default branch → run this again/],
+      [{ 'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: '' } } }, /GitHub did not say veda-hq\/niyam's default branch → run this again/],
+      [
+        { 'GET repos/veda-hq/niyam': once({ status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 'main' } }, { status: 200 }) },
+        /GitHub did not say veda-hq\/niyam's default branch → run this again/,
+      ],
+      [{ 'GET repos/veda-hq/niyam/contents/.github/workflows/niyam.yml': { status: 404, json: { message: 'Not Found' } } }, /\.github\/workflows\/niyam\.yml on the default branch pins no release, so the caller's is not known to be the one/],
     ];
     for (const [extra, why] of cases) {
       const rules = [checks('Guard', 'niyam / PR identity')];
@@ -896,6 +1371,7 @@ describe("owner-step required-checks, the shared Guard's check (#471)", () => {
       const { io, out } = capture();
       assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1, String(why));
       const text = out.join('\n');
+      assert.doesNotMatch(text, /nothing to change/, String(why));
       assert.match(text, new RegExp(`✗ not requiring niyam-guard / judge: (?:.*)${why.source}`));
       assert.ok(!wrote(made), String(why));
       assert.deepEqual(made.now(), rules);
@@ -910,16 +1386,19 @@ describe("owner-step required-checks, the shared Guard's check (#471)", () => {
   });
 
   it('names the policy a public repository needs for pull_request_target', async () => {
-    const made = setUp('veda-hq/niyam', [checks('niyam / PR identity')], {
-      'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 'main', private: false, visibility: 'public' } },
-      [judged('veda-hq/niyam')]: ran(),
-    });
-    const { io, out } = capture();
-    assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1);
-    assert.match(
-      out.join('\n'),
-      /so it first reports on the pull request after the one that adds it, and from 2026-12-02 GitHub runs it in a public repository only once a policy allows pull_request_target → Once for veda-hq\/niyam: allow pull_request_target for \.github\/workflows\/niyam-guard\.yml in a new policy under Settings → Actions → Policies, at https:\/\/github\.com\/veda-hq\/niyam\/settings\/actions, .* Then merge a pull request it passes on, then run this again/,
-    );
+    for (const shown of [{ private: false, visibility: 'public' }, { private: false }, { visibility: 'public' }]) {
+      const made = setUp('veda-hq/niyam', [checks('niyam / PR identity')], {
+        'GET repos/veda-hq/niyam': { status: 200, json: { owner: { login: 'veda-hq', type: 'Organization' }, default_branch: 'main', ...shown } },
+        [judged('veda-hq/niyam')]: ran(),
+      });
+      const { io, out } = capture();
+      assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1);
+      assert.match(
+        out.join('\n'),
+        /so it first reports on the pull request after the one that adds it, and from 2026-12-02 GitHub runs it in a public repository only once a policy allows pull_request_target → Once for veda-hq\/niyam: allow pull_request_target for \.github\/workflows\/niyam-guard\.yml in a new policy under Settings → Actions → Policies, at https:\/\/github\.com\/veda-hq\/niyam\/settings\/actions, .* Then merge a pull request it passes on, then run this again/,
+        JSON.stringify(shown),
+      );
+    }
   });
 
   it('takes no --check proof for it, which any one app gives, and names a missing caller when asked for', async () => {
@@ -997,5 +1476,10 @@ describe("owner-step required-checks, the shared Guard's check (#471)", () => {
       assert.equal(await ownerStep(made.sys, io, step('veda-hq/niyam')), 1);
       assert.match(out.join('\n'), why);
     }
+    // Required already, beside the Guard it takes the place of: a result without it is refused too.
+    const both = setUp('veda-hq/niyam', [checks('Guard', 'niyam / PR identity', JUDGE)], {}, () => [checks('niyam / PR identity')]);
+    const { io, out } = capture();
+    assert.equal(await ownerStep(both.sys, io, step('veda-hq/niyam')), 1);
+    assert.match(out.join('\n'), /GitHub shows the ruleset without niyam-guard \/ judge afterwards/);
   });
 });

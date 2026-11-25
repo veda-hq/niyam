@@ -116,7 +116,7 @@ export function renumberComment(work: WorkItems, from: string, to: string, holde
 /** One issue as `gh api …/issues/N --jq '{number, title, type: .type.name}'` gives it; `type` is null untyped. */
 const IssueSchema = schema((value): { title: string; type: string | null } => {
   const { title, type } = (typeof value === 'object' && value !== null ? value : {}) as { title?: unknown; type?: unknown };
-  if (typeof title !== 'string' || (type !== null && typeof type !== 'string')) throw new Error('unexpected shape');
+  if (typeof title !== 'string' || (type !== null && typeof type !== 'string')) throw new Error('an unexpected shape');
   return { title, type };
 });
 
@@ -128,7 +128,7 @@ function readEvent(work: WorkItems, gh: RunGh, issue: number, previousTitle: str
   try {
     read = IssueSchema.parse(JSON.parse(raw));
   } catch (error) {
-    throw new Error(error instanceof SyntaxError ? `${at} came back as text that is not JSON` : `${at} came back in an unexpected shape`);
+    throw new Error(`${at} came back ${error instanceof SyntaxError ? 'as text that is not JSON' : `in ${detail(error)}`}`);
   }
   const { title, type } = read;
   if (type !== work.issueType) return `${at} is not a ${work.issueType}`;
@@ -161,8 +161,8 @@ export type Check = { ok: true; note: string | null; renumbers: readonly Renumbe
 
 export interface CheckOptions {
   readonly apply?: boolean;
-  readonly issue?: number;
-  readonly previousTitle?: string;
+  readonly issue?: number | undefined;
+  readonly previousTitle?: string | undefined;
   readonly ref?: string;
   /** The allocator; a test may give its own answer. */
   readonly allocate?: () => Allocation;
@@ -203,7 +203,7 @@ export function checkWorkItemNumbers(sys: Sys, root: string, settings: DocSettin
   if (!/^\d{4}$/.test(next.next) || first < 1 || first + moving.size > 10_000) return { ok: false, error: `no room for ${String(moving.size)} number(s) from ${next.next}` };
   const planned = [...moving.values()].map(({ item, work: from, holder }, index) => {
     const to = String(first + index).padStart(4, '0');
-    return { move: { issue: item.number, from, to, holder, title: item.title.trimStart().replace(/^\d{4}/, to) }, was: item.title };
+    return { move: { issue: item.number, from, to, holder, title: `${to}${item.title.trimStart().slice(4)}` }, was: item.title };
   });
   const renumbers = planned.map(({ move }) => move);
   if (!options.apply) return { ok: true, note, renumbers, applied: false };
@@ -244,7 +244,7 @@ export function workItemArgs(args: readonly string[]): { issue?: number; apply: 
     if (arg === '--apply') apply = true;
     else if (arg === '--issue' || arg.startsWith('--issue=')) {
       const value = arg === '--issue' ? args[++i] : arg.slice('--issue='.length);
-      if (value === undefined || !/^[1-9]\d{0,7}$/.test(value)) throw new Error('work-item-number --issue needs an issue number');
+      if (!value?.match(/^[1-9]\d{0,7}$/)) throw new Error('work-item-number --issue needs an issue number');
       if (issue !== undefined) throw new Error('work-item-number takes one --issue');
       issue = wholeNumber(value);
     } else throw new Error(`work-item-number: unexpected argument "${arg}"`);
@@ -273,7 +273,7 @@ export function workItemNumber(sys: Sys, io: Output, args: readonly string[]): n
     return 1;
   }
   const previous = sys.env.WORK_ITEM_PREVIOUS_TITLE;
-  const result = checkWorkItemNumbers(sys, root, settings, gh, { apply: parsed.apply, ...(parsed.issue === undefined ? {} : { issue: parsed.issue }), ...(previous === undefined ? {} : { previousTitle: previous }) });
+  const result = checkWorkItemNumbers(sys, root, settings, gh, { apply: parsed.apply, issue: parsed.issue, previousTitle: previous });
   let code = 0;
   if (result.ok) {
     if (result.note !== null) io.out(`✓ ${result.note}`);
