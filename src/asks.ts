@@ -2,6 +2,7 @@ import { API, type Settings, anyLogin, hasSettings, loadSettings } from './agent
 import { ownersAlone } from './edits.ts';
 import { approvedIn, batchAnswers, firstIssue } from './approvals.ts';
 import { isOn, notAdoptedLine, offLine } from './features.ts';
+import { instant } from './instant.ts';
 import { type ReadFile, type Simple, type Text, UNKNOWN, commands } from './shell.ts';
 import type { Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
@@ -431,7 +432,9 @@ function waitingOn(slug: string, issue: number, waiting: Owed[]): string {
  * label off where every one is answered. `posted`, the batch answer an
  * event brings, counts though the Approvals issue's list may not show it
  * yet; an issue no agent asked on comes off only when `named`, which that
- * answer names.
+ * answer names. Then takes it off every closed issue and pull request: a
+ * closed one waits on no one, and the owner's 👍 sends no event, so a slice
+ * 👍'd and closed by its merge before a sweep would keep it (#639).
  */
 async function sweep(sys: Sys, token: string, slug: string, settings: Settings, io: Output, posted?: Comment, named: readonly number[] = []): Promise<void> {
   const waiting = await every<{ number: number }>(sys, token, `${API}/repos/${slug}/issues?state=open&labels=${NEEDS_OWNER}`);
@@ -460,7 +463,36 @@ async function sweep(sys: Sys, token: string, slug: string, settings: Settings, 
       io.out(`#${number}: no agent asked there; left as it is`);
     }
   }
-  io.out(`needs-owner: ${waiting.length} labelled ${NEEDS_OWNER}, ${cleared} cleared`);
+  const closed = await every<{ number: number }>(sys, token, `${API}/repos/${slug}/issues?state=closed&labels=${NEEDS_OWNER}`);
+  for (const { number } of closed) {
+    await removeLabel(sys, token, slug, number);
+    io.out(`#${number}: closed; ${NEEDS_OWNER} taken off`);
+  }
+  io.out(`needs-owner: ${waiting.length} labelled ${NEEDS_OWNER}, ${cleared} cleared${closed.length > 0 ? `; ${closed.length} closed, cleared` : ''}`);
+}
+
+/**
+ * A reopened issue, which the sweep left unlabelled when it closed, waits on
+ * the owner again where an ask on it is unanswered: no answer `answered`
+ * counts, and no `approved` label of theirs since the latest waiting ask.
+ */
+async function reopened(sys: Sys, token: string, slug: string, issue: number, settings: Settings, io: Output): Promise<void> {
+  const standing = await answered(sys, token, slug, issue, settings, async () =>
+    settings.approvals === undefined ? [] : every<Comment>(sys, token, `${API}/repos/${slug}/issues/${settings.approvals}/comments`, true),
+  );
+  if (!('waiting' in standing)) {
+    io.out(`needs-owner: #${issue} was reopened, and nothing on it waits on the owner; not labelled ${NEEDS_OWNER}`);
+    return;
+  }
+  // An ask or a label whose time cannot be read counts against the approval, so the issue is labelled.
+  const latest = Math.max(...standing.waiting.map(({ since }) => instant(since) ?? Infinity));
+  const events = await every<IssueEvent>(sys, token, `${API}/repos/${slug}/issues/${issue}/events`);
+  if (events.some((one) => one.event === 'labeled' && one.label?.name === 'approved' && anyLogin(settings.owners, one.actor?.login ?? undefined) && (instant(one.created_at ?? undefined) ?? -Infinity) > latest)) {
+    io.out(`needs-owner: #${issue} was reopened, and the owner approved it after its asks; not labelled ${NEEDS_OWNER}`);
+    return;
+  }
+  await addLabel(sys, token, slug, issue);
+  io.out(`needs-owner: #${issue} was reopened and waits on the owner (${waitingOn(slug, issue, standing.waiting)}); labelled ${NEEDS_OWNER}`);
 }
 
 interface Event {
@@ -477,9 +509,10 @@ interface Event {
  * opens with `Needs you:` or `Proposal:` labels its issue `needs-owner`; the
  * owner's `approved` label or `Decision:` comment takes it off at once; the
  * hourly sweep (and a run by hand) takes it off each open issue whose every
- * ask the owner has answered (see `answered`), and so does the owner's
- * comment on the Approvals issue whose first line opens `Decision: approve`,
- * at once, counting itself.
+ * ask the owner has answered (see `answered`), and off every closed one, and
+ * so does the owner's comment on the Approvals issue whose first line opens
+ * `Decision: approve`, at once, counting itself. A reopened issue is labelled
+ * again where an ask on it still waits (see `reopened`).
  */
 export async function needsOwner(sys: Sys, io: Output): Promise<number> {
   const { GITHUB_EVENT_NAME: name, GITHUB_EVENT_PATH: eventPath, GITHUB_REPOSITORY: slug, GH_TOKEN: token } = sys.env;
@@ -548,6 +581,11 @@ export async function needsOwner(sys: Sys, io: Output): Promise<number> {
     if (event.action === 'labeled' && event.label?.name === 'approved' && anyLogin(settings.owners, event.sender?.login)) {
       if (labelled) await removeLabel(sys, token, slug, issue);
       io.out(`needs-owner: the owner approved #${issue}${labelled ? `; ${NEEDS_OWNER} taken off` : ''}`);
+      return 0;
+    }
+    if (event.action === 'reopened') {
+      if (labelled) io.out(`needs-owner: #${issue} was reopened, already labelled ${NEEDS_OWNER}`);
+      else await reopened(sys, token, slug, issue, settings, io);
       return 0;
     }
     io.out(`needs-owner: #${issue} was not approved by the owner; nothing to do`);

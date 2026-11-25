@@ -308,10 +308,12 @@ jobs:
   needs-owner:
     name: Needs you
     # An agent's ask labels its issue needs-owner; the owner's approved label or Decision: comment takes it off at once,
-    # and the hourly sweep, or a run by hand, takes it off where the owner 👍'd the latest ask.
+    # and the hourly sweep, or a run by hand, takes it off where the owner 👍'd the latest ask, and off every closed issue.
+    # A reopened issue is labelled again where an ask on it still waits. A caller written by onboard at 0.6.4 or later
+    # passes reopened, and onboard adds it to an older caller as it moves the pin; a pin moved by hand may lack it.
     if: >-
       github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' || github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issues' && github.event.action == 'labeled') ||
+      (github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'reopened')) ||
       (github.event_name == 'schedule' && github.event.schedule == '41 * * * *')
     runs-on: ubuntu-latest
     timeout-minutes: 10

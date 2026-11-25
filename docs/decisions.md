@@ -2720,3 +2720,24 @@
   - #578's Decision (above) stands except that CODEOWNERS is back: Guard, not
     an owner's review, holds a change to the guard itself. veda's side is
     veda-hq/veda#572.
+- **2026-11-25 — Decision: a closed issue never keeps `needs-owner`, and a
+  reopened one is judged again (Work item #638, slice #639).** Alok,
+  2026-11-25, on #604 keeping the label after it closed: "We should
+  permanently fix it for both niyam and its consumers."
+  - The cause: the owner's 👍 sends GitHub no event, so only the sweep reads
+    it, and the sweep listed open issues alone. GitHub ran niyam's
+    `41 * * * *` cron 6 to 10 hours apart on 2026-11-24, so most slices
+    closed by their merge before a sweep saw the 👍. Closed issues still
+    labelled on 2026-11-25: niyam 28, veda 65, athya_mono 27, athya-rules 1.
+  - Each sweep now takes the label off every closed issue and pull request,
+    answered or not: a closed one waits on no one. Its first run on the new
+    release clears a repository's backlog.
+  - A reopened issue is judged by its asks as the sweep judges an open one,
+    and labelled again where one still waits: no answer the sweep counts,
+    and no `approved` label of the owner's since the latest waiting ask.
+    `checks.yml`'s `needs-owner` job runs on `issues: reopened`, which every
+    caller already passes for the issue type, so no caller's workflow
+    changes.
+  - Rejected: an `issues: closed` trigger, taking the label off at once. It
+    changes `onboard`'s template and every caller's workflow, and still needs
+    the sweep for the backlog.
