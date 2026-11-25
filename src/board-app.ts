@@ -110,15 +110,13 @@ interface Installation {
   repository_selection: string;
 }
 
-/** The organization's installation of an app whose slug `is`; undefined while there is none. */
-async function installationOf(sys: Sys, org: string, token: string, is: (slug: string) => boolean): Promise<Installation | undefined> {
-  for (let page = 1; ; page++) {
-    const listed = await sys.http(`${API}/orgs/${org}/installations?per_page=100&page=${page}`, { token });
-    const all = (listed.json as { installations?: unknown } | null)?.installations;
-    if (listed.status !== 200 || !Array.isArray(all)) return undefined;
-    const found = (all as Installation[]).find((one) => typeof one?.app_slug === 'string' && is(one.app_slug));
-    if (found || all.length < 100) return found;
-  }
+/** The organization's installation of an app whose slug `is`, looking from page `page` on; undefined while there is none. */
+async function installationOf(sys: Sys, org: string, token: string, is: (slug: string) => boolean, page = 1): Promise<Installation | undefined> {
+  const listed = await sys.http(`${API}/orgs/${org}/installations?per_page=100&page=${page}`, { token });
+  const all = (listed.json as { installations?: unknown } | null)?.installations;
+  if (listed.status !== 200 || !Array.isArray(all)) return undefined;
+  const found = (all as Installation[]).find((one) => typeof one?.app_slug === 'string' && is(one.app_slug));
+  return found || all.length < 100 ? found : installationOf(sys, org, token, is, page + 1);
 }
 
 /** Puts repository `repositoryId` on `installation` when it holds selected repositories alone; why not, as a step left by hand. */
@@ -162,8 +160,11 @@ export async function setUpBoardApp(sys: Sys, out: Output, slug: string, token: 
     // One of the two belongs to an app made before: a new app would overwrite it and leave that one installed.
     if (has.length > 0) {
       const settings = `${GITHUB_WEB}/organizations/${org}/settings/secrets/actions`;
+      // Of the two, it has one and lacks the other.
+      const [held] = has;
+      const [lacking] = BOARD_SECRETS.filter((name) => !has.includes(name));
       return [
-        `Once for ${org}: it has the secret ${has.join(', ')} but not ${BOARD_SECRETS.filter((name) => !has.includes(name)).join(', ')}. Set the board app's other one at ${settings}, or delete it and its app, then run niyam onboard again at your own terminal.`,
+        `Once for ${org}: it has the secret ${held} but not ${lacking}. Set the board app's other one at ${settings}, or delete it and its app, then run niyam onboard again at your own terminal.`,
       ];
     }
     return await make(sys, out, { org, slug, token, repositoryId });

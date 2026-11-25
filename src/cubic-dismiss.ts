@@ -69,12 +69,19 @@ export function dismissArgs(args: readonly string[]): DismissArgs {
   const titles: string[] = [];
   const reasons: string[] = [];
   const once = new Map<string, string>();
-  for (let i = 0; i < args.length; i++) {
-    const token = args[i] as string;
-    const eq = token.startsWith('--') ? token.indexOf('=') : -1;
-    const name = eq > 0 ? token.slice(0, eq) : token;
+  // The word after a flag given without `=` is its value, not a flag.
+  let isValue = false;
+  for (const [at, token] of args.entries()) {
+    if (isValue) {
+      isValue = false;
+      continue;
+    }
+    // `--name=value` or `--name value`; anything else is no flag of these.
+    const eq = token.indexOf('=');
+    const name = eq === -1 ? token : token.slice(0, eq);
     if (!['--evidence', '--decision', '--title', '--reason', '--from', '--context'].includes(name)) throw new Error(`unexpected argument "${token}"`);
-    const value = eq > 0 ? token.slice(eq + 1) : args[++i];
+    isValue = eq === -1;
+    const value = isValue ? args[at + 1] : token.slice(eq + 1);
     if (value === undefined || value.startsWith('--')) throw new Error(`${name} needs a value`);
     if (name === '--title') titles.push(value);
     else if (name === '--reason') reasons.push(value);
@@ -91,7 +98,8 @@ export function dismissArgs(args: readonly string[]): DismissArgs {
   const context = once.get('--context');
   // Both land in a comment line; a line break would start an active title.
   for (const [name, value] of [[flag, cite], ['--context', context]] as const) {
-    if (value !== undefined && /[\r\n]/.test(value)) throw new Error(`${name} spans lines`);
+    // No --context reads as "undefined", which is one line.
+    if (/[\r\n]/.test(String(value))) throw new Error(`${name} spans lines`);
   }
   const from = once.get('--from');
   if (titles.length === 0 && from === undefined) throw new Error(`nothing to dismiss: ${USAGE}`);
@@ -139,7 +147,8 @@ export function refusal(dismissal: Dismissal, dismissed: ReadonlySet<string>, op
   if (title.startsWith('#')) return `"${title}" starts with #, which the dismiss file reads as a comment`;
   if (reason.trim() === '') return `"${title}" has no reason`;
   if (dismissed.has(title)) return `"${title}" is already dismissed`;
-  const deferred = options.basis === 'evidence' ? DEFERRED.exec([reason, options.cite, options.context ?? ''].join('\n')) : null;
+  // join writes no context as nothing.
+  const deferred = options.basis === 'evidence' ? DEFERRED.exec([reason, options.cite, options.context].join('\n')) : null;
   if (deferred) return `"${title}": the reason, evidence or context says "${deferred[0]}": a true finding left unfixed is the owner's call; use --decision`;
   return null;
 }
@@ -157,7 +166,7 @@ export function resolves(cite: string, dismissed: ReadonlySet<string>, git: (arg
     return git(['rev-list', '-n', '1', cite, '^HEAD']).trim() === '';
   }
   if (/^[0-9a-f]{7,39}$/i.test(cite)) return false;
-  const path = cite.replace(/#.*$/, '').replace(/:\d+(?:-\d+)?$/, '');
+  const path = cite.replace(/#.*/, '').replace(/:\d+(?:-\d+)?$/, '');
   // Only plain repository-relative segments: no root, `.`, `..`, empty segment, leading `-` or revision syntax.
   if (!path.split('/').every((segment) => /^(?!\.+$)(?!-)[\w@+=,.-]+$/.test(segment))) return false;
   return git(['ls-tree', '--full-tree', '--name-only', 'HEAD', '--', path]).trim() !== '';
@@ -169,7 +178,7 @@ export function formatEntry(dismissal: Dismissal, date: string, options: Dismiss
   const cited = [options.context, basis].filter(Boolean).join('; ');
   const lines: string[] = [];
   let line = `# ${date} (${cited}):`;
-  for (const word of dismissal.reason.split(/\s+/).filter(Boolean)) {
+  for (const [word] of dismissal.reason.matchAll(/\S+/g)) {
     if (line.length + 1 + word.length > WIDTH) {
       lines.push(line);
       line = '#';

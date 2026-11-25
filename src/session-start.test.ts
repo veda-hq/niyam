@@ -51,6 +51,7 @@ describe('sessionStart', () => {
     await start(sys);
     assert.equal(sys.files.get(RECORD), '{"agent":"ExampleBot"}\n');
     assert.equal(sys.modes.get(RECORD), 0o600);
+    assert.deepEqual(sys.dirs, [RECORD.slice(0, RECORD.lastIndexOf('/'))], 'it makes the record\'s folder, not a folder of the record\'s name');
   });
 
   it('records why when GitHub stays locked out', async () => {
@@ -422,7 +423,8 @@ describe('sessionStart', () => {
           WORKS,
           `niyam: this cloud session's environment held niyam ${v}; installed 0.0.1 from ${CLOUD_SETUP_PATH}, as the repo pins, for this session. The environment catches up when Claude builds it again.`,
         ]);
-        assert.deepEqual(installs(sys).map((call) => [call.args, call.timeoutMs]), [[[CLOUD_FILE], CLOUD_INSTALL_MS]]);
+        // Nothing on its standard input: the fake leaves an empty one out of the call.
+        assert.deepEqual(installs(sys).map((call) => [call.args, call.timeoutMs, call.input]), [[[CLOUD_FILE], CLOUD_INSTALL_MS, undefined]]);
         assert.equal(sys.files.get(RECORD), '{"agent":"ExampleBot"}\n', 'it never blocks');
       });
 
@@ -444,7 +446,7 @@ describe('sessionStart', () => {
       it('says so when the install fails, and works on', async () => {
         const sys = repoAt('0.0.1', '0.0.1');
         sys.files.set(FROM_SETUP, '');
-        sys.execOverride = (call) => (call.command === 'bash' ? { code: 22, stdout: '', stderr: 'downloading\ncurl: (22) The requested URL returned error: 404\n' } : undefined);
+        sys.execOverride = (call) => (call.command === 'bash' ? { code: 22, stdout: '', stderr: 'downloading\nretrying\ncurl: (22) The requested URL returned error: 404\n' } : undefined);
         assert.deepEqual((await start(sys)).out.slice(1), [
           `niyam: this cloud session runs niyam ${v}, but ${CLOUD_SETUP_PATH} installs 0.0.1, and running it failed (curl: (22) The requested URL returned error: 404); the session works on with ${v}.`,
         ]);
@@ -500,7 +502,13 @@ describe('sessionStart', () => {
       const outside = cloud(AGENT);
       outside.files.set(`${ROOT}/${WORKFLOW_PATH}`, workflow('main', '0.0.1', false));
       outside.execOverride = (call) => (call.args[0] === 'rev-parse' && call.args[1] === '--show-toplevel' ? { code: 128, stdout: '', stderr: 'not a repo' } : undefined);
+      const looked: string[] = [];
+      const reads = outside.read.bind(outside);
+      outside.read = (path) => (looked.push(path), reads(path));
+      const has = outside.exists.bind(outside);
+      outside.exists = (path) => (looked.push(path), has(path));
       assert.equal((await start(outside)).out.length, 1);
+      assert.deepEqual(looked.filter((path) => path.endsWith(WORKFLOW_PATH) || path.endsWith(CLOUD_SETUP_PATH)), [], 'outside a repository it looks for no workflow or cloud setup file');
     });
 
     it("asks with a token the cloud environment set", async () => {
@@ -567,6 +575,22 @@ describe('sessionStart', () => {
     assert.deepEqual((await start(sys)).out, [
       'niyam: STOP. Writing the GitHub lock to CLAUDE_ENV_FILE failed (read-only), so gh and git may act as the owner. Do not push, fetch, or run gh in this session; tell example-owner.',
     ]);
+  });
+
+  it('tells the owner, unnamed, to stop when it cannot read the settings or check the identity', async () => {
+    const STOP = `niyam: STOP. CLAUDE_ENV_FILE is unset, so this session cannot be given the agent identity and gh and git would act as the owner. Do not push, fetch, or run gh in this session; tell the owner. ${HOOK_ONLY}`;
+    const unsettled = ready();
+    unsettled.env = {};
+    unsettled.files.delete(`${ROOT}/.github/niyam.json`);
+    assert.deepEqual((await start(unsettled)).out, [STOP]);
+    const failed = ready();
+    failed.env = {};
+    const exists = failed.exists.bind(failed);
+    failed.exists = (path) => {
+      if (path === SESSION) throw new Error('EIO');
+      return exists(path);
+    };
+    assert.deepEqual((await start(failed)).out, [STOP]);
   });
 
   for (const [name, change, reason] of [

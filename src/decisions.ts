@@ -1,7 +1,7 @@
 import { CLI } from './names.ts';
 import { API, anyLogin, either, loadSettings } from './agent.ts';
 import { PERSONAL_REPO, isOn, isPersonal, offLine } from './features.ts';
-import { WORKFLOW_BOT, expireVetoes, watchReviews } from './reviews.ts';
+import { WORKFLOW_BOT, all, expireVetoes, watchReviews } from './reviews.ts';
 import type { Output, Sys } from './types.ts';
 
 /** How long one decision's check may run, in seconds. */
@@ -29,7 +29,11 @@ export interface Decision {
 
 /** The fields a Decision issue's body carries, one per line: `Kind:`, `Review:`, `Expires:`, `Check:` (a command in backticks), `Undo:`. */
 export function parseDecision(body: string): Decision {
-  const field = (name: string): string | undefined => new RegExp(`^${name}:[ \\t]*(.+)$`, 'im').exec(body)?.[1]?.trim();
+  const field = (name: string): string | undefined => {
+    const found = new RegExp(`^${name}:[ \\t]*(.+)$`, 'im').exec(body);
+    // The one group takes part in every match.
+    return found ? (found[1] as string).trim() : undefined;
+  };
   const check = field('Check');
   return {
     kind: field('Kind'),
@@ -49,14 +53,8 @@ interface Issue {
   labels: { name: string }[];
 }
 
-async function openIssues(sys: Sys, token: string, slug: string, filter: string): Promise<Issue[]> {
-  const issues: Issue[] = [];
-  for (let page = 1; ; page++) {
-    const { status, json } = await sys.http(`${API}/repos/${slug}/issues?state=open&${filter}&per_page=100&page=${page}`, { token });
-    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot list open issues (HTTP ${status})`);
-    issues.push(...(json as Issue[]));
-    if (json.length < 100) return issues;
-  }
+function openIssues(sys: Sys, token: string, slug: string, filter: string): Promise<Issue[]> {
+  return all<Issue>(sys, token, `/repos/${slug}/issues?state=open&${filter}`, 'list open issues');
 }
 
 /**
@@ -116,7 +114,8 @@ export async function decisionsWeekly(sys: Sys, io: Output): Promise<number> {
   };
 
   for (const issue of decisions) {
-    const decision = parseDecision(issue.body ?? '');
+    // A null body reads as the text "null", which holds no field.
+    const decision = parseDecision(String(issue.body));
     const where = `#${issue.number}`;
     if (decision.kind?.toLowerCase() === 'override' && decision.expires) {
       // Whole days from today's date to the expiry: 0 is today.
@@ -161,16 +160,11 @@ export async function decisionsWeekly(sys: Sys, io: Output): Promise<number> {
       io.out(`${where}: its check ran past ${CHECK_TIMEOUT_S} seconds; not counted as tripped`);
       continue;
     }
-    const open = undos.find((undo) => new RegExp(`^Undoes #${issue.number}\\b`, 'm').test(undo.body ?? ''));
+    // A null body reads as the text "null", which undoes nothing.
+    const open = undos.find((undo) => new RegExp(`^Undoes #${issue.number}\\b`, 'm').test(String(undo.body)));
     if (open) {
       // A run that opened the undo issue but failed to comment leaves the comment to this one.
-      const comments: { body?: string; user?: { login?: string } | null }[] = [];
-      for (let page = 1; ; page++) {
-        const reply = await sys.http(`${API}/repos/${slug}/issues/${issue.number}/comments?per_page=100&page=${page}`, { token });
-        if (reply.status !== 200 || !Array.isArray(reply.json)) throw new Error(`cannot read #${issue.number}'s comments (HTTP ${reply.status})`);
-        comments.push(...(reply.json as typeof comments));
-        if (reply.json.length < 100) break;
-      }
+      const comments = await all<{ body?: string; user?: { login?: string } | null }>(sys, token, `/repos/${slug}/issues/${issue.number}/comments`, `read #${issue.number}'s comments`);
       const told = comments.some(
         // Only the workflow's comments can say an undo issue was opened.
         (comment) => comment.user?.login === WORKFLOW_BOT && comment.body?.includes(`Opened #${open.number} to undo it.`),
@@ -217,13 +211,13 @@ export interface Edited {
 export async function lastEditors(sys: Sys, token: string, issues: { number: number; node_id: string }[]): Promise<Map<number, Edited>> {
   const editors = new Map<number, Edited>();
   // GitHub looks up at most 100 nodes a request.
-  for (let at = 0; at < issues.length; at += 100) {
+  for (const batch of batches(issues)) {
     const { status, json } = await sys.http(`${API}/graphql`, {
       method: 'POST',
       token,
       body: {
         query: 'query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { number body editor { login } } } }',
-        variables: { ids: issues.slice(at, at + 100).map((issue) => issue.node_id) },
+        variables: { ids: batch.map((issue) => issue.node_id) },
       },
     });
     const nodes = (json as { data?: { nodes?: ({ number: number; body?: string; editor: { login: string } | null } | null)[] } } | null)?.data?.nodes;
@@ -231,4 +225,9 @@ export async function lastEditors(sys: Sys, token: string, issues: { number: num
     for (const node of nodes) if (node) editors.set(node.number, { editor: node.editor?.login, body: node.body ?? '' });
   }
   return editors;
+}
+
+/** `items` 100 at a time, in order. */
+function batches<T>(items: readonly T[]): T[][] {
+  return Array.from({ length: Math.ceil(items.length / 100) }, (_, at) => items.slice(at * 100, (at + 1) * 100));
 }
