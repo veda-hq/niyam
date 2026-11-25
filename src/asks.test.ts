@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { readFileSync } from 'node:fs';
 
-import { ASK_LIMIT, HOURLY, askProblem, askRefusal, askedBy, commentBodies, commentProblem, needsOwner, opensAsk, opensDecision, ownersAround } from './asks.ts';
+import { ASK_LIMIT, HOURLY, PAGE_LINK, askProblem, askRefusal, askedBy, commentBodies, commentProblem, needsOwner, opensAsk, opensDecision, ownersAround } from './asks.ts';
 import { AGENT, FakeSys, ROOT, capture } from './fake.test.ts';
 import { UNKNOWN } from './shell.ts';
 
@@ -22,6 +22,18 @@ describe('the ask rule', () => {
     assert.equal(opensDecision('Decision: go'), true);
     assert.equal(opensDecision('_Decision:_ go'), true);
     assert.equal(opensDecision('Proposal: go'), false);
+    // Only from the very start: a list number is no opening mark.
+    assert.equal(opensAsk('1. Needs you: x'), undefined);
+    assert.equal(opensDecision('no colon here'), false);
+    // A comment with no body opens with nothing.
+    assert.equal(opensAsk(null), undefined);
+    assert.equal(opensAsk(undefined), undefined);
+    assert.equal(opensDecision(null), false);
+  });
+
+  it('reads a published page link whole', () => {
+    assert.equal(PAGE_LINK.exec(`see ${PAGE}.`)?.[0], PAGE);
+    assert.equal(PAGE_LINK.exec('see https://claude.ai/code/artifact/abc-1 now')?.[0], 'https://claude.ai/code/artifact/abc-1');
   });
 
   it('counts a comment that names the owner as asking them, with or without an @', () => {
@@ -44,6 +56,13 @@ describe('the ask rule', () => {
     assert.equal(askProblem(known(long), [OWNER]), `this comment asks the owner (it opens with "Proposal:"), and it runs ${[...long].length} characters, over ${ASK_LIMIT}`);
     assert.match(askProblem(known(`@example-owner ${'y'.repeat(ASK_LIMIT)}`), [OWNER]) ?? '', /names the owner, example-owner\), and it links no published page .* and runs 515 characters, over 500$/);
     assert.equal(askProblem(known(`Needs you: ${PAGE} ${'é'.repeat(ASK_LIMIT - 11 - PAGE.length - 1)}`), [OWNER]), undefined, 'characters, not bytes');
+    const full = `Needs you: ${PAGE} ${'x'.repeat(ASK_LIMIT - 11 - PAGE.length - 1)}`;
+    assert.equal(askProblem(known(`\n${full}\n\n`), [OWNER]), undefined, 'the limit counts the text, not the blank lines around it');
+  });
+
+  it('reads a part only the shell knows as a space between words', () => {
+    // `example-owner$S` names the owner whatever $S holds, unless it holds more of the name.
+    assert.match(askProblem({ text: `cc example-owner${UNKNOWN}s`, known: false, opensUnknown: false }, [OWNER]) ?? '', /names the owner, example-owner\), and the guard cannot measure it/);
   });
 
   it('refuses a body it cannot measure only where it asks the owner or hides its opening', () => {
@@ -53,7 +72,12 @@ describe('the ask rule', () => {
 
   it('says the rule and the fix when it refuses', () => {
     const line = askRefusal('this comment asks the owner (x), and it links no published page');
-    assert.match(line, /^niyam: refused, because this comment asks the owner \(x\), and it links no published page\. The rule: .* published page; .* 500 characters or fewer\. Fix: publish the page first, then post a comment of at most 500 characters that links it/);
+    assert.equal(
+      line,
+      'niyam: refused, because this comment asks the owner (x), and it links no published page. ' +
+        'The rule: anything the owner must read, approve or choose arrives as a published page; the comment carries only the question, the page link and how to answer, in 500 characters or fewer. ' +
+        "Fix: publish the page first, then post a comment of at most 500 characters that links it, written out in the command (quoted text, a quoted heredoc <<'EOF', or --body-file <file>) so the guard can read it.",
+    );
   });
 });
 
@@ -63,6 +87,7 @@ const FILES = new Map([
   ['/repo/vars.json', JSON.stringify({ query: 'mutation', variables: { body: 'Needs you: in variables' } })],
   ['/repo/none.json', JSON.stringify({ title: 'x' })],
   ['/repo/bad.json', '{'],
+  ['/repo/null.json', 'null'],
 ]);
 const read = (path: string): string | undefined => FILES.get(path.startsWith('/') ? path : `/repo/${path}`);
 const texts = (line: string): string[] => commentBodies(line, read).map((body) => (body.known ? body.text : `?${body.text.replaceAll(UNKNOWN, '?')}`));
@@ -95,6 +120,7 @@ describe('commentBodies', () => {
     assert.deepEqual(texts('gh api -X POST repos/o/r/issues/1/labels -f labels[]=x'), []);
     assert.deepEqual(texts('gh api graphql -f query="query { viewer { login } }"'), []);
     assert.deepEqual(texts('gh'), []);
+    assert.deepEqual(texts('gh issue'), []);
   });
 
   it('reads the body gh api posts to a comments endpoint', () => {
@@ -121,6 +147,59 @@ describe('commentBodies', () => {
     assert.deepEqual(texts('gh api graphql -f query="mutation { addComment(input: {body: \\"$B\\"}) { x } }"'), ['?']);
     assert.deepEqual(texts('gh api graphql -f query=\'mutation { addComment(input: {subjectId: "I"}) { x } }\''), ['mutation { addComment(input: {subjectId: "I"}) { x } }']);
     assert.deepEqual(texts('gh api graphql -f query=\'mutation { updateIssueComment(input: {}) { x } }\' --input vars.json'), ['Needs you: in variables']);
+    // `body :` and `body:"…"`, spaced or not, and a `body` variable the query does not name.
+    assert.deepEqual(texts('gh api graphql -f query=\'mutation { addComment(input: {body :"Proposal: spaced"}) { x } }\''), ['Proposal: spaced']);
+    assert.deepEqual(texts('gh api graphql -f query="mutation(\\$b: String!) { addComment(input: {body :\\$b}) { x } }" -f b="Needs you: tight"'), ['Needs you: tight']);
+    assert.deepEqual(texts('gh api graphql -f query=\'mutation { addComment(input: {subjectId: "I"}) { x } }\' -f body="Proposal: z"'), ['Proposal: z']);
+    // A mutation with no query field, or no endpoint at all, posts nothing the guard reads.
+    assert.deepEqual(texts('gh api graphql -f body="Proposal: w"'), []);
+    assert.deepEqual(texts('gh api -f body="Proposal: w"'), []);
+  });
+
+  it('says which bodies it can read whole, and which open with a part only the shell knows', () => {
+    const full = (line: string, readFile = read) => commentBodies(line, readFile).map((body) => ({ ...body, text: body.text.replaceAll(UNKNOWN, '?') }));
+    const unreadable = { text: '', known: false, opensUnknown: true };
+    assert.deepEqual(full('gh pr comment 1 --body'), [unreadable]);
+    assert.deepEqual(full('gh issue comment 1 --body="x $X"'), [{ text: 'x ?', known: false, opensUnknown: false }]);
+    assert.deepEqual(full('gh api repos/o/r/issues/1/comments -f body="$B"'), [{ text: '?', known: false, opensUnknown: true }]);
+    assert.deepEqual(full('gh api repos/o/r/issues/1/comments -f body="x$B"'), [{ text: 'x?', known: false, opensUnknown: false }]);
+    assert.deepEqual(full('gh api repos/o/r/issues/1/comments --input input.json'), [{ text: 'Proposal: from input', known: true, opensUnknown: false }]);
+    assert.deepEqual(full('gh api graphql -f query=\'mutation { addComment(input: {body: "Proposal: x"}) { x } }\''), [{ text: 'Proposal: x', known: true, opensUnknown: false }]);
+    // A query with a part only the shell knows outside its body: the body is spelled out, the query is not.
+    assert.deepEqual(full('gh api graphql -f query="mutation { addComment(input: {subjectId: \\"$S\\", body: \\"Proposal: x\\"}) { x } }"'), [{ text: 'Proposal: x', known: false, opensUnknown: false }]);
+    // A body file whose name only the shell knows is not read, whatever is there.
+    assert.deepEqual(full('gh issue comment 1 --body-file "$F"', () => 'Needs you: read anyway'), [unreadable]);
+    // Standard input only the shell knows is passed on as it is.
+    assert.deepEqual(full('gh api repos/o/r/issues/1/comments --input - <<< "$X"'), [{ text: '?\n', known: false, opensUnknown: true }]);
+  });
+
+  it('skips the value of each gh flag that takes one, wherever it stands', () => {
+    const valued = ['-R', '--repo', '-b', '--body', '-F', '--body-file', '-f', '--raw-field', '--field', '--input', '-X', '--method', '-H', '--header', '-q', '--jq', '-t', '--template', '--hostname', '--cache', '-p', '--preview'];
+    for (const flag of valued) assert.deepEqual(texts(`gh ${flag} v issue comment 1 --body x`), ['x'], flag);
+    assert.deepEqual(texts('gh --verbose issue comment 1 --body x'), ['x'], 'a flag that takes no value');
+    assert.deepEqual(texts('gh -R o/r api repos/o/r/issues/1/comments -f body=x'), ['x']);
+  });
+
+  it('reads each flag as gh does: a value that looks like a flag, an empty joined one, the last of several', () => {
+    assert.deepEqual(texts('gh issue comment 1 --body -F ask.md'), ['-F']);
+    assert.deepEqual(texts('gh issue comment 1 --body='), ['?']);
+    assert.deepEqual(texts('gh issue comment 1 --body-file'), ['?']);
+    assert.deepEqual(texts('gh issue comment 1 -b one --body-file ask.md'), ['Needs you: long\n']);
+    // A field is `key=value`, its value past the first `=`; one with no `=` is no field, and only -F reads @file.
+    assert.deepEqual(texts('gh api repos/o/r/issues/1/comments -f bodyx'), []);
+    assert.deepEqual(texts('gh api repos/o/r/issues/1/comments -f body'), []);
+    assert.deepEqual(texts('gh api repos/o/r/issues/1/comments -f body=a=b'), ['a=b']);
+    assert.deepEqual(texts('gh api repos/o/r/issues/1/comments -f body=@ask.md'), ['@ask.md']);
+    // The endpoint is the first word that is not a flag.
+    assert.deepEqual(texts('gh api repos/o/r/issues/1/comments extra -f body=x'), ['x']);
+    assert.deepEqual(texts('gh api repos/o/r/issues/1/comments --input null.json'), []);
+  });
+
+  it('reads gh alone, wherever it is in the command, and only its comment commands', () => {
+    assert.deepEqual(texts('command gh issue comment 1 --body x'), ['x']);
+    for (const line of ['ghost issue comment 1 --body x', 'sigh issue comment 1 --body x', 'pr comment 1 --body x', 'gh gist comment 1 --body x', 'gh repos/o/r/issues/1/comments -f body=x']) {
+      assert.deepEqual(texts(line), [], line);
+    }
   });
 });
 
@@ -129,6 +208,10 @@ describe('ownersAround', () => {
     const sys = new FakeSys();
     assert.deepEqual(ownersAround(sys, `${ROOT}/src/deep`), [OWNER]);
     assert.deepEqual(ownersAround(sys, '/elsewhere/x'), []);
+    assert.deepEqual(ownersAround(sys, 'relative'), []);
+    // The nearest settings decide, even ones that cannot be read.
+    sys.files.set(`${ROOT}/sub/.github/niyam.json`, '{"owner": 5}');
+    assert.deepEqual(ownersAround(sys, `${ROOT}/sub/deep`), []);
     sys.files.set(`${ROOT}/.github/niyam.json`, '{"owner": 5}');
     assert.deepEqual(ownersAround(sys, ROOT), []);
   });
@@ -259,6 +342,34 @@ describe('needsOwner', () => {
       assert.deepEqual(on.requests, []);
     });
 
+    it('labels it where the only answer is no answer: a label taken off or by no one, the ask’s own instant, or no time', async () => {
+      for (const [name, json, decisions] of [
+        ['approved taken off', [label('unlabeled', OWNER, '2026-11-15T09:59:40Z')], []],
+        ['approved by no one', [{ event: 'labeled', created_at: '2026-11-15T09:59:40Z', actor: null, label: { name: 'approved' } }], []],
+        ['approved as the ask was made', [label('labeled', OWNER, ASKED)], []],
+        ['approved at no time', [{ event: 'labeled', actor: { login: OWNER }, label: { name: 'approved' } }], []],
+        ['decided as the ask was made', [], [{ id: 71, body: 'Decision: yes', user: { login: OWNER }, created_at: ASKED }]],
+      ] as const) {
+        const sys = job('issue_comment', asked());
+        sys.route('GET', events, { status: 200, json });
+        sys.route('GET', since, { status: 200, json: decisions });
+        sys.route('GET', thumbs, { status: 200, json: [] });
+        assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner'], name);
+        // With no Approvals issue in the settings, none is read.
+        assert.ok(!sys.requests.some((request) => request.url.includes('/issues/undefined/')), name);
+      }
+    });
+
+    it('reads no answer for a comment the event gives no id, or a review comment', async () => {
+      const noId = { ...asked(), comment: { ...asked().comment, id: undefined } };
+      const review = { ...asked(), issue: undefined, pull_request: { number: 7, labels: [] } };
+      for (const [name, event] of [['issue_comment', noId], ['pull_request_review_comment', review]] as const) {
+        const sys = job(name, event);
+        assert.match((await runJob(sys)).out[0] ?? '', /labelled needs-owner$/);
+        assert.deepEqual(sys.requests.map((request) => request.method), ['POST'], name);
+      }
+    });
+
     it('fails when GitHub refuses the read', async () => {
       const sys = job('issue_comment', asked());
       sys.route('GET', events, { status: 403, json: null });
@@ -301,6 +412,9 @@ describe('needsOwner', () => {
         assert.deepEqual(calls(named), []);
         const other = run([says(OWNER, 90, 'Decision: approve #7')], proposal);
         assert.deepEqual((await runJob(other)).out, ['needs-owner: #7 asks the owner (Proposal:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
+        // A Needs you: is answered for its own issue, whatever its first line names.
+        const needs = { ...asked(), comment: { ...asked().comment, body: `Needs you: see #12 first.\nPage: ${PAGE}` } };
+        assert.deepEqual((await runJob(run([says(OWNER, 90, 'Decision: approve #7')], needs))).out, [ANSWERED]);
       });
 
       it("labels it where the batch answer is someone else's, older than the ask, names other issues only, or was edited by someone else", async () => {
@@ -342,6 +456,7 @@ describe('needsOwner', () => {
     assert.deepEqual(calls(approved), [`DELETE /repos/${SLUG}/issues/7/labels/needs-owner`]);
     const bare = job('issues', { action: 'labeled', label: { name: 'approved' }, sender: { login: OWNER }, issue: { number: 7 } });
     assert.deepEqual((await runJob(bare)).out, ['needs-owner: the owner approved #7']);
+    assert.deepEqual(calls(bare), []);
   });
 
   describe('a batch answer on the Approvals issue', () => {
@@ -477,6 +592,84 @@ describe('needsOwner', () => {
         );
         assert.deepEqual(await both([add(1)], 'Decision: approve #99', { 120: hour(3) }, [{ event: 'parent_issue_added', created_at: hour(0) }]), twice('#12: the owner answered with a 👍 on the ask; needs-owner taken off'));
       });
+
+      it("reads the slice's latest addition however the timeline orders it, and only additions", async () => {
+        const added = (...hours: number[]) => hours.map((h) => ({ event: 'parent_issue_added', created_at: hour(h) }));
+        assert.deepEqual(await both([add(1)], 'Decision: approve #99', { 120: hour(3) }, added(4, 0, 2)), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
+        assert.deepEqual(await both([add(1)], 'Decision: approve #99', { 120: hour(3) }, [...added(0), { event: 'commented', created_at: hour(4) }]), twice('#12: the owner answered with a 👍 on the ask; needs-owner taken off'));
+        // An addition before a later proposal leaves that proposal's own time.
+        assert.deepEqual(await both([add(6)], 'Decision: approve #12', {}, added(0)), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
+      });
+
+      it("moves only the slice's own addition past a later addition, not a State's drop or a Needs you:", async () => {
+        const readded = [{ event: 'parent_issue_added', created_at: hour(4) }];
+        assert.deepEqual(await both([add(1), drop(2)], 'Decision: approve #99', { 120: hour(3), 121: hour(3) }, readded), twice('#12: waits on the owner (the proposal for #12, https://github.com/example-org/example-app/issues/12)'));
+        const ask = says(AGENT, 123, `Needs you: go? ${PAGE}`, 2);
+        assert.deepEqual(await both([add(1), ask], 'Decision: approve #99', { 120: hour(5), 123: hour(3) }, readded), twice('#12: the owner answered with a 👍 on the ask; needs-owner taken off'));
+      });
+
+      it("reads the slice's timeline only for a proposal for the slice itself", async () => {
+        for (const list of [[says(AGENT, 123, `Needs you: go? ${PAGE}`, 1)], [drop(1)]]) {
+          const sys = job('schedule', {}, ON_7);
+          sys.route('GET', LABELLED, { status: 200, json: [{ number: 12 }] });
+          comments(sys, 12, list);
+          comments(sys, 7, []);
+          await runJob(sys);
+          assert.ok(!sys.requests.some((request) => request.url.includes('/timeline')));
+        }
+      });
+
+      it('counts an answer only after the ask it answers, and only from an owner', async () => {
+        // A Decision: made with the later proposal answers only the earlier one.
+        assert.deepEqual(await both([add(1), drop(2), says(OWNER, 122, 'Decision: yes', 2)], 'Decision: approve #99'), twice('#12: waits on the owner (the proposal for #30, https://github.com/example-org/example-app/issues/12)'));
+        // A 👍 made with the ask, and an agent's Decision: or a comment from no one after it, answer nothing.
+        assert.deepEqual(await both([drop(1)], 'Decision: approve #99', { 121: hour(1) }), twice('#12: waits on the owner (the proposal for #30, https://github.com/example-org/example-app/issues/12)'));
+        const nobody = { id: 125, body: 'Decision: yes', user: null, created_at: hour(2) } as unknown as Said;
+        assert.deepEqual(await both([drop(1), says(AGENT, 124, 'Decision: yes', 2), nobody], 'Decision: approve #99'), twice('#12: waits on the owner (the proposal for #30, https://github.com/example-org/example-app/issues/12)'));
+      });
+    });
+
+    it("sweeps: reads the edits only of owners' decisions after the earliest ask, and reads no 👍 from no one", async () => {
+      const sys = job('schedule', {});
+      sys.route('GET', LABELLED, { status: 200, json: [{ number: 12 }] });
+      sys.route('GET', onIssue(12), {
+        status: 200,
+        json: [says(AGENT, 1, `Needs you: go? ${PAGE}`, 1), { ...says(OWNER, 2, 'Decision: old', 1), node_id: 'IC_2', updated_at: hour(2) }],
+      });
+      sys.route('GET', thumbs(1), { status: 200, json: [{ user: null, created_at: hour(3) }] });
+      assert.deepEqual((await runJob(sys)).out, ['#12: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/12)', 'needs-owner: 1 labelled needs-owner, 0 cleared']);
+      assert.deepEqual(calls(sys), []);
+      assert.ok(!sys.requests.some((request) => request.url.includes('/issues/undefined/')));
+    });
+
+    it("counts the event's own answer, as it was posted, only where the Approvals issue does not list it", async () => {
+      const edits = (sys: FakeSys, editor: string) =>
+        sys.route('POST', `${API}/graphql`, { status: 200, json: { data: { nodes: [{ id: 'IC_700', userContentEdits: { totalCount: 1, nodes: [{ editor: { login: editor } }] } }] } } });
+      const WAITS = '#12: waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/12)';
+      const CLEARED = '#12: the owner answered with a "Decision: approve" on #7, the Approvals issue; needs-owner taken off';
+      for (const [name, made, listed, editor, line] of [
+        ['listed as the agent edited it', {}, [{ ...says(OWNER, 700, 'Decision: approve #12', 5), node_id: 'IC_700', updated_at: hour(6) }], AGENT, WAITS],
+        ['beside another comment', {}, [says(OWNER, 701, 'Decision: later', 1)], undefined, CLEARED],
+        ['edited by the agent before the event', { updated_at: hour(6) }, [], AGENT, WAITS],
+        ['edited by the owner alone', { updated_at: hour(6) }, [], OWNER, CLEARED],
+        // On an Approvals issue GitHub cannot list, the event's answer still counts.
+        ['on an Approvals issue GitHub cannot find', {}, null, undefined, CLEARED],
+      ] as const) {
+        const sys = job('issue_comment', answer('Decision: approve #12', made), ON_7);
+        sys.route('GET', LABELLED, { status: 200, json: [{ number: 12 }] });
+        comments(sys, 12, [says(AGENT, 1, `Needs you: go? ${PAGE}`, 1)]);
+        sys.route('GET', onIssue(7), listed ? { status: 200, json: listed } : { status: 404, json: { message: 'Not Found' } });
+        if (editor) edits(sys, editor);
+        sys.route('DELETE', off(12), { status: 200, json: null });
+        assert.equal((await runJob(sys)).out[1], line, name);
+      }
+      // A listed answer and the event's own answer the slice's two proposals between them.
+      const sys = job('issue_comment', answer('Decision: approve #12'), ON_7);
+      sys.route('GET', LABELLED, { status: 200, json: [{ number: 12 }] });
+      comments(sys, 12, [says(AGENT, 1, `Proposal: add #12 to #5. ${PAGE}`, 1), says(AGENT, 2, `Proposal: drop state #30. ${PAGE}`, 2)]);
+      sys.route('GET', onIssue(7), { status: 200, json: [says(OWNER, 701, 'Decision: approve #30', 4)] });
+      sys.route('DELETE', off(12), { status: 200, json: null });
+      assert.equal((await runJob(sys)).out[1], CLEARED);
     });
 
     it('is an ordinary decision on any other issue, from anyone but an owner, or without "approve"', async () => {
@@ -558,6 +751,7 @@ describe('needsOwner', () => {
       sys.route('GET', `${API}/repos/${SLUG}/issues/1/timeline?per_page=100&page=1`, { status: 200, json: [] });
       for (const id of [10, 11]) sys.route('GET', `${API}/repos/${SLUG}/issues/comments/${id}/reactions?content=%2B1&per_page=100&page=1`, { status: 200, json: [] });
       assert.deepEqual((await runJob(sys)).out, [`#1: waits on the owner (the proposal for #1, ${at(10)}; the proposal for #30, ${at(11)})`, 'needs-owner: 1 labelled needs-owner, 0 cleared']);
+      assert.equal(sys.requests.find((request) => request.url.includes('/timeline'))?.token, 'ghs_run');
     });
   });
 
@@ -603,6 +797,37 @@ describe('needsOwner', () => {
     }
     assert.deepEqual((await runJob(job('push', {}))).out, ['needs-owner: nothing to do on a push event']);
     assert.deepEqual((await runJob(job('issues', {}))).out, ['needs-owner: nothing to do on a issues event']);
+  });
+
+  it('reads an event by its name: a pull request only for a review comment, an issue only for a comment or an issue event', async () => {
+    for (const [name, event] of [
+      ['issue_comment', { action: 'created', comment: { body: `Needs you: x ${PAGE}`, user: { login: AGENT } }, pull_request: { number: 7, labels: [] } }],
+      ['issue_comment', { action: 'created', comment: { body: `Needs you: x ${PAGE}`, user: { login: AGENT } } }],
+      ['push', { issue: { number: 7 }, label: { name: 'approved' }, action: 'labeled', sender: { login: OWNER } }],
+    ] as const) {
+      const sys = job(name, event);
+      assert.deepEqual((await runJob(sys)).out, [`needs-owner: nothing to do on a ${name} event`]);
+      assert.deepEqual(sys.requests, []);
+    }
+  });
+
+  it('reads a comment with no author, a label event with no sender, and a body with no text as no one’s', async () => {
+    const noUser = job('issue_comment', { action: 'created', comment: { body: 'Proposal: x', user: null }, issue: { number: 7 } });
+    assert.deepEqual((await runJob(noUser)).out, ['needs-owner: the comment on #7 neither asks the owner nor is their decision; nothing to do']);
+    const noSender = job('issues', { action: 'labeled', label: { name: 'approved' }, issue: { number: 7, labels: [{ name: 'needs-owner' }] } });
+    assert.deepEqual((await runJob(noSender)).out, ['needs-owner: #7 was not approved by the owner; nothing to do']);
+    assert.deepEqual(calls(noSender), []);
+    const empty = job('issue_comment', { action: 'created', comment: { body: null, user: { login: OWNER } }, issue: { number: 7 } }, { owner: OWNER, agent: AGENT, approvals: 7 });
+    assert.deepEqual((await runJob(empty)).out, ['needs-owner: the comment on #7 neither asks the owner nor is their decision; nothing to do']);
+  });
+
+  it("counts only the needs-owner label as the issue's, and the ask's own address only where it is a web address", async () => {
+    const sys = job('issue_comment', comment(AGENT, `Needs you: approve? ${PAGE}`, ['bug']));
+    await runJob(sys);
+    assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`]);
+    const own = comment(AGENT, `Needs you: approve? ${PAGE}`);
+    const odd = job('issue_comment', { ...own, comment: { ...own.comment, html_url: `http://github.com/${SLUG}/issues/7#issuecomment-41` } });
+    assert.deepEqual((await runJob(odd)).out, ['needs-owner: #7 asks the owner (Needs you:) at https://github.com/example-org/example-app/issues/7; labelled needs-owner']);
   });
 
   it('sweeps: off where the owner 👍d the latest ask after its last edit or decided after it; on elsewhere', async () => {
@@ -671,9 +896,20 @@ describe('needsOwner', () => {
     const sys = job('workflow_dispatch', {});
     const list = `${API}/repos/${SLUG}/issues?state=open&labels=needs-owner&per_page=100`;
     sys.route('GET', `${list}&page=1`, { status: 200, json: Array.from({ length: 100 }, () => ({ number: 9 })) });
-    sys.route('GET', `${list}&page=2`, { status: 200, json: [] });
+    sys.route('GET', `${list}&page=2`, { status: 200, json: [{ number: 9 }] });
     sys.route('GET', `${API}/repos/${SLUG}/issues/9/comments?per_page=100&page=1`, { status: 200, json: [] });
-    assert.equal((await runJob(sys)).out.at(-1), 'needs-owner: 100 labelled needs-owner, 0 cleared');
+    assert.equal((await runJob(sys)).out.at(-1), 'needs-owner: 101 labelled needs-owner, 0 cleared');
+    // Every read carries the run's token.
+    assert.deepEqual([...new Set(sys.requests.map((request) => request.token))], ['ghs_run']);
+  });
+
+  it('fails where GitHub lists no array, refuses, or cannot find the labelled issues', async () => {
+    const open = `${API}/repos/${SLUG}/issues?state=open&labels=needs-owner&per_page=100&page=1`;
+    for (const result of [{ status: 200, json: {} }, { status: 500, json: [] }, { status: 404, json: [] }]) {
+      const sys = job('schedule', {});
+      sys.route('GET', open, result);
+      await assert.rejects(needsOwner(sys, capture().io), { message: `cannot read /repos/example-org/example-app/issues?state=open&labels=needs-owner (HTTP ${result.status})` });
+    }
   });
 
   it('sweeps: takes needs-owner off every closed issue and pull request, answered or not (#639)', async () => {
@@ -760,6 +996,40 @@ describe('needsOwner', () => {
       assert.deepEqual(calls(unasked), []);
     });
 
+    it('is labelled again where no approval of the owner comes after every waiting ask', async () => {
+      const approved = (created_at: string, name: string | null = 'approved', login: string | null = OWNER) => ({ event: 'labeled', created_at, label: name === null ? null : { name }, actor: login === null ? null : { login } });
+      const later = { id: 72, body: `Needs you: and this? ${PAGE}`, user: { login: AGENT }, created_at: at(3), updated_at: at(3) };
+      for (const [name, comments, events] of [
+        ['approved between two asks', [{ ...ask, body: `Proposal: ship ${PAGE}` }, later], [approved(at(2))]],
+        ['approval taken off after the ask', [ask], [{ ...approved(at(2)), event: 'unlabeled' }]],
+        ['another label after the ask', [ask], [approved(at(2), 'bug')]],
+        ['a label GitHub names no label', [ask], [approved(at(2), null)]],
+        ['approved by no one', [ask], [approved(at(2), 'approved', null)]],
+        ['approved as the ask was made', [ask], [approved(at(1))]],
+      ] as const) {
+        const sys = reopen();
+        on7(sys, [...comments], undefined, [...events]);
+        sys.route('GET', `${API}/repos/${SLUG}/issues/comments/72/reactions?content=%2B1&per_page=100&page=1`, { status: 200, json: [] });
+        assert.match((await runJob(sys)).out[0] ?? '', /was reopened and waits on the owner/, name);
+        assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`], name);
+        assert.ok(!sys.requests.some((request) => request.url.includes('/issues/undefined/')), name);
+      }
+    });
+
+    it("reads the Approvals issue for an ask the issue itself has not answered, and labels it where GitHub cannot find it", async () => {
+      const settings = { owner: OWNER, agent: AGENT, approvals: 9 };
+      const batch = (json: unknown, status = 200) => {
+        const sys = job('issues', { action: 'reopened', sender: { login: OWNER }, issue: { number: 7, labels: [] } }, settings);
+        on7(sys, [ask]);
+        sys.route('GET', `${API}/repos/${SLUG}/issues/9/comments?per_page=100&page=1`, { status, json });
+        return sys;
+      };
+      const answered = batch([{ id: 90, body: 'Decision: approve #7', user: { login: OWNER }, created_at: at(2) }]);
+      assert.deepEqual((await runJob(answered)).out, ['needs-owner: #7 was reopened, and nothing on it waits on the owner; not labelled needs-owner']);
+      const missing = batch(null, 404);
+      assert.match((await runJob(missing)).out[0] ?? '', /was reopened and waits on the owner/);
+    });
+
     it('is left as it is where it still has the label', async () => {
       const sys = reopen(['needs-owner']);
       assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 was reopened, already labelled needs-owner']);
@@ -783,6 +1053,11 @@ describe('needsOwner', () => {
     const sys = job('schedule', {});
     sys.env = {};
     await assert.rejects(needsOwner(sys, capture().io), /needs-owner runs in GitHub Actions/);
+    for (const name of ['GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GH_TOKEN'] as const) {
+      const one = job('schedule', {});
+      delete one.env[name];
+      await assert.rejects(needsOwner(one, capture().io), { message: 'needs-owner runs in GitHub Actions: GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set' }, name);
+    }
     const bare = job('schedule', {});
     bare.files.delete(`${ROOT}/.github/niyam.json`);
     assert.deepEqual((await runJob(bare)).out, ['needs-owner: the base branch has no .github/niyam.json, so the repo is not adopted on its base yet; nothing to check']);

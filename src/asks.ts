@@ -4,7 +4,7 @@ import { approvedIn, batchAnswers, firstIssue } from './approvals.ts';
 import { isOn, notAdoptedLine, offLine } from './features.ts';
 import { instant } from './instant.ts';
 import { type ReadFile, type Simple, type Text, UNKNOWN, commands } from './shell.ts';
-import type { Output, Sys } from './types.ts';
+import type { HttpResult, Output, Sys } from './types.ts';
 import { GITHUB_WEB } from './host.ts';
 
 /** The label an ask puts on its issue, which the board's "Needs you" view lists. */
@@ -16,18 +16,18 @@ export const PAGE_LINK = /https:\/\/claude\.ai\/(?:code\/)?artifact\/[\w-]+/;
 /** The hourly sweep's cron, which the client's workflow and the shared one both name. */
 export { HOURLY } from './features.ts';
 
-/** A comment's opening word, past any Markdown emphasis, heading or quote marks before it. */
-const OPENING = /^\s*(?:[*_#>]+\s*)*([A-Za-z][A-Za-z ]*?):/;
+/** A comment's opening word, past any spaces and Markdown emphasis, heading or quote marks before it. */
+const OPENING = /^[\s*_#>]*([A-Za-z][A-Za-z ]*?):/;
 
-/** The ask a comment opens with, `Needs you` or `Proposal`, or undefined. */
-export function opensAsk(body: string): string | undefined {
-  const word = OPENING.exec(body)?.[1];
+/** The ask a comment opens with, `Needs you` or `Proposal`, or undefined; a comment with no body opens with none. */
+export function opensAsk(body: string | null | undefined): 'Needs you' | 'Proposal' | undefined {
+  const word = body?.match(OPENING)?.[1];
   return word === 'Needs you' || word === 'Proposal' ? word : undefined;
 }
 
 /** Whether a comment opens with `Decision:`, the owner's word. */
-export function opensDecision(body: string): boolean {
-  return OPENING.exec(body)?.[1] === 'Decision';
+export function opensDecision(body: string | null | undefined): boolean {
+  return body?.match(OPENING)?.[1] === 'Decision';
 }
 
 /** The first of `owners` a comment names, with or without an @, or undefined. */
@@ -114,14 +114,16 @@ function fromFile(path: Text | undefined, simple: Simple, read: ReadFile): Text 
  * it from an editor, a prompt or the browser, which the guard cannot read.
  */
 function commentBody(args: Text[], simple: Simple, read: ReadFile): Text | undefined {
-  let body: Text | undefined;
-  for (let at = 0; at < args.length; ) {
+  // The last body flag from `at` on wins, as gh reads them.
+  const from = (at: number, body: Text | undefined): Text | undefined => {
+    if (at >= args.length) return body;
     const inline = flagValue(args, at, ['--body', '-b']);
-    const file = inline ? undefined : flagValue(args, at, ['--body-file', '-F']);
-    if (inline) body = inline.value ?? UNREADABLE('');
-    else if (file) body = fromFile(file.value, simple, read);
-    at = inline?.next ?? file?.next ?? at + 1;
-  }
+    if (inline) return from(inline.next, inline.value ?? UNREADABLE(''));
+    const file = flagValue(args, at, ['--body-file', '-F']);
+    if (file) return from(file.next, fromFile(file.value, simple, read));
+    return from(at + 1, body);
+  };
+  const body = from(0, undefined);
   if (body) return body;
   return args.some((word) => word.text === '--delete-last') ? undefined : UNREADABLE('');
 }
@@ -130,75 +132,78 @@ function commentBody(args: Text[], simple: Simple, read: ReadFile): Text | undef
 function queryBody(query: Text): Text | undefined {
   const written = /\bbody\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(query.text)?.[1];
   if (written === undefined) return undefined;
+  // A part only the shell knows is a NUL in the query, which no JSON string holds, so a body read here is spelled out.
   try {
-    const text = JSON.parse(`"${written}"`) as string;
-    return { text, known: query.known && !text.includes(UNKNOWN), opensUnknown: text.startsWith(UNKNOWN) };
+    return { text: JSON.parse(`"${written}"`) as string, known: query.known, opensUnknown: false };
   } catch {
     return UNREADABLE('');
   }
 }
 
-/** The words of a gh command that are not flags or a flag's value, in order. */
-function positionals(args: Text[]): string[] {
-  const found: string[] = [];
-  for (let at = 0; at < args.length; at++) {
-    const word = (args[at] as Text).text;
-    if (!word.startsWith('-')) found.push(word);
-    else if (GH_VALUED.has(word)) at++;
-  }
-  return found;
+/** The first word of a gh command from `at` on that is not a flag or a flag's value, and where the next word stands; undefined past the end. */
+function positional(args: Text[], at: number): { word: string; next: number } | undefined {
+  if (at >= args.length) return undefined;
+  const word = (args[at] as Text).text;
+  if (!word.startsWith('-')) return { word, next: at + 1 };
+  return positional(args, GH_VALUED.has(word) ? at + 2 : at + 1);
 }
 
 /** A `key=value` field of gh api, its value read as -F reads it (`@file`) when `typed`. */
 function field(value: Text, typed: boolean, simple: Simple, read: ReadFile): { key: string; value: Text } | undefined {
-  const equals = value.text.indexOf('=');
-  if (equals < 0) return undefined;
-  const raw: Text = { ...value, text: value.text.slice(equals + 1), opensUnknown: value.text.slice(equals + 1).startsWith(UNKNOWN) };
-  const key = value.text.slice(0, equals);
-  if (typed && raw.known && raw.text.startsWith('@')) return { key, value: fromFile({ ...raw, text: raw.text.slice(1) }, simple, read) };
-  return { key, value: raw };
+  const [key, ...rest] = value.text.split('=');
+  if (rest.length === 0) return undefined;
+  const text = rest.join('=');
+  const raw: Text = { ...value, text, opensUnknown: text.startsWith(UNKNOWN) };
+  if (typed && raw.known && text.startsWith('@')) return { key: key as string, value: fromFile({ ...raw, text: text.slice(1) }, simple, read) };
+  return { key: key as string, value: raw };
+}
+
+/** The body `--input` gives gh api: its `body`, or its GraphQL variables' `body`, or undefined when it has none. */
+function inputBody(input: Text): Text | undefined {
+  if (!input.known) return input;
+  try {
+    const parsed = JSON.parse(input.text) as { body?: unknown; variables?: { body?: unknown } } | null;
+    const text = parsed?.body ?? parsed?.variables?.body;
+    return typeof text === 'string' ? { text, known: true, opensUnknown: false } : undefined;
+  } catch {
+    return UNREADABLE('');
+  }
 }
 
 /** The body a `gh api` call posts to a comment endpoint or in a comment mutation, or undefined when it posts none. */
 function apiBody(args: Text[], simple: Simple, read: ReadFile): Text | undefined {
-  let endpoint: string | undefined;
+  let endpoint = '';
   const fields = new Map<string, Text>();
   let input: Text | undefined;
-  for (let at = 0; at < args.length; ) {
+  // Each word from `at` on: a field, the input file, or the endpoint, the first word that is none of them.
+  const scan = (at: number): void => {
+    if (at >= args.length) return;
     const word = args[at] as Text;
     const raw = flagValue(args, at, ['--raw-field', '-f']);
-    const typed = raw ? undefined : flagValue(args, at, ['--field', '-F']);
-    const given = raw ? undefined : typed ? undefined : flagValue(args, at, ['--input']);
-    if (raw?.value || typed?.value) {
-      const parsed = field((raw?.value ?? typed?.value) as Text, Boolean(typed), simple, read);
+    const typed = flagValue(args, at, ['--field', '-F']);
+    const given = flagValue(args, at, ['--input']);
+    const value = (raw ?? typed)?.value;
+    if (value) {
+      const parsed = field(value, typed !== undefined, simple, read);
       if (parsed) fields.set(parsed.key, parsed.value);
     } else if (given) {
       input = fromFile(given.value, simple, read);
-    } else if (!word.text.startsWith('-') && endpoint === undefined) {
-      endpoint = word.text;
+    } else if (!word.text.startsWith('-')) {
+      endpoint ||= word.text;
     }
-    const next = raw?.next ?? typed?.next ?? given?.next;
-    at = next ?? (GH_VALUED.has(word.text) ? at + 2 : at + 1);
+    scan(GH_VALUED.has(word.text) ? at + 2 : at + 1);
+  };
+  scan(0);
+  if (endpoint === 'graphql') {
+    const query = fields.get('query');
+    if (!query || !COMMENT_MUTATION.test(query.text)) return undefined;
+    // A mutation names its body's variable as `body: $name`; gh passes each variable as a field of that name.
+    const variable = /\bbody\s*:\s*\$(\w+)/.exec(query.text)?.[1];
+    // Else its input's body, or else the body written into the query: that string, or else the whole query.
+    return fields.get(variable ?? 'body') ?? (input ? inputBody(input) : (queryBody(query) ?? query));
   }
-  const query = fields.get('query');
-  const comment = endpoint === 'graphql' ? Boolean(query && COMMENT_MUTATION.test(query.text)) : endpoint !== undefined && COMMENT_ENDPOINT.test(endpoint);
-  if (!comment) return undefined;
-  // A mutation names its body's variable as `body: $name`; gh passes each variable as a field of that name.
-  const variable = endpoint === 'graphql' && query ? /\bbody\s*:\s*\$(\w+)/.exec(query.text)?.[1] : undefined;
-  const body = fields.get(variable ?? 'body');
-  if (body) return body;
-  if (input) {
-    if (!input.known) return input;
-    try {
-      const parsed = JSON.parse(input.text) as { body?: unknown; variables?: { body?: unknown } } | null;
-      const text = parsed?.body ?? parsed?.variables?.body;
-      return typeof text === 'string' ? { text, known: true, opensUnknown: false } : undefined;
-    } catch {
-      return UNREADABLE('');
-    }
-  }
-  // A mutation with its body written into the query: that string, or else the whole query.
-  return endpoint === 'graphql' && query ? (queryBody(query) ?? query) : undefined;
+  if (!COMMENT_ENDPOINT.test(endpoint)) return undefined;
+  return fields.get('body') ?? (input ? inputBody(input) : undefined);
 }
 
 /** The comment bodies a command line posts or edits through gh, each as the command spells it. */
@@ -208,7 +213,9 @@ export function commentBodies(line: string, read: ReadFile): Text[] {
     const at = simple.words.findIndex((word) => word.known && /^(?:.*\/)?gh$/.test(word.text));
     if (at < 0) continue;
     const args = simple.words.slice(at + 1);
-    const [group, action] = positionals(args);
+    const first = positional(args, 0);
+    const group = first?.word;
+    const action = first && positional(args, first.next)?.word;
     const body =
       (group === 'issue' || group === 'pr') && action === 'comment'
         ? commentBody(args, simple, read)
@@ -222,16 +229,14 @@ export function commentBodies(line: string, read: ReadFile): Text[] {
 
 /** The repository settings' owners for a command run in `cwd`: the nearest folder up that has them; none outside a client. */
 export function ownersAround(sys: Sys, cwd: string): string[] {
-  for (let dir = cwd; ; dir = dir.replace(/\/[^/]*$/, '')) {
-    if (hasSettings(sys, dir)) {
-      try {
-        return loadSettings(sys, dir).owners;
-      } catch {
-        return [];
-      }
+  if (hasSettings(sys, cwd)) {
+    try {
+      return loadSettings(sys, cwd).owners;
+    } catch {
+      return [];
     }
-    if (!dir.includes('/') || dir === '') return [];
   }
+  return cwd.includes('/') ? ownersAround(sys, cwd.slice(0, cwd.lastIndexOf('/'))) : [];
 }
 
 /**
@@ -244,10 +249,10 @@ export function commentProblem(sys: Sys, line: string, cwd: string): string | un
     const full = path.startsWith('/') ? path : path.startsWith('~/') ? `${sys.home}${path.slice(1)}` : `${cwd}/${path}`;
     return sys.exists(full) ? sys.read(full) : undefined;
   };
-  const bodies = commentBodies(line, read);
-  if (bodies.length === 0) return undefined;
-  const owners = ownersAround(sys, cwd);
-  for (const body of bodies) {
+  // The settings are read only for a command that posts a comment, and once.
+  let owners: string[] | undefined;
+  for (const body of commentBodies(line, read)) {
+    owners ??= ownersAround(sys, cwd);
     const problem = askProblem(body, owners);
     if (problem) return problem;
   }
@@ -271,28 +276,34 @@ interface Reaction {
   created_at: string;
 }
 
-/** Every page of a list GitHub returns; none on 404 when `missing` allows it. */
-async function every<T>(sys: Sys, token: string, url: string, missing = false): Promise<T[]> {
-  const items: T[] = [];
-  for (let page = 1; ; page++) {
-    const { status, json } = await sys.http(`${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`, { token });
-    if (status === 404 && missing) return items;
-    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot read ${url.replace(API, '')} (HTTP ${status})`);
-    items.push(...(json as T[]));
-    if (json.length < 100) return items;
-  }
+/** Page `page` of a list GitHub returns, 100 a page. */
+const listPage = (url: string, page: number): string => `${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`;
+
+/** Every page of a list GitHub returns, from page `page` on, that page's reply `read` when it is already read. */
+async function every<T>(sys: Sys, token: string, url: string, page = 1, read?: HttpResult): Promise<T[]> {
+  const { status, json } = read ?? (await sys.http(listPage(url, page), { token }));
+  if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot read ${url.replace(API, '')} (HTTP ${status})`);
+  return json.length < 100 ? (json as T[]) : [...(json as T[]), ...(await every<T>(sys, token, url, page + 1))];
 }
+
+/** Every page of a list GitHub returns, or undefined where it cannot find the list. */
+async function everyFound<T>(sys: Sys, token: string, url: string): Promise<T[] | undefined> {
+  const first = await sys.http(listPage(url, 1), { token });
+  return first.status === 404 ? undefined : every<T>(sys, token, url, 1, first);
+}
+
+/** The later of two ISO 8601 times. */
+const later = (a: string, b: string): string => [a, b].sort().reverse()[0] as string;
 
 async function addLabel(sys: Sys, token: string, slug: string, number: number): Promise<void> {
   const added = await sys.http(`${API}/repos/${slug}/issues/${number}/labels`, { method: 'POST', token, body: { labels: [NEEDS_OWNER] } });
   if (added.status !== 200) throw new Error(`cannot label #${number} ${NEEDS_OWNER} (HTTP ${added.status})`);
 }
 
-/** Takes the label off; one already gone is fine. Whether it was on. */
-async function removeLabel(sys: Sys, token: string, slug: string, number: number): Promise<boolean> {
+/** Takes the label off; one already gone is fine. */
+async function removeLabel(sys: Sys, token: string, slug: string, number: number): Promise<void> {
   const removed = await sys.http(`${API}/repos/${slug}/issues/${number}/labels/${NEEDS_OWNER}`, { method: 'DELETE', token });
   if (removed.status !== 200 && removed.status !== 404) throw new Error(`cannot take ${NEEDS_OWNER} off #${number} (HTTP ${removed.status})`);
-  return removed.status === 200;
 }
 
 /** An ask the owner owes an answer on an issue, and the issue a batch answer names to answer it. */
@@ -312,16 +323,18 @@ interface Owed {
  * when it is a `Needs you:`, for the issue itself.
  */
 function owedOn(comments: Comment[], agents: string[], number: number): Owed[] {
-  const asks = comments.filter((comment) => anyLogin(agents, comment.user?.login ?? undefined) && opensAsk(comment.body ?? ''));
-  return asks.flatMap((ask, at): Owed[] => {
-    const body = ask.body ?? '';
-    if (opensAsk(body) === 'Proposal') return [{ ask, number: firstIssue(body.split(/\r?\n/, 1)[0] as string) ?? number, kind: 'Proposal', since: ask.created_at }];
-    return at === asks.length - 1 ? [{ ask, number, kind: 'Needs you', since: ask.created_at }] : [];
+  const asks = comments.flatMap((ask) => {
+    const kind = anyLogin(agents, ask.user?.login ?? undefined) ? opensAsk(ask.body) : undefined;
+    return kind ? [{ ask, kind, body: ask.body as string }] : [];
+  });
+  return asks.flatMap(({ ask, kind, body }, at): Owed[] => {
+    if (kind === 'Proposal') return [{ ask, number: firstIssue(body.split(/\r?\n/, 1)[0] as string) ?? number, kind, since: ask.created_at }];
+    return at === asks.length - 1 ? [{ ask, number, kind, since: ask.created_at }] : [];
   });
 }
 
-/** How the owner stands on an issue's asks: no agent asked there, every ask answered (and with what), or the asks still waiting. */
-type Standing = { asked: false } | { answer: string } | { waiting: Owed[] };
+/** How the owner stands on an issue's asks: every ask answered (and with what), or the asks still waiting; undefined where no agent asked. */
+type Standing = { answer: string } | { waiting: Owed[] } | undefined;
 
 /**
  * Whether the owner has answered every ask on issue `number` (see `owedOn`),
@@ -335,21 +348,22 @@ type Standing = { asked: false } | { answer: string } | { waiting: Owed[] };
  * No agent asked there leaves the label to whoever put it on, such as the
  * weekly job's undo issues.
  */
-async function answered(sys: Sys, token: string, slug: string, number: number, { owners, agents, approvals }: Settings, batch: () => Promise<Comment[]>): Promise<Standing> {
+async function answered(sys: Sys, token: string, slug: string, number: number, { owners, agents, approvals }: Settings, batch: () => Promise<Comment[] | undefined>): Promise<Standing> {
   const comments = await every<Comment>(sys, token, `${API}/repos/${slug}/issues/${number}/comments`);
   const owed = owedOn(comments, agents, number);
-  if (owed.length === 0) return { asked: false };
+  if (owed.length === 0) return undefined;
   // The issue's own timeline says when it was last added to a parent: read only for a proposal for the issue itself,
   // and none where GitHub cannot find it.
-  if (owed.some((one) => one.kind === 'Proposal' && one.number === number)) {
-    const timeline = await every<{ event?: string; created_at?: string }>(sys, token, `${API}/repos/${slug}/issues/${number}/timeline`, true);
-    const added = timeline.flatMap((event) => (event.event === 'parent_issue_added' && event.created_at ? [event.created_at] : [])).sort().at(-1);
-    for (const one of owed) if (added && one.kind === 'Proposal' && one.number === number && added > one.since) one.since = added;
+  const additions = owed.filter((one) => one.kind === 'Proposal' && one.number === number);
+  if (additions.length > 0) {
+    const timeline = await everyFound<{ event?: string; created_at?: string }>(sys, token, `${API}/repos/${slug}/issues/${number}/timeline`);
+    const added = timeline?.flatMap((event) => (event.event === 'parent_issue_added' && event.created_at ? [event.created_at] : [])).sort().at(-1);
+    if (added) for (const one of additions) one.since = later(one.since, added);
   }
   const earliest = owed.map(({ ask }) => ask.created_at).sort()[0] as string;
-  const decisions = comments.filter((comment) => comment.created_at > earliest && anyLogin(owners, comment.user?.login ?? undefined) && opensDecision(comment.body ?? ''));
+  const decisions = comments.filter((comment) => comment.created_at > earliest && anyLogin(owners, comment.user?.login ?? undefined) && opensDecision(comment.body));
   // A Decision: someone other than an owner edited answers nothing.
-  const decided = decisions.length > 0 ? (await ownersAlone(sys, token, decisions, owners)).kept : [];
+  const decided = (await ownersAlone(sys, token, decisions, owners)).kept;
   const how = new Map<Owed, string>();
   for (const one of owed) {
     const { ask } = one;
@@ -357,18 +371,18 @@ async function answered(sys: Sys, token: string, slug: string, number: number, {
       how.set(one, 'a Decision: comment');
       continue;
     }
-    const edited = ask.updated_at && ask.updated_at > ask.created_at ? ask.updated_at : ask.created_at;
-    const since = edited > one.since ? edited : one.since;
+    // A 👍 counts after the ask's last edit.
+    const since = later(one.since, ask.updated_at ?? one.since);
     const reactions = await every<Reaction>(sys, token, `${API}/repos/${slug}/issues/comments/${ask.id}/reactions?content=%2B1`);
     if (reactions.some((reaction) => anyLogin(owners, reaction.user?.login ?? undefined) && reaction.created_at > since)) how.set(one, 'a 👍 on the ask');
   }
-  // The Approvals issue is read last, only for asks the issue itself has not answered.
+  // The Approvals issue is read last, only for asks the issue itself has not answered, and only where the settings name one.
   const open = owed.filter((one) => !how.has(one));
-  if (open.length > 0) {
-    const answers = await batch();
+  const answers = open.length > 0 && approvals !== undefined ? await batch() : undefined;
+  if (answers) {
     const named = open.map((one) => ({ one, batched: batchAnswers(answers, owners, one.number, one.since) }));
     const all = [...new Set(named.flatMap(({ batched }) => batched))];
-    const counted = all.length > 0 ? (await ownersAlone(sys, token, all, owners)).kept : [];
+    const counted = (await ownersAlone(sys, token, all, owners)).kept;
     for (const { one, batched } of named) {
       if (batched.some((answer) => counted.includes(answer))) how.set(one, `a "Decision: approve" on #${approvals}, the Approvals issue`);
     }
@@ -407,24 +421,26 @@ async function answeredSince(
   const approved = events.some((one) => one.event === 'labeled' && one.label?.name === 'approved' && owner(one.actor?.login ?? undefined) && (one.created_at ?? '') > ask.created_at);
   if (approved) return 'their approved label';
   const comments = await every<Comment>(sys, token, `${API}/repos/${slug}/issues/${number}/comments?since=${encodeURIComponent(ask.created_at)}`);
-  const decisions = comments.filter((comment) => comment.created_at > ask.created_at && owner(comment.user?.login ?? undefined) && opensDecision(comment.body ?? ''));
-  if (decisions.length > 0 && (await ownersAlone(sys, token, decisions, owners)).kept.length > 0) return 'a Decision: comment';
+  const decisions = comments.filter((comment) => comment.created_at > ask.created_at && owner(comment.user?.login ?? undefined) && opensDecision(comment.body));
+  if ((await ownersAlone(sys, token, decisions, owners)).kept.length > 0) return 'a Decision: comment';
   const reactions = await every<Reaction>(sys, token, `${API}/repos/${slug}/issues/comments/${ask.id}/reactions?content=%2B1`);
   if (reactions.some((reaction) => owner(reaction.user?.login ?? undefined) && reaction.created_at > ask.created_at)) return 'a 👍 on the ask';
   // The Approvals issue is read last, only when the issue itself has no answer, and none where GitHub cannot find it.
   if (approvals === undefined) return undefined;
-  const answers = batchAnswers(await every<Comment>(sys, token, `${API}/repos/${slug}/issues/${approvals}/comments?since=${encodeURIComponent(ask.created_at)}`, true), owners, ask.names, ask.created_at);
-  return answers.length > 0 && (await ownersAlone(sys, token, answers, owners)).kept.length > 0 ? `a "Decision: approve" on #${approvals}, the Approvals issue` : undefined;
+  const listed = await everyFound<Comment>(sys, token, `${API}/repos/${slug}/issues/${approvals}/comments?since=${encodeURIComponent(ask.created_at)}`);
+  if (!listed) return undefined;
+  const answers = batchAnswers(listed, owners, ask.names, ask.created_at);
+  return (await ownersAlone(sys, token, answers, owners)).kept.length > 0 ? `a "Decision: approve" on #${approvals}, the Approvals issue` : undefined;
 }
 
-/** Where the owner answers ask `ask` on issue `number`: the comment's own address, else the issue's. */
-function askUrl(slug: string, number: number, ask: { html_url?: string | undefined } | undefined): string {
-  return ask?.html_url?.startsWith('https://') ? ask.html_url : `${GITHUB_WEB}/${slug}/issues/${number}`;
+/** Where the owner answers an ask on issue `number`: the comment's own address, `url`, else the issue's. */
+function askUrl(slug: string, number: number, url: string | undefined): string {
+  return url?.startsWith('https://') ? url : `${GITHUB_WEB}/${slug}/issues/${number}`;
 }
 
 /** The asks still waiting on issue `issue`, as the sweep names them, each by the address the owner answers it at. */
 function waitingOn(slug: string, issue: number, waiting: Owed[]): string {
-  return waiting.map(({ kind, number, ask }) => `${kind === 'Proposal' ? `the proposal for #${number}` : 'the Needs you: ask'}, ${askUrl(slug, issue, ask)}`).join('; ');
+  return waiting.map(({ kind, number, ask }) => `${kind === 'Proposal' ? `the proposal for #${number}` : 'the Needs you: ask'}, ${askUrl(slug, issue, ask.html_url)}`).join('; ');
 }
 
 /**
@@ -436,26 +452,28 @@ function waitingOn(slug: string, issue: number, waiting: Owed[]): string {
  * closed one waits on no one, and the owner's 👍 sends no event, so a slice
  * 👍'd and closed by its merge before a sweep would keep it (#639).
  */
-async function sweep(sys: Sys, token: string, slug: string, settings: Settings, io: Output, posted?: Comment, named: readonly number[] = []): Promise<void> {
+async function sweep(sys: Sys, token: string, slug: string, settings: Settings, io: Output, posted?: Comment, named?: readonly number[]): Promise<void> {
   const waiting = await every<{ number: number }>(sys, token, `${API}/repos/${slug}/issues?state=open&labels=${NEEDS_OWNER}`);
-  // The Approvals issue's comments, read once a sweep and only when an issue's own comments have not answered it.
-  let approvals: Comment[] | undefined;
-  const batch = async (): Promise<Comment[]> => {
-    if (settings.approvals === undefined) return [];
-    approvals ??= await every<Comment>(sys, token, `${API}/repos/${slug}/issues/${settings.approvals}/comments`, true);
-    if (posted && !approvals.some((comment) => comment.id === posted.id)) approvals.push(posted);
+  // The Approvals issue's comments, read once a sweep and only when an issue's own comments have not answered it,
+  // with the event's answer where they do not list it yet, as where GitHub cannot find the issue.
+  let approvals: Promise<Comment[] | undefined> | undefined;
+  const batch = (): Promise<Comment[] | undefined> => {
+    approvals ??= everyFound<Comment>(sys, token, `${API}/repos/${slug}/issues/${settings.approvals}/comments`).then((listed) => {
+      if (!posted || listed?.some((comment) => comment.id === posted.id)) return listed;
+      return listed ? [...listed, posted] : [posted];
+    });
     return approvals;
   };
   let cleared = 0;
   for (const { number } of waiting) {
     const standing = await answered(sys, token, slug, number, settings, batch);
-    if ('waiting' in standing) {
+    if (standing && 'waiting' in standing) {
       io.out(`#${number}: waits on the owner (${waitingOn(slug, number, standing.waiting)})`);
-    } else if ('answer' in standing) {
+    } else if (standing) {
       await removeLabel(sys, token, slug, number);
       cleared++;
       io.out(`#${number}: the owner answered with ${standing.answer}; ${NEEDS_OWNER} taken off`);
-    } else if (named.includes(number)) {
+    } else if (named?.includes(number)) {
       await removeLabel(sys, token, slug, number);
       cleared++;
       io.out(`#${number}: no agent asked there, and the owner's batch answer names it; ${NEEDS_OWNER} taken off`);
@@ -477,10 +495,8 @@ async function sweep(sys: Sys, token: string, slug: string, settings: Settings, 
  * counts, and no `approved` label of theirs since the latest waiting ask.
  */
 async function reopened(sys: Sys, token: string, slug: string, issue: number, settings: Settings, io: Output): Promise<void> {
-  const standing = await answered(sys, token, slug, issue, settings, async () =>
-    settings.approvals === undefined ? [] : every<Comment>(sys, token, `${API}/repos/${slug}/issues/${settings.approvals}/comments`, true),
-  );
-  if (!('waiting' in standing)) {
+  const standing = await answered(sys, token, slug, issue, settings, () => everyFound<Comment>(sys, token, `${API}/repos/${slug}/issues/${settings.approvals}/comments`));
+  if (!standing || !('waiting' in standing)) {
     io.out(`needs-owner: #${issue} was reopened, and nothing on it waits on the owner; not labelled ${NEEDS_OWNER}`);
     return;
   }
@@ -533,16 +549,16 @@ export async function needsOwner(sys: Sys, io: Output): Promise<number> {
   // A review comment's event names its pull request rather than an issue; GitHub labels both alike.
   const target = event.issue ?? (name === 'pull_request_review_comment' ? event.pull_request : undefined);
   const issue = target?.number;
-  const labelled = (target?.labels ?? []).some((label) => label.name === NEEDS_OWNER);
+  const labelled = target?.labels?.some((label) => label.name === NEEDS_OWNER) === true;
   if ((name === 'issue_comment' || name === 'pull_request_review_comment') && issue !== undefined) {
     const author = event.comment?.user?.login ?? undefined;
-    const body = event.comment?.body ?? '';
+    const body = event.comment?.body;
     const kind = opensAsk(body);
     if (event.action === 'created' && anyLogin(settings.agents, author) && kind) {
       // The owner may answer while this run is still going: read their answer before labelling, and again after,
       // since their approval's run takes off only a label its event shows. An issue's comment alone is read, by its id and time.
-      const { id, created_at } = event.comment ?? {};
-      const names = kind === 'Proposal' ? (firstIssue(body.split(/\r?\n/, 1)[0] as string) ?? issue) : issue;
+      const { id, created_at, html_url } = event.comment ?? {};
+      const names = kind === 'Proposal' ? (firstIssue((body as string).split(/\r?\n/, 1)[0] as string) ?? issue) : issue;
       const ask = !labelled && name === 'issue_comment' && id !== undefined && created_at ? { id, created_at, names } : undefined;
       const before = ask ? await answeredSince(sys, token, slug, issue, ask, settings) : undefined;
       if (before) {
@@ -556,15 +572,16 @@ export async function needsOwner(sys: Sys, io: Output): Promise<number> {
         io.out(`needs-owner: #${issue} asks the owner (${kind}:), and the owner answered with ${after} as it was labelled; ${NEEDS_OWNER} taken off`);
         return 0;
       }
-      io.out(`needs-owner: #${issue} asks the owner (${kind}:) at ${askUrl(slug, issue, event.comment)}; labelled ${NEEDS_OWNER}`);
+      io.out(`needs-owner: #${issue} asks the owner (${kind}:) at ${askUrl(slug, issue, html_url)}; labelled ${NEEDS_OWNER}`);
       return 0;
     }
     // The owner's batch answer on the Approvals issue names a proposal's own issue, such as a dropped State, not
     // always the issue it waits on, so each labelled issue is judged by its asks, this answer counted.
-    const batch = issue === settings.approvals && event.action === 'created' && anyLogin(settings.owners, author) ? approvedIn(body) : [];
+    const batch = issue === settings.approvals && event.action === 'created' && anyLogin(settings.owners, author) && body ? approvedIn(body) : [];
     if (batch.length > 0) {
       const { id, node_id, user, created_at, updated_at } = event.comment ?? {};
-      const posted = id !== undefined && created_at ? { id, created_at, body, user: user ?? null, ...(node_id ? { node_id } : {}), ...(updated_at ? { updated_at } : {}) } : undefined;
+      // A batch answer has a body, which names the issues it approves.
+      const posted = id !== undefined && created_at ? { id, created_at, body: body as string, user: user ?? null, ...(node_id ? { node_id } : {}), ...(updated_at ? { updated_at } : {}) } : undefined;
       io.out(`needs-owner: the owner approved ${batch.map((number) => `#${number}`).join(', ')} on #${issue}, the Approvals issue; judging each issue labelled ${NEEDS_OWNER}`);
       await sweep(sys, token, slug, settings, io, posted, batch);
       return 0;
