@@ -33,6 +33,7 @@ describe('dismissSettings', () => {
   it('fills the defaults, and reads what is named', () => {
     assert.deepEqual(dismissSettings({}), { file: '.cubic-dismiss', subject: 'chore(review): dismiss {count} Cubic finding{s}', ownerBasis: 'owner' });
     assert.deepEqual(dismissSettings(null).file, '.cubic-dismiss');
+    assert.deepEqual(dismissSettings(undefined).file, '.cubic-dismiss');
     assert.deepEqual(dismissSettings({ cubicDismiss: { file: 'review/.dismiss', subject: '🔧 chore(review): dismiss {count}', ownerBasis: 'alok' } }), {
       file: 'review/.dismiss',
       subject: '🔧 chore(review): dismiss {count}',
@@ -40,17 +41,28 @@ describe('dismissSettings', () => {
     });
   });
 
+  it('names the setting it refuses', () => {
+    assert.throws(() => dismissSettings({ cubicDismiss: [] }), { message: '.github/niyam.json: "cubicDismiss" must be an object' });
+  });
+
   for (const [value, message] of [
     [[], /must be an object/],
     [null, /must be an object/],
+    ['x', /must be an object/],
     [{ files: 'x' }, /unknown key "files"/],
     [{ file: '../x' }, /file must be a path in the repository/],
     [{ file: '/x' }, /file must be a path/],
     [{ file: 3 }, /file must be a path/],
+    [{ file: 'a b' }, /file must be a path/],
+    [{ file: 'a/./b' }, /file must be a path/],
+    [{ file: 'a/..' }, /file must be a path/],
     [{ subject: 'a\nb' }, /subject must be one line/],
     [{ subject: ' ' }, /subject must be one line/],
+    [{ subject: 3 }, /subject must be one line/],
     [{ ownerBasis: 'evidence' }, /ownerBasis must be one lower-case word/],
     [{ ownerBasis: 'Alok' }, /ownerBasis must be one lower-case word/],
+    [{ ownerBasis: 'alok bansal' }, /ownerBasis must be one lower-case word/],
+    [{ ownerBasis: ['alok'] }, /ownerBasis must be one lower-case word/],
   ] as const) {
     it(`refuses ${JSON.stringify(value)}`, () => assert.throws(() => dismissSettings({ cubicDismiss: value }), message));
   }
@@ -72,6 +84,11 @@ describe('dismissArgs', () => {
     [['--title', 'A', '--reason', 'r'], /give exactly one of --evidence or --decision/],
     [['--evidence', 'x', '--decision', 'y', '--title', 'A', '--reason', 'r'], /exactly one/],
     [['--evidence', ' ', '--title', 'A', '--reason', 'r'], /--evidence is blank/],
+    [['--decision', ' ', '--title', 'A', '--reason', 'r'], /--decision is blank/],
+    [['--decision', 'x\ny', '--title', 'A', '--reason', 'r'], /--decision spans lines/],
+    [['--title'], /--title needs a value/],
+    [['--evidence', 'x', 'stray=1'], /unexpected argument "stray=1"/],
+    [['--evidence', 'x', '=1'], /unexpected argument "=1"/],
     [['--evidence', 'x', '--evidence', 'y'], /--evidence is given twice/],
     [['--evidence', 'x\ny', '--title', 'A', '--reason', 'r'], /--evidence spans lines/],
     [['--decision', 'x', '--context', 'a\nb', '--title', 'A', '--reason', 'r'], /--context spans lines/],
@@ -82,6 +99,17 @@ describe('dismissArgs', () => {
   ] as const) {
     it(`refuses ${JSON.stringify(args)}`, () => assert.throws(() => dismissArgs(args), message));
   }
+
+  it('gives the usage with a missing basis or nothing to dismiss', () => {
+    const usage = 'cubic-dismiss (--evidence <what proves it wrong> | --decision <where the owner chose>) ((--title <exact title> --reason <why>)... | --from <file.json>) [--context <work id>]';
+    assert.throws(() => dismissArgs(['--title', 'A', '--reason', 'r']), { message: `give exactly one of --evidence or --decision: ${usage}` });
+    assert.throws(() => dismissArgs(['--evidence', 'x']), { message: `nothing to dismiss: ${usage}` });
+  });
+
+  it('takes a value with an = in it, after the flag or as the next word', () => {
+    assert.deepEqual(dismissArgs(['--decision=a=b', '--title', 'x=y', '--reason=r=s']).titles, [{ title: 'x=y', reason: 'r=s' }]);
+    assert.equal(dismissArgs(['--decision=a=b', '--title', 'x=y', '--reason=r=s']).cite, 'a=b');
+  });
 });
 
 describe('parseFrom and parseDismissals', () => {
@@ -90,11 +118,13 @@ describe('parseFrom and parseDismissals', () => {
     assert.throws(() => parseFrom('{'), /it is not JSON/);
     assert.throws(() => parseFrom('[{"title":1,"reason":"r"}]'), /JSON array of/);
     assert.throws(() => parseFrom('[null]'), /JSON array of/);
+    assert.throws(() => parseFrom('[{"title":"t","reason":1}]'), /JSON array of/);
     assert.throws(() => parseFrom('{}'), /JSON array of/);
   });
 
   it('reads every line that is neither blank nor a comment', () => {
     assert.deepEqual([...parseDismissals('# c\r\nA\r\n\nB\n')], ['A', 'B']);
+    assert.deepEqual([...parseDismissals('a\rb\n')], ['a\rb'], 'only a line-ending carriage return goes');
   });
 });
 
@@ -107,6 +137,8 @@ describe('refusal', () => {
     ['a title already dismissed', 'Old', 'r', {}, '"Old" is already dismissed'],
     ['a deferral in the reason', 'T', 'pre-existing on main', {}, /says "pre-existing": a true finding left unfixed is the owner's call; use --decision/],
     ['a deferral in the context', 'T', 'r', { context: 'a follow-up' }, /says "follow-up"/],
+    ['a deferral spelled as one word', 'T', 'preexisting', {}, /says "preexisting"/],
+    ['a follow-up spelled as one word', 'T', 'a followup', {}, /says "followup"/],
   ] as const) {
     it(`refuses ${name}`, () => {
       const why = refusal({ title, reason }, new Set(['Old']), options(over));
@@ -118,6 +150,8 @@ describe('refusal', () => {
   it('lets the owner defer, and the title say anything', () => {
     assert.equal(refusal({ title: 'T', reason: 'later' }, new Set(), options({ basis: 'decision', cite: '#12' })), null);
     assert.equal(refusal({ title: 'Pre-existing bug', reason: 'the code is gone' }, new Set(), options()), null);
+    // The reason and the evidence are read apart: words that run across them say nothing.
+    assert.equal(refusal({ title: 'T', reason: 'see pre' }, new Set(), options({ cite: 'existing.ts' })), null);
   });
 });
 
@@ -133,7 +167,32 @@ describe('resolves', () => {
     assert.equal(resolves('docs/rule.md#why', new Set(), tree), true);
     assert.equal(resolves('.github/x.yml:12-14', new Set(), tree), true);
     assert.equal(resolves('docs/gone.md', new Set(), tree), false);
-    for (const path of ['/etc/x', '../x', 'a//b', '-x', 'HEAD:x', 'a/./b']) assert.equal(resolves(path, new Set(), tree), false, path);
+    // Refused before git is asked: git here would list each.
+    const bad = ['/etc/x', '../x', 'a//b', '-x', 'HEAD:x', 'a/./b', 'a/../b', 'a/-b'];
+    const everything = git(Object.fromEntries(bad.map((path) => [`ls-tree --full-tree --name-only HEAD -- ${path}`, path])));
+    for (const path of bad) assert.equal(resolves(path, new Set(), everything), false, path);
+  });
+
+  it('reads a hex word as a commit only when it is all hex: 40 digits a full id, 7 to 39 an abbreviation', () => {
+    // git has every name as a commit HEAD does not contain, and as a path at HEAD.
+    const listed = (cite: string) =>
+      git({ [`rev-list --no-walk --ignore-missing ${cite}`]: cite, [`rev-list -n 1 ${cite} ^HEAD`]: cite, [`ls-tree --full-tree --name-only HEAD -- ${cite}`]: cite });
+    for (const cite of [`x${SHA}`, `${SHA}x`]) assert.equal(resolves(cite, new Set(), listed(cite)), true, `${cite} is a path at HEAD`);
+    // A path at HEAD named by 7 to 39 hex digits is still not taken.
+    assert.equal(resolves('abc1234', new Set(), listed('abc1234')), false);
+    for (const cite of ['abc1234.md', 'docs/abc1234', 'zyxwvut']) assert.equal(resolves(cite, new Set(), listed(cite)), true, cite);
+  });
+
+  it('reads git output with its newline trimmed', () => {
+    assert.equal(resolves(SHA, new Set(), git({ [`rev-list --no-walk --ignore-missing ${SHA}`]: '\n' })), false, 'a commit git does not have');
+    assert.equal(resolves(SHA, new Set(), git({ [`rev-list --no-walk --ignore-missing ${SHA}`]: `${SHA}\n`, [`rev-list -n 1 ${SHA} ^HEAD`]: '\n' })), true, 'HEAD contains it');
+    assert.equal(resolves('docs/x.md', new Set(), git({ 'ls-tree --full-tree --name-only HEAD -- docs/x.md': '\n' })), false, 'no such path');
+  });
+
+  it('drops a line or line range only at the end', () => {
+    const tree = git({ 'ls-tree --full-tree --name-only HEAD -- docs/a/b.md': 'docs/a/b.md', 'ls-tree --full-tree --name-only HEAD -- .github/x.yml': '.github/x.yml' });
+    assert.equal(resolves('docs/a:1/b.md', new Set(), tree), false);
+    assert.equal(resolves('.github/x.yml:12', new Set(), tree), true);
   });
 });
 
@@ -144,6 +203,11 @@ describe('formatEntry and commitMessage', () => {
     assert.ok(lines.slice(0, -1).every((line) => line.length <= 78 && line.startsWith('#')));
     assert.equal(lines.at(-1), 'T');
     assert.deepEqual(formatEntry({ title: 'T', reason: 'r' }, 'd', options({ basis: 'decision', cite: '#12' })), ['# d (#12): r', 'T']);
+    assert.deepEqual(formatEntry({ title: 'T', reason: ' r\t s ' }, 'd', options({ basis: 'decision', cite: '#12' })), ['# d (#12): r s', 'T'], 'words, whatever the spaces');
+    // A line of exactly 78 columns stays one line.
+    const full = formatEntry({ title: 'T', reason: 'x'.repeat(67) }, 'd', options({ basis: 'decision', cite: '#12' }));
+    assert.deepEqual(full, [`# d (#12): ${'x'.repeat(67)}`, 'T']);
+    assert.equal(full[0]?.length, 78);
   });
 
   it('counts the findings, lists twelve, clips long lines and names the basis', () => {
@@ -152,8 +216,11 @@ describe('formatEntry and commitMessage', () => {
     const message = commitMessage(options({ dismissals: many }), settings);
     assert.equal(message.subject, '🔧 chore(review): dismiss 13 Cubic findings');
     assert.equal(message.body.split('\n').length, 13);
-    assert.ok(message.body.split('\n')[1]?.endsWith('...'));
+    assert.equal(message.body.split('\n')[1], `- ${'x'.repeat(93)}...`);
+    assert.equal(message.body.split('\n')[0], 'Evidence: src/a.ts');
     assert.equal(message.trailer, 'Dismissal-Basis: evidence');
+    const ninetySix = 'y'.repeat(96);
+    assert.equal(commitMessage(options({ dismissals: [{ title: ninetySix, reason: 'r' }] }), settings).body, `Evidence: src/a.ts\n- ${ninetySix}`, '96 columns are not clipped');
     const one = commitMessage(options({ basis: 'decision', cite: '#12' }), settings);
     assert.deepEqual(one, { subject: '🔧 chore(review): dismiss 1 Cubic finding', body: 'Decision: #12\n- T', trailer: 'Dismissal-Basis: alok' });
   });
@@ -214,6 +281,28 @@ describe('cubicDismiss', () => {
     const decided = run(sys, ['--decision', 'the owner on #12', '--title', 'Later', '--reason', 'later']);
     assert.equal(decided.code, 0);
     assert.equal(world.commits[1]?.at(-3), 'Dismissal-Basis: alok');
+  });
+
+  it("dates the entry by the local day, padded, and prints nothing for hooks that printed nothing, reading back HEAD's file", () => {
+    const { sys, world } = checkout();
+    sys.now = () => new Date(2026, 0, 5, 12);
+    const real = sys.execOverride;
+    sys.execOverride = (call) => (call.command === 'git' && call.args[0] === 'commit' ? (real(call), { code: 0, stdout: '', stderr: '' }) : real(call));
+    const done = run(sys, evidence);
+    assert.deepEqual([done.code, done.out], [0, ['✓ committed 1 dismissal(s) alone']]);
+    assert.match(world.head, /\n# 2026-01-05 \(evidence: src\/a.ts\): the null check is on line 3\nNew finding\n$/);
+    assert.ok(sys.calls.some((c) => c.command === 'git' && c.args.join(' ') === 'show HEAD:.cubic-dismiss'));
+  });
+
+  it("names git's own words when a call fails, or its exit code when it says none", () => {
+    for (const [stderr, message] of [
+      ['fatal: not a git repository\n', 'git rev-parse failed: fatal: not a git repository'],
+      ['', 'git rev-parse failed: exit 128'],
+    ] as const) {
+      const { sys } = checkout();
+      sys.execOverride = (call) => (call.command === 'git' ? { code: 128, stdout: '', stderr } : undefined);
+      assert.throws(() => cubicDismiss(sys, capture().io, evidence), { message });
+    }
   });
 
   it('starts a file that is not there, and ends one with no last newline first', () => {
