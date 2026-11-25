@@ -505,8 +505,10 @@ describe('sessionStart', () => {
       const looked: string[] = [];
       const reads = outside.read.bind(outside);
       outside.read = (path) => (looked.push(path), reads(path));
+      const has = outside.exists.bind(outside);
+      outside.exists = (path) => (looked.push(path), has(path));
       assert.equal((await start(outside)).out.length, 1);
-      assert.deepEqual(looked.filter((path) => path.endsWith(WORKFLOW_PATH)), [], 'outside a repository it looks for no workflow');
+      assert.deepEqual(looked.filter((path) => path.endsWith(WORKFLOW_PATH) || path.endsWith(CLOUD_SETUP_PATH)), [], 'outside a repository it looks for no workflow or cloud setup file');
     });
 
     it("asks with a token the cloud environment set", async () => {
