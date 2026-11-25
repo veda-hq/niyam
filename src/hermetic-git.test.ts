@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { hermeticGitEnv, maskProcessGitEnv, removeFixtureRoot } from './hermetic-git.ts';
@@ -45,6 +45,12 @@ describe('removeFixtureRoot', () => {
     } finally {
       removeFixtureRoot(base);
     }
+  });
+
+  it('removes a folder under a root that is the filesystem root', () => {
+    const made = mkdtempSync(join(tmpdir(), 'niyam-under-root-'));
+    removeFixtureRoot(made, sep);
+    assert.equal(existsSync(made), false);
   });
 
   it('follows links before it judges', () => {

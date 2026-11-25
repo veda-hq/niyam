@@ -9,7 +9,10 @@ import { sep } from 'node:path';
  */
 export function removeFixtureRoot(path: string, root: string = tmpdir()): void {
   if (!existsSync(path)) return;
-  if (!realpathSync(path).startsWith(realpathSync(root) + sep)) throw new Error(`refusing to remove ${path}: it is not inside ${root}`);
+  const base = realpathSync(root);
+  // A filesystem root already ends in the separator.
+  const inside = base.endsWith(sep) ? base : base + sep;
+  if (!realpathSync(path).startsWith(inside)) throw new Error(`refusing to remove ${path}: it is not inside ${root}`);
   rmSync(path, { recursive: true });
 }
 
