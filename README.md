@@ -1889,7 +1889,7 @@ commit. `upgrade` asks with no token; `onboard` asks with the agent's. Install t
 once; nothing is built on install:
 
 ```bash
-pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.7.19/veda-hq-niyam-0.7.19.tgz
+pnpm add -g https://github.com/veda-hq/niyam/releases/download/v0.7.20/veda-hq-niyam-0.7.20.tgz
 ```
 
 The package puts one command on `PATH`, `niyam`. Since P-57 a release
