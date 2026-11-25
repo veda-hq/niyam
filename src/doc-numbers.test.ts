@@ -16,6 +16,7 @@ import {
   detail,
   wholeNumber,
   basenamesOnRef,
+  gitOut,
   docNumber,
   docNumberArgs,
   docSettings,
@@ -130,6 +131,46 @@ describe('docSettings', () => {
   }
 
   it('refuses settings that are not an object', () => assert.throws(() => docSettings(null), /"docNumbers" must be an object/));
+
+  const AT = '.github/niyam.json: "docNumbers"';
+  const ADR_AT = `${AT}.kinds.adr`;
+  const WORK_AT = `${AT}.workItems`;
+  for (const [change, message] of [
+    [{ kinds: { adr: { ...RAW.kinds.adr, extra: 1 } } }, `${ADR_AT} has an unknown key "extra"; it takes "dir", "citation", "frontmatterKey", "relationships"`],
+    [{ kinds: { adr: { ...RAW.kinds.adr, citation: 'xADR' } } }, `${ADR_AT}.citation must be one line of text`],
+    [{ kinds: { adr: { ...RAW.kinds.adr, citation: 'AD1' } } }, `${ADR_AT}.citation must be one line of text`],
+    [{ kinds: { adr: { ...RAW.kinds.adr, relationships: [] } } }, `${ADR_AT}.relationships must be an object`],
+    [{ kinds: { adr: { ...RAW.kinds.adr, relationships: { '../x': ['k'] } } } }, `${ADR_AT}.relationships key must be a path in the repository`],
+    [{ kinds: { adr: { ...RAW.kinds.adr, relationships: { 'docs/adr': 'supersedes' } } } }, `${ADR_AT}.relationships.docs/adr must be a list`],
+    [{ kinds: { adr: { ...RAW.kinds.adr, frontmatterKey: 'a-b' } } }, `${ADR_AT}.frontmatterKey must be one line of text`],
+    [{ kinds: { Aadr: RAW.kinds.adr } }, `${AT}.kinds: "Aadr" must be a lower-case word`],
+    [{ kinds: { adR: RAW.kinds.adr } }, `${AT}.kinds: "adR" must be a lower-case word`],
+    [{ workItems: { ...RAW.workItems, kind: 3 } }, `${WORK_AT}.kind must be one line of text`],
+    [{ workItems: { ...RAW.workItems, issueType: '  ' } }, `${WORK_AT}.issueType must be one line of text`],
+    [{ workItems: { ...RAW.workItems, label: 3 } }, `${WORK_AT}.label must be one line of text`],
+    [{ workItems: { ...RAW.workItems, reserveCommand: 3 } }, `${WORK_AT}.reserveCommand must be one line of text`],
+    [{ workItems: { ...RAW.workItems, lastMovedIssue: '20' } }, `${WORK_AT}.lastMovedIssue must be an issue number`],
+    [{ workItems: { ...RAW.workItems, lastMovedIssue: 1.5 } }, `${WORK_AT}.lastMovedIssue must be an issue number`],
+    [{ workItems: { ...RAW.workItems, frozen: 'docs/work' } }, `${WORK_AT}.frozen must be an object`],
+    [{ workItems: { ...RAW.workItems, frozen: { dir: 'docs/work', entries: [], more: 1 } } }, `${WORK_AT}.frozen has an unknown key "more"; it takes "dir", "entries"`],
+    [{ workItems: { ...RAW.workItems, frozen: { dir: '../work', entries: [] } } }, `${WORK_AT}.frozen.dir must be a path in the repository`],
+    [{ workItems: { ...RAW.workItems, frozen: { dir: 'docs/work', entries: ['x0010-old'] } } }, `${WORK_AT}.frozen.entries[0] must be one line of text`],
+    [{ workItems: { ...RAW.workItems, frozen: { dir: 'docs/work', entries: ['0010-old!'] } } }, `${WORK_AT}.frozen.entries[0] must be one line of text`],
+    [{ reservations: 'xrefs/{kind}/' }, `${AT}.reservations must be a ref prefix under refs/ that names {kind} and ends in /`],
+    [{ reservations: 'refs/{kind}/x' }, `${AT}.reservations must be a ref prefix under refs/ that names {kind} and ends in /`],
+  ] as const) {
+    it(`says exactly why it refuses ${JSON.stringify(change)}`, () => assert.throws(() => docSettings({ ...RAW, ...change }), { message }));
+  }
+
+  it('refuses a folder or a history path that is not plainly in the repository', () => {
+    for (const dir of ['docs/a dr', 'docs/./adr', 'docs/..', 'docs/../adr']) assert.throws(() => docSettings({ ...RAW, kinds: { adr: { ...RAW.kinds.adr, dir } } }), { message: `${ADR_AT}.dir must be a path in the repository` }, dir);
+    for (const path of ['docs/a b', 'docs/../x', '../x', './x', 'docs/..']) assert.throws(() => docSettings({ ...RAW, history: [path] }), { message: `${AT}.history[0] must be one line of text` }, path);
+  });
+
+  it('keeps a Work item label and a first moved issue of 1', () => {
+    assert.equal(SETTINGS.workItems?.label, 'work-item');
+    assert.equal(docSettings({ ...RAW, workItems: { ...RAW.workItems, lastMovedIssue: 1 } }).workItems?.lastMovedIssue, 1);
+  });
 });
 
 describe('loadDocSettings', () => {
@@ -168,6 +209,9 @@ describe('names and numbers', () => {
     assert.equal(numberFromEntry('README.md'), null);
     assert.equal(numberFromName('docs/work/0110-y'), '0110');
     assert.equal(numberFromName('0110-y.md'), '0110');
+    assert.equal(numberFromFilename('0057-replay.md.bak'), null);
+    assert.equal(numberFromEntry('x0105-y'), null);
+    assert.equal(numberFromName('0110-y.txt'), null, 'a name with no slash is a document file name');
   });
 
   it('reads the work number a Work item title opens with, never a date or a citation', () => {
@@ -190,6 +234,9 @@ describe('names and numbers', () => {
     assert.deepEqual(frozenNumbers(SETTINGS, 'rfc'), ['0010', '0012']);
     assert.deepEqual(frozenNumbers(SETTINGS, 'adr'), []);
     assert.deepEqual(frozenNumbers(docSettings({ ...RAW, workItems: { kind: 'rfc', issueType: 'Work item' } }), 'rfc'), []);
+    assert.deepEqual(frozenEntries(docSettings({ reservations: RAW.reservations, kinds: RAW.kinds }), 'rfc'), [], 'no Work items, no frozen folders');
+    const unsorted = docSettings({ ...RAW, workItems: { ...RAW.workItems, frozen: { dir: 'docs/work', entries: ['0012-b', '0010-a'] } } });
+    assert.deepEqual(frozenNumbers(unsorted, 'rfc'), ['0010', '0012']);
   });
 });
 
@@ -201,6 +248,26 @@ describe('the trees', () => {
     assert.deepEqual(basenamesOnRef(sys, ADR, 'origin/main', dir), ['0001-a.md']);
     assert.equal(basenamesOnRef(sys, ADR, 'origin/nothing', dir), null);
     assert.deepEqual(localBasenames(sys, RFC, dir), []);
+  });
+
+  it('gives the names in order, whatever order the tree is read in', () => {
+    const sys: Sys = {
+      ...realSys(),
+      list: () => ['0002-b.md', '0001-a.md'],
+      exec: () => ({ code: 0, stdout: 'docs/adr/0002-b.md\ndocs/adr/0001-a.md\n', stderr: '' }),
+    };
+    assert.deepEqual(localBasenames(sys, ADR, '/repo'), ['0001-a.md', '0002-b.md']);
+    assert.deepEqual(basenamesOnRef(sys, ADR, 'origin/main', '/repo'), ['0001-a.md', '0002-b.md']);
+  });
+});
+
+describe('gitOut', () => {
+  it('runs git where it is told, and nowhere in particular when it is not', () => {
+    const seen: unknown[] = [];
+    const sys: Sys = { ...realSys(), exec: (_command, _args, options) => (seen.push(options), { code: 0, stdout: 'out', stderr: '' }) };
+    assert.equal(gitOut(sys, undefined, ['status']), 'out');
+    assert.equal(gitOut(sys, '/repo', ['status']), 'out');
+    assert.deepEqual(seen, [{}, { cwd: '/repo' }]);
   });
 });
 
@@ -221,6 +288,7 @@ describe('the schemas', () => {
   it('validate the Standard Schema way: the value, or the issue', () => {
     assert.deepEqual(WorkItemLineSchema['~standard'].validate({ number: 7, title: 't' }), { value: { number: 7, title: 't' } });
     assert.deepEqual(WorkItemLineSchema['~standard'].validate({ number: 7.5, title: 't' }), { issues: [{ message: 'not {number, title}' }] });
+    assert.deepEqual(WorkItemLineSchema['~standard'].validate({ number: 7, title: 8 }), { issues: [{ message: 'not {number, title}' }] });
     assert.deepEqual(PullListSchema['~standard'].validate({}), { issues: [{ message: '`gh pr list` returned an unexpected shape' }] });
     assert.equal(schema(Number)['~standard'].vendor, 'niyam');
   });
@@ -258,7 +326,7 @@ describe('prClaimedNumbers', () => {
   const claims = (pulls: unknown, main: string[] = [], more: Record<string, string | Error> = {}) => prClaimedNumbers(ADR, main, fakeGh({ [PR_LIST]: JSON.stringify(pulls), ...more }));
 
   it('counts a document a PR adds, not one it edits or anything outside the folder itself', () => {
-    const got = claims([pr(1, 'docs/adr/0060-new.md', 'docs/adr/0001-old.md', 'docs/adr/sub/0061-x.md', 'docs/adrs/0062-x.md', 'docs/adr/notes.md', 'src/0063-x.md')], ['0001-old.md']);
+    const got = claims([pr(1, 'docs/adr/0060-new.md', 'docs/adr/0001-old.md', 'docs/adr/sub/0061-x.md', 'docs/adrs/0062-x.md', 'docs/adr/notes.md', 'src/0063-x.md', 'notes/xy/0064-x.md')], ['0001-old.md']);
     assert.deepEqual([[...got.numbers], got.warnings], [['0060'], []]);
   });
 
@@ -304,7 +372,7 @@ describe('listWorkItems', () => {
   const work = SETTINGS.workItems as NonNullable<DocSettings['workItems']>;
   it('reads every Work item with one paged call, skipping blank lines', () => {
     const calls: string[][] = [];
-    const got = listWorkItems(work, fakeGh({ [ISSUES]: `${item(31, '0150 — a')}\n\n${item(32, 'no number')}\n` }, calls));
+    const got = listWorkItems(work, fakeGh({ [ISSUES]: `${item(31, '0150 — a')}\n  \n${item(32, 'no number')}\n` }, calls));
     assert.deepEqual(got, { items: [{ number: 31, title: '0150 — a', workNumber: '0150' }, { number: 32, title: 'no number', workNumber: null }], warnings: [] });
     assert.deepEqual(calls, [['api', '--paginate', 'repos/{owner}/{repo}/issues?state=all&type=Work%20item&per_page=100', '--jq', '.[] | select(.type.name == "Work item") | {number, title}']]);
   });
@@ -344,6 +412,28 @@ describe('reserveDocNumber', () => {
     assert.equal(reserveDocNumber(sys, dir, SETTINGS, ADR, { dryRun: true }), '0001');
   });
 
+  it("reads a folder whose name holds a pattern's characters as written", () => {
+    const dotted = docSettings({ ...RAW, kinds: { adr: { dir: 'docs/a.r', citation: 'ADR' } }, workItems: undefined });
+    const kind = dotted.kinds.adr as NonNullable<DocSettings['kinds']['adr']>;
+    const { dir, sys } = repo({ 'docs/a.r/0005-x.md': 'x' });
+    assert.equal(reserveDocNumber(sys, dir, dotted, kind, { dryRun: true }), '0006');
+  });
+
+  it("lists only the worktrees git names, each one's folder", () => {
+    const { dir, git, sys } = repo();
+    const linked = join(dir, '..', `${dir.split('/').at(-1) as string}-listed`);
+    git('worktree', 'add', '-q', linked);
+    const listed: string[] = [];
+    const watched: Sys = { ...sys, list: (path) => (listed.push(path), sys.list(path)) };
+    reserveDocNumber(watched, dir, SETTINGS, RFC, { dryRun: true });
+    assert.deepEqual(listed, [`${dir}/docs/rfcs`, `${realpathSync(linked)}/docs/rfcs`]);
+  });
+
+  it('hands out 9999, the last number', () => {
+    const { dir, sys } = repo();
+    assert.equal(reserveDocNumber(sys, dir, SETTINGS, ADR, { dryRun: true, alsoTaken: [9998] }), '9999');
+  });
+
   it('claims a number for good, so the next claim goes past it, and a preview claims nothing', () => {
     const { dir, git, sys } = repo({ 'docs/adr/0003-a.md': 'a' });
     assert.equal(reserveDocNumber(sys, dir, SETTINGS, ADR), '0004');
@@ -364,17 +454,20 @@ describe('reserveDocNumber', () => {
   it('passes a number a competitor took meanwhile, silently', () => {
     const { dir, sys } = repo();
     const real = realSys();
+    const checks: (readonly string[])[] = [];
     const racing: Sys = {
       ...sys,
       exec: (command, args, options) => {
         // The competitor wins 0001 between the scan and the claim.
         if (args.includes('update-ref') && args.includes('refs/example/adr-reservations/0001')) real.exec('git', ['update-ref', 'refs/example/adr-reservations/0001', 'HEAD'], { cwd: dir });
+        if (args[0] === 'show-ref') checks.push(args);
         return real.exec(command, args, options);
       },
     };
     const warned: string[] = [];
     assert.equal(reserveDocNumber(racing, dir, SETTINGS, ADR, { warn: (line) => warned.push(line) }), '0002');
     assert.deepEqual(warned, []);
+    assert.deepEqual(checks, [['show-ref', '--verify', 'refs/example/adr-reservations/0001']]);
   });
 
   it('skips a candidate it cannot claim with a warning, and gives up with the first error after three', () => {
@@ -395,7 +488,11 @@ describe('reserveDocNumber', () => {
     assert.equal(reserveDocNumber(stuck(2), dir, SETTINGS, ADR, { warn: (line) => warned.push(line) }), '0003');
     assert.deepEqual(warned, ['ADR 0001 could not be claimed; skipping it.\nfatal: cannot lock ref 1', 'ADR 0002 could not be claimed; skipping it.\nfatal: cannot lock ref 2']);
     refused = 0;
-    assert.throws(() => reserveDocNumber(stuck(4), dir, SETTINGS, ADR), /could not claim ADR 0004: fatal: cannot lock ref 1/);
+    warned.length = 0;
+    assert.equal(reserveDocNumber(stuck(3), dir, SETTINGS, ADR, { warn: (line) => warned.push(line) }), '0007', 'three skips are allowed');
+    assert.equal(warned.length, 3);
+    refused = 0;
+    assert.throws(() => reserveDocNumber(stuck(4), dir, SETTINGS, ADR), { message: 'could not claim ADR 0008: fatal: cannot lock ref 1' });
   });
 
   it('says so when the number space is spent', () => {
@@ -472,6 +569,68 @@ describe('allocate', () => {
     } };
     assert.deepEqual(allocate(thrown, dir, SETTINGS, RFC, { gh: quietGh }), { ok: false, error: 'could not reserve a RFC number: odd' });
   });
+
+  it("names git's exit code when it says nothing, and trims what git and a thrown value say", () => {
+    const { dir, sys } = repo();
+    const failing = (result: ExecResult | string): Sys => ({
+      ...sys,
+      exec: (command, args, options) => {
+        if (args[0] !== 'log') return sys.exec(command, args, options);
+        if (typeof result === 'string') throw result;
+        return result;
+      },
+    });
+    const error = (result: ExecResult | string) => {
+      const got = allocate(failing(result), dir, SETTINGS, ADR, { gh: quietGh });
+      return got.ok ? '' : got.error;
+    };
+    assert.equal(error({ code: 3, stdout: '', stderr: '' }), 'could not reserve a ADR number: git log --all --format= --name-only -- docs/adr: exit 3');
+    assert.equal(error({ code: 128, stdout: '', stderr: '  fatal: bad  \n' }), 'could not reserve a ADR number: git log --all --format= --name-only -- docs/adr: fatal: bad');
+    assert.equal(error('odd  '), 'could not reserve a ADR number: odd');
+  });
+
+  it('counts the names main and this tree hold, beside what git history shows', () => {
+    const { dir, sys } = repo({ 'docs/rfcs/0040-a.md': 'a' });
+    writeFileSync(join(dir, 'docs/rfcs/0050-b.md'), 'b');
+    // git's history and worktree list show nothing, so only the two trees' names count.
+    const blind: Sys = { ...sys, exec: (command, args, options) => (['log', 'worktree'].includes(args[0] as string) ? { code: 0, stdout: '', stderr: '' } : sys.exec(command, args, options)) };
+    assert.deepEqual(allocate(blind, dir, SETTINGS, RFC, { gh: quietGh }), { ok: true, next: '0051', sources: { main: 1, local: 2, pullRequests: 0, workItems: 1, frozen: 2 }, warnings: [] });
+  });
+
+  it('counts an open PR claim above every Work item, and a Work item title without a number as none', () => {
+    const { dir, sys } = repo();
+    const gh = fakeGh({ [PR_LIST]: JSON.stringify([{ number: 4, files: [{ path: 'docs/rfcs/0060-pr.md' }] }]), [ISSUES]: `${item(31, '0050 — w')}\n${item(32, 'no number')}\n` });
+    assert.deepEqual(allocate(sys, dir, SETTINGS, RFC, { gh }), { ok: true, next: '0061', sources: { main: 0, local: 0, pullRequests: 1, workItems: 1, frozen: 2 }, warnings: [] });
+  });
+
+  it('refuses to reserve when either GitHub read is incomplete alone', () => {
+    const { dir, git, sys } = repo();
+    const noPulls = allocate(sys, dir, SETTINGS, ADR, { gh: fakeGh({}), reserve: true });
+    assert.match(noPulls.ok ? '' : noPulls.error, /^refusing to RESERVE .*could not read open PRs/);
+    const noIssues = allocate(sys, dir, SETTINGS, RFC, { gh: fakeGh({ [PR_LIST]: '[]' }), reserve: true });
+    assert.match(noIssues.ok ? '' : noIssues.error, /^refusing to RESERVE .*could not read Work item issues/);
+    assert.equal(git('for-each-ref', 'refs/example/'), '');
+  });
+
+  it('allocates where the settings have no Work items, and passes warn to the reserver', () => {
+    const plain = docSettings({ reservations: RAW.reservations, kinds: RAW.kinds });
+    const { dir, sys } = repo();
+    let refused = false;
+    const once: Sys = {
+      ...sys,
+      exec: (command, args, options) => {
+        if (args.includes('update-ref') && !refused) {
+          refused = true;
+          return { code: 128, stdout: '', stderr: 'fatal: cannot lock ref\n' };
+        }
+        return sys.exec(command, args, options);
+      },
+    };
+    const warned: string[] = [];
+    const got = allocate(once, dir, plain, plain.kinds.rfc as NonNullable<DocSettings['kinds']['rfc']>, { gh: fakeGh({ [PR_LIST]: '[]' }), reserve: true, warn: (line) => warned.push(line) });
+    assert.deepEqual(got, { ok: true, next: '0002', sources: { main: 0, local: 0, pullRequests: 0, workItems: 0, frozen: 0 }, warnings: [] });
+    assert.deepEqual(warned, ['RFC 0001 could not be claimed; skipping it.\nfatal: cannot lock ref']);
+  });
 });
 
 describe('docNumberArgs', () => {
@@ -488,8 +647,8 @@ describe('docNumberArgs', () => {
 
 describe('docNumber', () => {
   /** The repository, with settings, and gh answered by `answers`. */
-  function cli(answers: Record<string, string>) {
-    const made = repo({ '.github/niyam.json': JSON.stringify({ docNumbers: RAW }), 'docs/rfcs/0003-a.md': 'a' });
+  function cli(answers: Record<string, string>, settings: unknown = RAW) {
+    const made = repo({ '.github/niyam.json': JSON.stringify({ docNumbers: settings }), 'docs/rfcs/0003-a.md': 'a' });
     const real = realSys();
     const sys: Sys = {
       ...made.sys,
@@ -511,6 +670,10 @@ describe('docNumber', () => {
     const adr = capture();
     assert.equal(docNumber(sys, adr.io, ['ADR', '--reserve']), 0);
     assert.deepEqual([adr.out, adr.err], [['0001'], ['→ next free ADR number, against 0 on origin/main, 0 local, 0 claimed by open PRs, reserved:']]);
+    const plain = cli({ [PR_LIST]: '[]' }, { reservations: RAW.reservations, kinds: RAW.kinds });
+    const bare = capture();
+    assert.equal(docNumber(plain.sys, bare.io, ['rfc']), 0);
+    assert.deepEqual([bare.out, bare.err], [['0004'], ['→ next free RFC number, against 1 on origin/main, 1 local, 0 claimed by open PRs (a preview; --reserve claims it):']]);
   });
 
   it('gives JSON under --json, and its warnings first otherwise', () => {

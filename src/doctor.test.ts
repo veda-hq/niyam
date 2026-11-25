@@ -3,8 +3,8 @@ import { describe, it } from 'node:test';
 
 import { NO_TOKEN, launcherPath, launcherScript, noreplyEmail, pathsFor, sessionScript } from './agent.ts';
 import { FROM_SETUP, PROXY_TOKEN, cloudRepoScript } from './cloud.ts';
-import { doctor } from './doctor.ts';
-import { KEYCHAIN } from './token-store.ts';
+import { doctor, leftoverFindings } from './doctor.ts';
+import { KEYCHAIN, type TokenStore } from './token-store.ts';
 import { ISSUE_TYPES, RERUN } from './issue-types.ts';
 import { declinedPath, movedPath, ownerFixes } from './lockout.ts';
 import { CLOUD_SETUP_PATH, GUARD_CALLER_PATH, WORKFLOW_PATH } from './onboard-pull.ts';
@@ -166,6 +166,15 @@ describe('doctor', () => {
     // The same command under another event, or a handler alone, runs once.
     sys.files.set(`${ROOT}/.claude/sarathi.json`, JSON.stringify({ hooks: { Stop: [{ command: HOOK_COMMAND }], Notification: [{ command: 'echo done' }] } }));
     assert.equal((await check(sys)).out.at(-1), '└  All good');
+    // A command past 60 characters is cut to its first 57; one of 60 is named whole.
+    const long = `echo ${'x'.repeat(56)}`;
+    const sixty = `echo ${'y'.repeat(55)}`;
+    sys.files.set(`${ROOT}/.claude/settings.json`, JSON.stringify({ hooks: { Stop: [entry('sarathi hook Stop'), entry(long), entry(sixty)] }, permissions: { allow: [...AUTO_FIX_RULES, ...ARTIFACT_RULES] } }));
+    sys.files.set(`${ROOT}/.claude/sarathi.json`, JSON.stringify({ hooks: { Stop: [{ command: long }, { command: sixty }] } }));
+    assert.deepEqual(marked((await check(sys)).out, '▲'), [
+      `▲  the Stop hook "echo ${'x'.repeat(52)}..." is in both .claude/settings.json and .claude/sarathi.json for Stop, so it runs twice → take it out of .claude/settings.json; sarathi runs it`,
+      `▲  the Stop hook "${sixty}" is in both .claude/settings.json and .claude/sarathi.json for Stop, so it runs twice → take it out of .claude/settings.json; sarathi runs it`,
+    ]);
   });
 
   it("names the Auto-fix rules the repo's Claude Code settings lack, and still passes", async () => {
@@ -249,6 +258,12 @@ describe('doctor', () => {
       '▲  .claude/settings.json does not allow mcp__claude-artifacts__publish_version, mcp__claude-artifacts__publish_files, so agent sessions cannot publish the page an ask to the owner links → niyam onboard again',
     ]);
     assert.ok(partly.includes('✓  .claude/settings.json denies mcp__claude-artifacts__edit_version on purpose, so agent sessions do not use mcp__claude-artifacts__edit_version'), partly.join('\n'));
+    settings([...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_version'], ['mcp__claude-artifacts__edit_version', 'mcp__claude-artifacts__publish_files']);
+    const two = (await check(sys)).out;
+    assert.ok(
+      two.includes('✓  .claude/settings.json denies mcp__claude-artifacts__edit_version, mcp__claude-artifacts__publish_files on purpose, so agent sessions do not use mcp__claude-artifacts__publish_files, mcp__claude-artifacts__edit_version'),
+      two.join('\n'),
+    );
     // Every MCP tool denied: both groups on purpose, all good.
     settings([], ['mcp__*']);
     const every = await check(sys);
@@ -451,6 +466,12 @@ describe('doctor', () => {
     assert.deepEqual(marked(out, '✗'), ['✗  launcher runs process-rules, the command before niyam, which no release installs, so hooks may find no CLI → niyam machine']);
     sys.files.set(LAUNCHER, launcherScript('/opt/node/bin/node', '/x/dist/cli.js', '/home/u/Library/pnpm/bin/niyam'));
     assert.deepEqual(marked((await check(sys)).out, '✗'), []);
+    // Only a whole line that runs process-rules is that launcher.
+    for (const line of [`# exec '/x/process-rules' "$@"`, `exec '/x/process-rules' "$@" --more`]) {
+      sys.files.set(LAUNCHER, `#!/bin/sh\n${line}\n`);
+      assert.ok((await check(sys)).out.includes('✓  launcher'), line);
+    }
+    assert.deepEqual(sys.calls.find((call) => call.command === LAUNCHER)?.args, ['--version']);
   });
 
   it('takes the launcher alone, and refuses when it is missing', async () => {
@@ -572,6 +593,23 @@ describe('doctor', () => {
       }
     });
 
+    it('names every missing one', async () => {
+      const { out } = await check(listed(healthy(), [], []));
+      assert.deepEqual(marked(out, '▲'), [`▲  no NIYAM_BOARD_APP_ID or NIYAM_BOARD_APP_KEY secret, so a slice moves to In Progress only from a desktop push → niyam onboard again at your own terminal, which sets up the board app`]);
+    });
+
+    it('asks nothing without a token, or where the settings fail their checks', async () => {
+      const tokenless = listed(healthy(), [], []);
+      tokenless.keychain.delete(`niyam/${AGENT}`);
+      const invalid = listed(healthy(), [], []);
+      invalid.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 'example-owner', agent: AGENT, approvals: 'one' }));
+      for (const sys of [tokenless, invalid]) {
+        const { out } = await check(sys, AGENT);
+        assert.ok(!out.some((line) => line.includes('board app') || line.includes('issue types')), out.join('\n'));
+        assert.ok(!sys.requests.some((request) => request.url.includes('/actions/')));
+      }
+    });
+
     it('warns, never fails, when GitHub cannot be asked', async () => {
       const sys = healthy();
       const http = sys.http.bind(sys);
@@ -605,7 +643,20 @@ describe('doctor', () => {
       const refused = repo(healthy(), false, 403);
       const bare = repo(healthy(), false);
       bare.files.delete(`${ROOT}/.github/niyam.json`);
-      for (const [sys, named] of [[unsaid], [refused], [bare, AGENT]] as const) assert.ok(!(await check(sys, named)).out.some((line) => line.includes('branch')), 'nothing about branches');
+      const empty = healthy().route('GET', '/repos/example-org/example-app', { status: 200, json: null });
+      for (const [sys, named] of [[unsaid], [refused], [bare, AGENT], [empty]] as const) assert.ok(!(await check(sys, named)).out.some((line) => line.includes('branch')), 'nothing about branches');
+    });
+
+    it('asks nothing without a token, or for an origin that is not on GitHub', async () => {
+      const tokenless = repo(healthy(), false);
+      tokenless.keychain.delete(`niyam/${AGENT}`);
+      const elsewhere = repo(healthy(), false);
+      elsewhere.origin = 'https://example.invalid/example-org/example-app.git';
+      for (const sys of [tokenless, elsewhere]) {
+        const { out } = await check(sys);
+        assert.ok(!out.some((line) => line.includes('branch')), out.join('\n'));
+        assert.ok(!sys.requests.some((request) => /\/repos\/[^/]+(?:\/[^/]+)?$/.test(new URL(request.url).pathname)), sys.requests.map((request) => request.url).join('\n'));
+      }
     });
 
     it('warns, never fails, when GitHub cannot be asked', async () => {
@@ -622,6 +673,9 @@ describe('doctor', () => {
       sys.env = { ...sys.env, CLAUDE_PROJECT_DIR: ROOT };
       sys.cwd = '/elsewhere';
       assert.ok(marked((await check(sys, AGENT)).out, '✗').some((line) => line.includes('Automatically delete head branches')));
+      const origins = sys.calls.filter((call) => call.command === 'git' && (call.args[0] === 'remote' || call.args.includes('origin')));
+      assert.ok(origins.length > 0, 'asks git for the origin');
+      assert.deepEqual(origins.map((call) => [call.args.join(' '), call.cwd]), origins.map(() => ['remote get-url origin', ROOT]), 'there');
     });
   });
 
@@ -675,6 +729,20 @@ describe('doctor', () => {
       sys.keychain.set(`process-rules/${AGENT}`, 'ghp_other');
       assert.deepEqual(marked((await check(sys)).out, '▲'), [
         "▲  service process-rules, account ExampleBot, from before niyam, is still in this Mac's keychain, and it holds another token than service niyam, account ExampleBot → once nothing needs it, /usr/bin/security delete-generic-password -s process-rules -a ExampleBot",
+      ]);
+    });
+
+    it('names a leftover the store does not name, and its delete, in general terms', () => {
+      const store: TokenStore = {
+        where: 'a test store',
+        item: (agent) => `the ${agent} item`,
+        read: () => TOKEN,
+        store: () => false,
+        readCommand: () => 'true',
+        leftover: () => 'ghp_other',
+      };
+      assert.deepEqual(leftoverFindings(healthy(), store, AGENT), [
+        { mark: '▲', text: 'the old keychain entry, from before niyam, is still in a test store, and it holds another token than the ExampleBot item', fix: 'once nothing needs it, delete it' },
       ]);
     });
 
@@ -862,6 +930,7 @@ describe('doctor in a Claude cloud session', () => {
     assert.equal(code, 1, out.join('\n'));
     assert.ok(out.includes(`✗  ${CLOUD_SETUP_PATH} missing, or not the file onboard writes, so a session without niyam cannot install it → niyam onboard again`), out.join('\n'));
     assert.ok(out.some((line) => line.startsWith('✓  the SessionStart hook installs niyam')), 'the old mark is not the Setup script running the repo file');
+    assert.ok(!out.some((line) => line.includes('this session runs niyam')), 'no release to run against');
   });
 
   it('names the cloud setup file the Setup snippet ran, as its mark records it, or none where the mark names neither (P-56)', async () => {
@@ -903,7 +972,44 @@ describe('doctor in a Claude cloud session', () => {
   it('accepts a login that differs only in case, and the agent named', async () => {
     const sys = cloud('examplebot');
     assert.equal((await check(sys)).code, 0);
+    assert.equal((await check(cloud(), AGENT)).code, 0, 'the agent named');
     assert.equal((await check(cloud(), 'OtherBot')).code, 1, 'checked against the agent named');
+  });
+
+  it("refuses an identity session-start gave of an account the settings do not name, though the proxy acts as it", async () => {
+    const sys = cloud('OtherBot');
+    sys.env.NIYAM_AGENT = 'OtherBot';
+    assert.ok(marked((await check(sys)).out, '✗').includes('✗  session-start did not give this session the agent identity, so gh and git stay locked out → a new session; its first niyam line says why'));
+  });
+
+  it('gives no identity where session-start gave none and neither GitHub nor the settings name an account', async () => {
+    const sys = cloud(null);
+    sys.inRepo = false;
+    sys.env.NIYAM_AGENT = undefined;
+    const { out } = await check(sys);
+    assert.ok(out.includes('✗  session-start did not give this session the agent identity, so gh and git stay locked out → a new session; its first niyam line says why'), out.join('\n'));
+    assert.ok(!out.some((line) => line.includes('commits')), 'no account whose commits to check');
+  });
+
+  it("checks the commits of the account the proxy acts as, where session-start gave none", async () => {
+    const sys = cloud();
+    sys.env = { CLAUDE_CODE_REMOTE: 'true', GH_TOKEN: NO_TOKEN };
+    sys.acceptToken(PROXY_TOKEN, AGENT);
+    assert.ok((await check(sys)).out.includes("▲  this session's commits are Claude's: the cloud environment's variables have no NIYAM_SIGNING_KEY → niyam cloud-key ExampleBot on your Mac, then paste it into the environment's variables"));
+  });
+
+  it("takes the commits as the agent's only with the agent's name and its numbered noreply address", async () => {
+    const cases: [Record<string, string | undefined>, string][] = [
+      [{ GIT_AUTHOR_NAME: 'Claude', GIT_AUTHOR_EMAIL: noreplyEmail(AGENT_ID, AGENT) }, 'another name'],
+      [{ GIT_AUTHOR_NAME: undefined, GIT_AUTHOR_EMAIL: noreplyEmail(AGENT_ID, AGENT) }, 'no name'],
+      [{ GIT_AUTHOR_NAME: AGENT, GIT_AUTHOR_EMAIL: `x${noreplyEmail(AGENT_ID, AGENT)}` }, 'an address the id does not open'],
+      [{ GIT_AUTHOR_NAME: AGENT, GIT_AUTHOR_EMAIL: undefined }, 'no address'],
+    ];
+    for (const [env, why] of cases) {
+      const sys = cloud();
+      sys.env = { ...sys.env, ...env };
+      assert.match(marked((await check(sys)).out, '▲')[0] ?? '', /commits are Claude's/, why);
+    }
   });
 
   it('names a proxy GitHub could not answer, and still runs the rest', async () => {
