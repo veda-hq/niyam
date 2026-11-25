@@ -28,7 +28,7 @@ import { ownerStep, ownerStepArgs } from './owner-step.ts';
 import { sessionStart } from './session-start.ts';
 import { SSH_SIGN, sshSign } from './ssh-sign.ts';
 import { upgrade } from './upgrade.ts';
-import { prMerged, prStarted, prePush, prWorkRules, propose } from './work.ts';
+import { fileState, prMerged, prStarted, prePush, prWorkRules, propose } from './work.ts';
 import type { Output, Sys } from './types.ts';
 
 import { CLI } from './names.ts';
@@ -79,6 +79,9 @@ Commands:
                    in a short comment linking the published page that argues it (--page is needed
                    whenever a proposal is still to be posted; a rerun that only links needs none);
                    with an Approvals issue, it prints the first line of one comment there answering them all
+  state <slice> --title <text>
+                   As the agent: file an issue of type State under the slice, attached as its sub-issue,
+                   and print the line "State: #N" that names it in the pull request fixing the closed slice
   review-thread <thread-id> [--reply <text> | --body-file <path>] [--resolve | --no-resolve]
                 [--reaction <+1|-1> --comment-id <id>]
                    As the agent: answer a review thread on one of its own pull requests here; a reply
@@ -160,20 +163,50 @@ export function proposeArgs(args: readonly string[]): { numbers: number[]; page?
   return { numbers: issues.map((arg) => Number(arg.replace('#', ''))), ...(page === undefined ? {} : { page }) };
 }
 
+/**
+ * state's slice, as 12 or #12, and the State's title (`--title <text>` or
+ * `--title=<text>`, once and not empty); throws on anything else.
+ */
+export function stateArgs(args: readonly string[]): { slice: number; title: string } {
+  const slices: string[] = [];
+  let title: string | undefined;
+  for (let at = 0; at < args.length; at++) {
+    const arg = args[at] as string;
+    const inline = arg.startsWith('--title=') ? arg.slice('--title='.length) : undefined;
+    if (arg !== '--title' && inline === undefined) {
+      slices.push(arg);
+      continue;
+    }
+    if (title !== undefined) throw new Error('state takes one --title');
+    const value = inline ?? args[++at];
+    // A flag in the title's place is a missing title, as propose's --page refuses one.
+    if (value === undefined || !value.trim() || value.startsWith('-')) throw new Error('state --title needs what the State builds, as text');
+    title = value.trim();
+  }
+  // An unquoted #12 is a comment in bash, so the slice goes missing there.
+  if (slices.length === 0) throw new Error("state needs the slice's number, as 12 or '#12' (quoted: in bash an unquoted # starts a comment)");
+  if (slices.length > 1) throw new Error(`state takes one slice, not ${slices.length} (${slices.join(' ')})`);
+  const [given] = slices as [string];
+  const slice = /^#?0*[1-9]\d*$/.test(given) ? Number(given.replace('#', '')) : Number.NaN;
+  if (!Number.isSafeInteger(slice)) throw new Error(`state needs the slice's number, not "${given}"`);
+  if (title === undefined) throw new Error('state needs --title "<what the State builds>"');
+  return { slice, title };
+}
+
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit' || command === SSH_SIGN ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'state' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit' || command === SSH_SIGN ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
     io.err(USAGE);
     return 2;
   }
-  if (command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit') {
+  if (command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'state' || command === 'owner-step' || command === 'pr-signals' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit') {
     // Their options are checked here, so a bad one is bad usage (exit 2).
     try {
-      (command === 'board-audit' ? auditArgs : command === 'cloud-key' ? cloudKeyArgs : command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : reviewArgs)(rest);
+      (command === 'board-audit' ? auditArgs : command === 'cloud-key' ? cloudKeyArgs : command === 'doc-number' ? docNumberArgs : command === 'renumber-doc' ? renumberArgs : command === 'work-item-number' ? workItemArgs : command === 'onboard' ? onboardArgs : command === 'machine' ? machineArgs : command === 'as-agent' ? asAgentArgs : command === 'env' ? envArgs : command === 'propose' ? proposeArgs : command === 'state' ? stateArgs : command === 'owner-step' ? ownerStepArgs : command === 'pr-signals' ? signalArgs : command === 'handoff' ? handoffArgs : command === 'brief' ? briefArgs : command === 'cubic-dismiss' ? dismissArgs : reviewArgs)(rest);
     } catch (error) {
       io.err(`niyam: ${error instanceof Error ? error.message : String(error)}`);
       io.err(USAGE);
@@ -259,6 +292,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
     case 'reviews-due':
     case 'pre-push':
     case 'propose':
+    case 'state':
     case 'review-thread':
     case 'pr-signals':
     case 'handoff':
@@ -285,6 +319,10 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         if (command === 'propose') {
           const { numbers, page } = proposeArgs(rest);
           return await propose(await sys(), io, numbers, page);
+        }
+        if (command === 'state') {
+          const { slice, title } = stateArgs(rest);
+          return await fileState(await sys(), io, slice, title);
         }
         if (command === 'reviews-due') return await reviewsDue(await sys(), io);
         if (command === 'decisions-weekly') return await decisionsWeekly(await sys(), io);

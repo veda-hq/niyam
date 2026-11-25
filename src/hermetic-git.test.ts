@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { hermeticGitEnv, maskProcessGitEnv, removeFixtureRoot } from './hermetic-git.ts';
@@ -30,8 +30,42 @@ describe('removeFixtureRoot', () => {
     removeFixtureRoot(made);
   });
 
-  it('refuses the temporary folder itself and anything outside it', () => {
-    assert.throws(() => removeFixtureRoot(tmpdir()), /is not inside/);
-    assert.throws(() => removeFixtureRoot(realpathSync(process.cwd())), /is not inside/);
+  // Only folders this test made are handed over to be refused, so a broken check removes nothing else.
+  it('refuses its root itself, a folder beside it, and one whose name only starts like it', () => {
+    const base = mkdtempSync(join(tmpdir(), 'niyam-refuse-'));
+    const root = join(base, 'root');
+    const beside = join(base, 'beside');
+    const lookalike = join(base, 'rootlike');
+    for (const folder of [root, beside, lookalike]) mkdirSync(folder);
+    try {
+      for (const folder of [root, beside, lookalike]) {
+        assert.throws(() => removeFixtureRoot(folder, root), { message: `refusing to remove ${folder}: it is not inside ${root}` });
+        assert.equal(existsSync(folder), true);
+      }
+    } finally {
+      removeFixtureRoot(base);
+    }
+  });
+
+  it('removes a folder under a root that is the filesystem root', () => {
+    const made = mkdtempSync(join(tmpdir(), 'niyam-under-root-'));
+    removeFixtureRoot(made, sep);
+    assert.equal(existsSync(made), false);
+  });
+
+  it('follows links before it judges', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'niyam-links-')));
+    const root = join(base, 'root');
+    const outside = join(base, 'outside');
+    mkdirSync(root);
+    mkdirSync(outside);
+    const link = join(root, 'link');
+    symlinkSync(outside, link);
+    try {
+      assert.throws(() => removeFixtureRoot(link, root), /is not inside/);
+      assert.equal(existsSync(outside), true);
+    } finally {
+      removeFixtureRoot(base);
+    }
   });
 });
