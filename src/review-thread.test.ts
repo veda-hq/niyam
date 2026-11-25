@@ -62,6 +62,8 @@ describe('threadArgs', () => {
     [[], /needs a review thread id \(PRRT_…, or in a Claude cloud session its first comment's number\)$/],
     [['12x'], /needs a review thread id \(PRRT_…, or in a Claude cloud session its first comment's number\), not "12x"$/],
     [['012', '--resolve'], /not "012"$/],
+    [['xPRRT_abc', '--resolve'], /not "xPRRT_abc"$/],
+    [['PRRT_abc!', '--resolve'], /not "PRRT_abc!"$/],
     [[THREAD], /needs --reply <text>, --body-file <path>, --resolve, or --reaction/],
     [[THREAD, '--reply'], /--reply needs the text of the reply/],
     [[THREAD, '--reply', ' '], /--reply needs the text of the reply/],
@@ -222,8 +224,49 @@ describe('reviewThread', () => {
 
   it('refuses a page of comments that says more follow but gives no cursor, posting nothing', async () => {
     const sys = session({}, false, [{ nodes: [], pageInfo: { hasNextPage: true, endCursor: null } }]);
-    await assert.rejects(run(sys, [THREAD, '--reply', 'Fixed.']), /a page says more follow but gives no cursor/);
+    await assert.rejects(run(sys, [THREAD, '--reply', 'Fixed.']), /^Error: the comments of PRRT_kwDOabc123: a page says more follow but gives no cursor/);
     assert.equal(mutations(sys).length, 0);
+  });
+
+  it('replies on a thread GitHub gives no comments for', async () => {
+    const sys = session();
+    sys.route('POST', '/graphql', () => {
+      const { query } = sys.requests.at(-1)?.body as { query: string };
+      return query.startsWith('query')
+        ? { status: 200, json: { data: { node: { isResolved: false, pullRequest: { number: 40, author: { login: AGENT }, repository: { nameWithOwner: 'example-org/example-app' } } } } } }
+        : { status: 200, json: { data: { done: true } } };
+    });
+    assert.deepEqual(await run(sys, [THREAD, '--reply', 'Fixed.']), { code: 0, out: [`✓ replied on ${THREAD} (#40)`], err: [] });
+  });
+
+  it('compares a reply with the ones there without the spaces around it', async () => {
+    const sys = session({}, false, [{ nodes: [{ id: COMMENT, body: 'Fixed in abc123.' }], pageInfo: { hasNextPage: false } }]);
+    assert.deepEqual((await run(sys, [THREAD, '--reply', ' Fixed in abc123. '])).out, [`✓ ${THREAD} (#40) has this reply already`]);
+    assert.equal(mutations(sys).length, 0);
+  });
+
+  it('reacts on any comment of the thread, not only its first', async () => {
+    const sys = session({}, false, [{ nodes: [{ id: COMMENT, body: 'Use a constant.' }, { id: 'PRRC_kwDOreply', body: 'Done.' }], pageInfo: { hasNextPage: false } }]);
+    assert.deepEqual((await run(sys, [THREAD, '--reaction', '+1', '--comment-id', 'PRRC_kwDOreply'])).out, ['✓ reacted +1 on PRRC_kwDOreply']);
+  });
+
+  for (const [name, answer, message] of [
+    ['an error status, though it gives data', { status: 502, json: { data: { node: null } } }, `GitHub refused to read review thread ${THREAD} (HTTP 502)`],
+    ['no answer at all', { status: 200, json: null }, `GitHub refused to read review thread ${THREAD} (HTTP 200)`],
+    ['an error status with no errors listed', { status: 502, json: {} }, `GitHub refused to read review thread ${THREAD} (HTTP 502)`],
+    ['an error status with an empty list of errors', { status: 502, json: { errors: [] } }, `GitHub refused to read review thread ${THREAD} (HTTP 502)`],
+  ] as const) {
+    it(`throws when GitHub's GraphQL API gives ${name}`, async () => {
+      const sys = session();
+      sys.route('POST', '/graphql', answer);
+      await assert.rejects(run(sys, [THREAD, '--resolve']), { message });
+    });
+  }
+
+  it("refuses a token GitHub does not answer for, whatever login comes with it", async () => {
+    const sys = session();
+    sys.route('GET', '/user', { status: 500, json: { login: AGENT } });
+    assert.deepEqual((await run(sys, [THREAD, '--resolve'])).err, [`✗ review-thread answers as ${AGENT}, but this session's token is ${AGENT}`, 'review-thread: refused']);
   });
 
   it("reacts on one of the thread's comments, and still resolves when the reaction fails", async () => {
@@ -305,6 +348,7 @@ describe('batchEntries', () => {
           { thread: THREAD3, reply: 'Fixed.', resolve: true, reaction: '+1', comment: COMMENT },
           { thread: '123', reply: 'Not changed.' },
           { thread: THREAD, resolve: true },
+          { thread: THREAD2, reply: 'Not changed.', resolve: false },
         ]),
       ),
       [
@@ -313,6 +357,7 @@ describe('batchEntries', () => {
         { thread: THREAD3, reply: 'Fixed.', resolve: true, reaction: '+1', comment: COMMENT },
         { thread: '123', reply: 'Not changed.', resolve: false },
         { thread: THREAD, resolve: true },
+        { thread: THREAD2, reply: 'Not changed.', resolve: false },
       ],
     );
   });
@@ -322,11 +367,12 @@ describe('batchEntries', () => {
     ['{}', /^it must be a JSON list of threads, with at least one$/],
     ['[]', /^it must be a JSON list of threads, with at least one$/],
     ['[null]', /^entry 1 is not an object$/],
+    ['[7]', /^entry 1 is not an object$/],
     [JSON.stringify([{ thread: THREAD, resolve: true }, [THREAD]]), /^entry 2 is not an object$/],
     [JSON.stringify([{ thread: THREAD, resolve: true, delete: true }]), /^entry 1 has "delete", which is not one of thread, reply, bodyFile, resolve, reaction, comment$/],
     [JSON.stringify([{ thread: THREAD, resolve: 'yes' }]), /^entry 1's "resolve" must be a boolean$/],
     [JSON.stringify([{ thread: 12, resolve: true }]), /^entry 1's "thread" must be a string$/],
-    [JSON.stringify([{ resolve: true }]), /^entry 1: review-thread needs a review thread id/],
+    [JSON.stringify([{ resolve: true }]), /^entry 1: review-thread needs a review thread id \(PRRT_…, or in a Claude cloud session its first comment's number\)$/],
     [JSON.stringify([{ thread: THREAD, resolve: true }, { thread: THREAD2 }]), /^entry 2 \(PRRT_kwDOsecond\): review-thread needs --reply <text>, --body-file <path>, --resolve, or --reaction$/],
     [JSON.stringify([{ thread: THREAD, reply: 'a', bodyFile: 'b' }]), /^entry 1 \(PRRT_kwDOabc123\): review-thread takes --reply or --body-file, not both$/],
     [JSON.stringify([{ thread: THREAD, reaction: '+1' }]), /^entry 1 \(PRRT_kwDOabc123\): --reaction and --comment-id go together/],
@@ -390,6 +436,24 @@ describe('reviewThread --batch', () => {
     assert.ok(sys.requests.every((r) => !JSON.stringify(r.body ?? null).includes(THREAD3)));
   });
 
+  it('names every thread done before the stop, and says "thread" for one', async () => {
+    const sys = batchSession([
+      { thread: THREAD, resolve: true },
+      { thread: THREAD2, resolve: true },
+      { thread: THREAD3, reply: 'Fixed.' },
+    ]);
+    const answer = sys.routes.get('POST https://api.github.com/graphql') as () => { status: number; json: unknown };
+    sys.route('POST', '/graphql', () => {
+      const { query, variables } = sys.requests.at(-1)?.body as { query: string; variables: { id?: string } };
+      return query.startsWith('mutation') && variables.id === THREAD3 ? { status: 403, json: null } : answer();
+    });
+    const { io, err } = capture();
+    await assert.rejects(reviewThread(sys, io, ['--batch', BATCH]), /reply on PRRT_kwDOthird/);
+    assert.deepEqual(err, [`review-thread: stopped at ${THREAD3} (3 of 3); done: ${THREAD}, ${THREAD2}; not done: ${THREAD3}`]);
+    const one = batchSession([{ thread: THREAD, resolve: true }]);
+    assert.deepEqual((await run(one, ['--batch', BATCH])).out, [`✓ resolved ${THREAD} (#40)`, `✓ answered 1 thread from ${BATCH}`]);
+  });
+
   it("stops at a thread on a pull request the agent did not open, before posting on it", async () => {
     const sys = batchSession([{ thread: THREAD, resolve: true }], { author: { login: 'example-owner' } });
     assert.deepEqual(await run(sys, ['--batch', BATCH]), {
@@ -449,7 +513,11 @@ describe('reviewThread --batch', () => {
     sys.confine = (root, path) => {
       if (path === `${ROOT}/.tmp/link.md`) throw new Error(`refused to write ${path}: it leads to /elsewhere/secret.md, outside the git toplevel ${root}`);
     };
-    await assert.rejects(run(sys, ['--batch', BATCH]), /^Error: \.tmp\/link\.md may not be posted: refused to write .*: it leads to \/elsewhere\/secret\.md, outside the git toplevel/);
+    await assert.rejects(run(sys, ['--batch', BATCH]), (error: Error) => {
+      assert.match(String(error), /^Error: \.tmp\/link\.md may not be posted: refused to write .*: it leads to \/elsewhere\/secret\.md, outside the git toplevel/);
+      assert.match(String(error.cause), /^Error: refused to write /);
+      return true;
+    });
     assert.equal(sys.requests.length, 0);
     const single = session();
     single.files.set(`${ROOT}/.tmp/link.md`, 'secret');
@@ -465,7 +533,11 @@ describe('reviewThread --batch', () => {
   ] as const) {
     it(`throws on ${name}, naming the file, before any request`, async () => {
       const sys = batchSession(text);
-      await assert.rejects(run(sys, ['--batch', BATCH]), problem);
+      await assert.rejects(run(sys, ['--batch', BATCH]), (error: Error) => {
+        assert.match(String(error), problem);
+        assert.ok(error.cause instanceof Error, 'the error that stopped it is kept as the cause');
+        return true;
+      });
       assert.equal(sys.requests.length, 0);
     });
   }
@@ -518,6 +590,8 @@ describe('idProblem', () => {
     [false, THREAD, '456', /--comment-id takes a comment's node id, as pr-signals prints it, not 456$/],
     [false, THREAD, THREAD, /--comment-id takes a comment's node id, as pr-signals prints it, not PRRT_kwDOabc123$/],
     [false, THREAD, 'plain', /not plain$/],
+    [false, THREAD, '!PRRC_kwDOx', /not !PRRC_kwDOx$/],
+    [false, THREAD, 'PRRC_kwDOx!', /not PRRC_kwDOx!$/],
     [true, THREAD, undefined, /its first comment's number \(the one in its #discussion_r link, or the thread pr-signals prints there\), not PRRT_kwDOabc123$/],
     [true, '123', COMMENT, /in a Claude cloud session --comment-id takes a comment's number, not PRRC_kwDOfirst$/],
   ] as const) {
@@ -532,6 +606,7 @@ describe('withoutFooter', () => {
     assert.equal(withoutFooter(`Fixed.${FOOTER}`), 'Fixed.');
     assert.equal(withoutFooter('Fixed.\n---\n_Generated by [Claude Code](https://claude.ai/code/session_1)_\n'), 'Fixed.');
     assert.equal(withoutFooter('Fixed.\n---\n_Generated by someone else_'), 'Fixed.\n---\n_Generated by someone else_');
+    assert.equal(withoutFooter(`Fixed.${FOOTER} Then more.`), `Fixed.${FOOTER} Then more.`);
   });
 });
 
@@ -575,7 +650,49 @@ describe('reviewThread in a Claude cloud session', () => {
     });
     assert.deepEqual(posts(sys), ['pulls/40/comments/123/replies {"body":"Fixed in abc123."}', 'pulls/comments/123/reactions {"content":"+1"}', 'pulls/40/ccr/comments/123/resolve null']);
     assert.ok(sys.requests.every((r) => !r.url.endsWith('/graphql')));
+    assert.ok(sys.requests.every((r) => r.token === 'ghp_good'));
   });
+
+  it("finds the thread's own state among the proxy's threads, and reacts on a reply in it", async () => {
+    const sys = cloud({ replies: ['Done.'] });
+    sys.route('GET', `${REPO}/pulls/40/ccr/review_threads`, { status: 200, json: [{ resolved: true, comment_ids: [999] }, { resolved: false, comment_ids: [123, 124] }] });
+    sys.route('POST', `${REPO}/pulls/comments/124/reactions`, { status: 201, json: { content: '+1' } });
+    assert.deepEqual((await run(sys, ['123', '--reaction', '+1', '--comment-id', '124', '--resolve'])).out, ['✓ reacted +1 on 124', '✓ resolved 123 (#40)']);
+  });
+
+  it('goes on when a reaction fails, saying what GitHub refused', async () => {
+    const sys = cloud();
+    sys.route('POST', `${REPO}/pulls/comments/123/reactions`, { status: 403, json: null });
+    assert.deepEqual(await run(sys, ['123', '--reaction', '-1', '--comment-id', '123', '--resolve']), {
+      code: 0,
+      out: ['✓ resolved 123 (#40)'],
+      err: ['⚠ the -1 on 123 failed (GitHub refused to react on 123 (HTTP 403)); going on'],
+    });
+  });
+
+  for (const [name, user] of [
+    ['a deleted account', null],
+    ['an account GitHub names oddly', { login: 42 }],
+  ] as const) {
+    it(`refuses a thread on a pull request ${name} opened`, async () => {
+      const sys = cloud();
+      sys.route('GET', `${REPO}/pulls/40`, { status: 200, json: { user } });
+      assert.deepEqual((await run(sys, ['123', '--resolve'])).err, [`✗ 123 is on #40, which a deleted account opened, not ${AGENT}`, 'review-thread: refused']);
+    });
+  }
+
+  for (const [name, answer, status] of [
+    ['no comment', { status: 200, json: null }, 200],
+    ['a comment on no pull request', { status: 200, json: { pull_request_url: `https://api.github.com${REPO}/pulls/40/files`, in_reply_to_id: null } }, 200],
+    ['an error status, though it gives the comment', { status: 500, json: { pull_request_url: `https://api.github.com${REPO}/pulls/40`, in_reply_to_id: null } }, 500],
+  ] as const) {
+    it(`throws when GitHub's answer for the comment is ${name}`, async () => {
+      const sys = cloud();
+      sys.route('GET', `${REPO}/pulls/comments/123`, answer);
+      await assert.rejects(run(sys, ['123', '--resolve']), { message: `cannot read review comment 123 (HTTP ${status})` });
+      assert.deepEqual(posts(sys), []);
+    });
+  }
 
   it("answers a batch over the proxy's REST routes, checking the token once", async () => {
     const sys = cloud();
@@ -630,6 +747,9 @@ describe('reviewThread in a Claude cloud session', () => {
     const unresolved = cloud();
     unresolved.route('POST', `${REPO}/pulls/40/ccr/comments/123/resolve`, { status: 200, json: { resolved: false } });
     await assert.rejects(run(unresolved, ['123', '--resolve']), /GitHub's proxy did not resolve 123/);
+    const silent = cloud();
+    silent.route('POST', `${REPO}/pulls/40/ccr/comments/123/resolve`, { status: 200, json: null });
+    await assert.rejects(run(silent, ['123', '--resolve']), { message: "GitHub's proxy did not resolve 123" });
     const refused = cloud();
     refused.route('POST', `${REPO}/pulls/40/comments/123/replies`, { status: 403, json: null });
     await assert.rejects(run(refused, ['123', '--reply', 'x']), /GitHub refused to reply on 123 \(HTTP 403\)/);

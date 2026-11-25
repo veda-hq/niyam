@@ -39,13 +39,15 @@ export function threadArgs(args: readonly string[]): ThreadArgs {
   if (!thread || !(THREAD_ID.test(thread) || REST_ID.test(thread))) {
     throw new Error(`review-thread needs a review thread id (PRRT_…, or in a Claude cloud session its first comment's number)${thread ? `, not "${thread}"` : ''}`);
   }
-  const given = new Map<string, string | true>();
+  // The options given with their values, and the switches given.
+  const given = new Map<string, string>();
+  const switches = new Set<string>();
   const VALUES = new Set(['--reply', '--body-file', '--reaction', '--comment-id']);
   for (let i = 0; i < rest.length; i++) {
     const option = rest[i] as string;
-    if (given.has(option) || !(VALUES.has(option) || option === '--resolve' || option === '--no-resolve')) throw new Error(`unexpected argument "${option}"`);
+    if (given.has(option) || switches.has(option) || !(VALUES.has(option) || option === '--resolve' || option === '--no-resolve')) throw new Error(`unexpected argument "${option}"`);
     if (!VALUES.has(option)) {
-      given.set(option, true);
+      switches.add(option);
       continue;
     }
     const value = rest[i + 1];
@@ -53,17 +55,16 @@ export function threadArgs(args: readonly string[]): ThreadArgs {
     given.set(option, value);
     i++;
   }
-  const value = (name: string): string | undefined => given.get(name) as string | undefined;
-  const reply = value('--reply');
-  const bodyFile = value('--body-file');
-  const reaction = value('--reaction');
-  const comment = value('--comment-id');
+  const reply = given.get('--reply');
+  const bodyFile = given.get('--body-file');
+  const reaction = given.get('--reaction');
+  const comment = given.get('--comment-id');
   if (reply !== undefined && bodyFile !== undefined) throw new Error('review-thread takes --reply or --body-file, not both');
-  if (given.has('--resolve') && given.has('--no-resolve')) throw new Error('review-thread takes --resolve or --no-resolve, not both');
-  if (given.has('--no-resolve') && bodyFile === undefined) throw new Error('--no-resolve goes with --body-file, whose reply resolves the thread unless told not to');
+  if (switches.has('--resolve') && switches.has('--no-resolve')) throw new Error('review-thread takes --resolve or --no-resolve, not both');
+  if (switches.has('--no-resolve') && bodyFile === undefined) throw new Error('--no-resolve goes with --body-file, whose reply resolves the thread unless told not to');
   if (reaction !== undefined && !Object.hasOwn(REACTIONS, reaction)) throw new Error(`--reaction takes +1 or -1, not "${reaction}"`);
   if ((reaction === undefined) !== (comment === undefined)) throw new Error('--reaction and --comment-id go together: a reaction goes on a comment, not on a thread');
-  const resolve = given.has('--resolve') || (bodyFile !== undefined && !given.has('--no-resolve'));
+  const resolve = switches.has('--resolve') || (bodyFile !== undefined && !switches.has('--no-resolve'));
   if (reply === undefined && bodyFile === undefined && !resolve && reaction === undefined) throw new Error('review-thread needs --reply <text>, --body-file <path>, --resolve, or --reaction');
   return {
     thread,
@@ -191,6 +192,9 @@ interface ThreadNode {
   comments?: Page<{ id: string; body: string }>;
 }
 
+/** A thread's comments when GitHub gives none: one last page, with no nodes. */
+const NO_COMMENTS: Page<{ id: string; body: string }> = { pageInfo: { hasNextPage: false } };
+
 function graphTransport(sys: Sys, token: string, thread: string, agent: string): Transport {
   return {
     async find() {
@@ -198,11 +202,12 @@ function graphTransport(sys: Sys, token: string, thread: string, agent: string):
       const comments = await connection<{ id: string; body: string }>(`the comments of ${thread}`, async (after) => {
         const data = (await graphql(sys, token, THREAD_QUERY, { id: thread, ...(after === null ? {} : { after }) }, `read review thread ${thread}`)) as { node?: ThreadNode | null };
         node = data.node;
-        return node?.pullRequest ? (node.comments ?? { nodes: [], pageInfo: { hasNextPage: false } }) : { nodes: [], pageInfo: { hasNextPage: false } };
+        return node?.pullRequest ? (node.comments ?? NO_COMMENTS) : NO_COMMENTS;
       });
       const pull = (node as ThreadNode | null | undefined)?.pullRequest;
       if (!pull) return `${thread} is not a review thread GitHub shows ${agent}`;
-      return { pull: pull.number, author: pull.author?.login, repository: pull.repository.nameWithOwner, resolved: node?.isResolved === true, comments };
+      // A thread with a pull request is a node GitHub gave.
+      return { pull: pull.number, author: pull.author?.login, repository: pull.repository.nameWithOwner, resolved: (node as ThreadNode).isResolved === true, comments };
     },
     async reply(_found, body) {
       await graphql(sys, token, 'mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }', { id: thread, body }, `reply on ${thread}`);
@@ -221,7 +226,7 @@ const PULL_URL = /\/repos\/([^/]+\/[^/]+)\/pulls\/(\d+)$/;
 
 function cloudTransport(sys: Sys, token: string, slug: string, thread: string): Transport {
   const post = async (route: string, body: unknown, what: string): Promise<unknown> => {
-    const { status, json } = await sys.http(`${API}/${route}`, { method: 'POST', token, ...(body === undefined ? {} : { body }) });
+    const { status, json } = await sys.http(`${API}/${route}`, { method: 'POST', token, body });
     if (status !== 200 && status !== 201) throw new Error(`GitHub refused to ${what} (HTTP ${status})`);
     return json;
   };
@@ -230,10 +235,12 @@ function cloudTransport(sys: Sys, token: string, slug: string, thread: string): 
       const first = await sys.http(`${API}/repos/${slug}/pulls/comments/${thread}`, { token });
       const comment = first.json as { pull_request_url?: unknown; in_reply_to_id?: unknown } | null;
       if (first.status === 404) return `${thread} is not a review comment in ${slug}`;
-      if (first.status !== 200 || typeof comment?.pull_request_url !== 'string') throw new Error(`cannot read review comment ${thread} (HTTP ${first.status})`);
-      if (comment.in_reply_to_id != null) return `${thread} is a reply, not the first comment of its thread; name the thread by its first comment, as pr-signals prints it`;
-      const [, repository = '', number = ''] = PULL_URL.exec(comment.pull_request_url) ?? [];
-      const pullNumber = Number(number);
+      const pullUrl = PULL_URL.exec(String(comment?.pull_request_url));
+      if (first.status !== 200 || !pullUrl) throw new Error(`cannot read review comment ${thread} (HTTP ${first.status})`);
+      // A comment whose pull request URL was read is an object.
+      if ((comment as { in_reply_to_id?: unknown }).in_reply_to_id != null) return `${thread} is a reply, not the first comment of its thread; name the thread by its first comment, as pr-signals prints it`;
+      const repository = pullUrl[1] as string;
+      const pullNumber = Number(pullUrl[2]);
       const pull = await sys.http(`${API}/repos/${repository}/pulls/${pullNumber}`, { token });
       const author = (pull.json as { user?: { login?: unknown } | null } | null)?.user?.login;
       if (pull.status !== 200) throw new Error(`cannot read pull request #${pullNumber} (HTTP ${pull.status})`);
@@ -293,10 +300,11 @@ async function answer(session: Session, { thread, resolve, reaction, comment }: 
       io.out(`✓ replied on ${thread} (#${found.pull})`);
     }
   }
-  if (reaction !== undefined && comment !== undefined) {
+  // threadArgs gives a reaction with the comment it goes on, or neither.
+  if (reaction !== undefined) {
     // A reaction that fails never keeps the thread from being resolved: an open thread holds the merge, a missing emoji does not.
     try {
-      await transport.react(found, comment, reaction);
+      await transport.react(found, comment as string, reaction);
       io.out(`✓ reacted ${reaction} on ${comment}`);
     } catch (error) {
       io.err(`⚠ the ${reaction} on ${comment} failed (${why(error)}); going on`);
@@ -386,7 +394,7 @@ export async function reviewThread(sys: Sys, io: Output, args: readonly string[]
   }
   const done: string[] = [];
   const stopped = (index: number): void => {
-    io.err(`review-thread: stopped at ${threads[index]?.thread} (${index + 1} of ${threads.length}); done: ${done.join(', ') || 'none'}; not done: ${threads.slice(index).map((t) => t.thread).join(', ')}`);
+    io.err(`review-thread: stopped at ${(threads[index] as ThreadArgs).thread} (${index + 1} of ${threads.length}); done: ${done.join(', ') || 'none'}; not done: ${threads.slice(index).map((t) => t.thread).join(', ')}`);
   };
   for (const [index, one] of threads.entries()) {
     let problem: string | undefined;
