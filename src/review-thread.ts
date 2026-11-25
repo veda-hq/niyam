@@ -235,7 +235,9 @@ function cloudTransport(sys: Sys, token: string, slug: string, thread: string): 
       const first = await sys.http(`${API}/repos/${slug}/pulls/comments/${thread}`, { token });
       const comment = first.json as { pull_request_url?: unknown; in_reply_to_id?: unknown } | null;
       if (first.status === 404) return `${thread} is not a review comment in ${slug}`;
-      const pullUrl = PULL_URL.exec(String(comment?.pull_request_url));
+      const url = comment?.pull_request_url;
+      // Only a string: a list holding the URL would read as one if coerced.
+      const pullUrl = typeof url === 'string' ? PULL_URL.exec(url) : null;
       if (first.status !== 200 || !pullUrl) throw new Error(`cannot read review comment ${thread} (HTTP ${first.status})`);
       // A comment whose pull request URL was read is an object.
       if ((comment as { in_reply_to_id?: unknown }).in_reply_to_id != null) return `${thread} is a reply, not the first comment of its thread; name the thread by its first comment, as pr-signals prints it`;

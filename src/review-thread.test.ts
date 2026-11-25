@@ -248,6 +248,7 @@ describe('reviewThread', () => {
   it('reacts on any comment of the thread, not only its first', async () => {
     const sys = session({}, false, [{ nodes: [{ id: COMMENT, body: 'Use a constant.' }, { id: 'PRRC_kwDOreply', body: 'Done.' }], pageInfo: { hasNextPage: false } }]);
     assert.deepEqual((await run(sys, [THREAD, '--reaction', '+1', '--comment-id', 'PRRC_kwDOreply'])).out, ['✓ reacted +1 on PRRC_kwDOreply']);
+    assert.deepEqual(mutations(sys).map((m) => m.variables), [{ id: 'PRRC_kwDOreply', content: 'THUMBS_UP' }]);
   });
 
   for (const [name, answer, message] of [
@@ -658,6 +659,7 @@ describe('reviewThread in a Claude cloud session', () => {
     sys.route('GET', `${REPO}/pulls/40/ccr/review_threads`, { status: 200, json: [{ resolved: true, comment_ids: [999] }, { resolved: false, comment_ids: [123, 124] }] });
     sys.route('POST', `${REPO}/pulls/comments/124/reactions`, { status: 201, json: { content: '+1' } });
     assert.deepEqual((await run(sys, ['123', '--reaction', '+1', '--comment-id', '124', '--resolve'])).out, ['✓ reacted +1 on 124', '✓ resolved 123 (#40)']);
+    assert.deepEqual(posts(sys), ['pulls/comments/124/reactions {"content":"+1"}', 'pulls/40/ccr/comments/123/resolve null']);
   });
 
   it('goes on when a reaction fails, saying what GitHub refused', async () => {
@@ -684,6 +686,7 @@ describe('reviewThread in a Claude cloud session', () => {
   for (const [name, answer, status] of [
     ['no comment', { status: 200, json: null }, 200],
     ['a comment on no pull request', { status: 200, json: { pull_request_url: `https://api.github.com${REPO}/pulls/40/files`, in_reply_to_id: null } }, 200],
+    ['a pull request URL that is not text', { status: 200, json: { pull_request_url: [`https://api.github.com${REPO}/pulls/40`], in_reply_to_id: null } }, 200],
     ['an error status, though it gives the comment', { status: 500, json: { pull_request_url: `https://api.github.com${REPO}/pulls/40`, in_reply_to_id: null } }, 500],
   ] as const) {
     it(`throws when GitHub's answer for the comment is ${name}`, async () => {
