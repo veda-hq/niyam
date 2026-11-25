@@ -2701,3 +2701,22 @@
     rule runs the command without a prompt.
   - One thread per run is as before, on a machine and in a Claude cloud
     session. Cost: one more input format to keep.
+- **2026-11-24 — Decision: CODEOWNERS comes back as a record of ownership,
+  and holds no merge (Work item #468, slice #604).** Alok, 2026-11-24: "I
+  wanted to keep CODEOWNERS, just to highlight who is the codeowner but
+  wanted it not to block anything for now."
+  - `.github/CODEOWNERS` is restored with the paths #578 removed, each
+    naming `@AlokBansal8`: `.github/workflows/shared-guard.yml`,
+    `scripts/guard.mjs`, `scripts/guard.test.mjs`, `scripts/merge-queue.mjs`,
+    `scripts/merge-queue.test.mjs` and the file itself. Its header says it
+    records who owns them and holds no merge.
+  - `main`'s ruleset stays as it is, with "Require review from Code
+    Owners" off (read back 2026-11-24: `require_code_owner_review: false`,
+    no approving reviews required), so GitHub only requests his review on a pull request that
+    touches an owned path, and nothing waits for it. Guard still holds each
+    path: the `.github/` floor and `"guard": ["scripts/*.mjs"]`.
+  - Nothing in niyam reads review requests or review decisions, so the
+    request changes no check.
+  - #578's Decision (above) stands except that CODEOWNERS is back: Guard, not
+    an owner's review, holds a change to the guard itself. veda's side is
+    veda-hq/veda#572.

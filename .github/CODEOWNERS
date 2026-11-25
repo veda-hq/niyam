@@ -1,0 +1,16 @@
+# Who owns these files (#604). This file records ownership and holds no
+# merge: `main`'s ruleset does not require review from Code Owners, so GitHub
+# only requests Alok's review on a pull request that touches one of these
+# paths, and nothing waits for it. Guard holds each path instead (the
+# `.github/` floor, and "guard": ["scripts/*.mjs"] in .github/niyam.json;
+# #578): a change to one passes `niyam-guard / judge` only when its approved
+# slice names the file under **Guards:**, unless Guard exempts it as a
+# mechanical pin move: Dependabot's sha bumps, or an onboard's version moves
+# to a niyam release.
+/.github/workflows/shared-guard.yml @AlokBansal8
+/scripts/guard.mjs @AlokBansal8
+/scripts/guard.test.mjs @AlokBansal8
+# What Guard and PR identity both read of Mergify's merge-queue draft (#524).
+/scripts/merge-queue.mjs @AlokBansal8
+/scripts/merge-queue.test.mjs @AlokBansal8
+/.github/CODEOWNERS @AlokBansal8
