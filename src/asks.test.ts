@@ -676,6 +676,97 @@ describe('needsOwner', () => {
     assert.equal((await runJob(sys)).out.at(-1), 'needs-owner: 100 labelled needs-owner, 0 cleared');
   });
 
+  it('sweeps: takes needs-owner off every closed issue and pull request, answered or not (#639)', async () => {
+    const sys = job('schedule', {});
+    sys.route('GET', `${API}/repos/${SLUG}/issues?state=open&labels=needs-owner&per_page=100&page=1`, { status: 200, json: [] });
+    const closed = `${API}/repos/${SLUG}/issues?state=closed&labels=needs-owner&per_page=100&page=1`;
+    sys.route('GET', closed, { status: 200, json: [{ number: 604 }, { number: 611, pull_request: {} }] });
+    sys.route('DELETE', `${API}/repos/${SLUG}/issues/604/labels/needs-owner`, { status: 200, json: null });
+    // Gone already, as when the owner took it off by hand meanwhile.
+    sys.route('DELETE', `${API}/repos/${SLUG}/issues/611/labels/needs-owner`, { status: 404, json: null });
+    assert.deepEqual((await runJob(sys)).out, [
+      '#604: closed; needs-owner taken off',
+      '#611: closed; needs-owner taken off',
+      'needs-owner: 0 labelled needs-owner, 0 cleared; 2 closed, cleared',
+    ]);
+    // Closed issues are not judged by their asks: no comment is read.
+    assert.deepEqual(
+      sys.requests.map((request) => `${request.method} ${request.url.replace(API, '')}`),
+      [
+        `GET /repos/${SLUG}/issues?state=open&labels=needs-owner&per_page=100&page=1`,
+        `GET /repos/${SLUG}/issues?state=closed&labels=needs-owner&per_page=100&page=1`,
+        `DELETE /repos/${SLUG}/issues/604/labels/needs-owner`,
+        `DELETE /repos/${SLUG}/issues/611/labels/needs-owner`,
+      ],
+    );
+    const refused = job('schedule', {});
+    refused.route('GET', `${API}/repos/${SLUG}/issues?state=open&labels=needs-owner&per_page=100&page=1`, { status: 200, json: [] });
+    refused.route('GET', closed, { status: 403, json: null });
+    await assert.rejects(needsOwner(refused, capture().io), /cannot read \/repos\/example-org\/example-app\/issues\?state=closed&labels=needs-owner \(HTTP 403\)/);
+  });
+
+  describe('a reopened issue (#639)', () => {
+    const at = (hour: number) => `2026-11-25T${String(hour).padStart(2, '0')}:00:00Z`;
+    const reopen = (labels: string[] = []) => job('issues', { action: 'reopened', sender: { login: OWNER }, issue: { number: 7, labels: labels.map((name) => ({ name })) } });
+    const ask = { id: 70, body: `Needs you: ship? ${PAGE}`, user: { login: AGENT }, created_at: at(1), updated_at: at(1) };
+    /** Routes #7's comments, the owner's 👍 on the ask at `liked`, and #7's events. */
+    const on7 = (sys: FakeSys, comments: unknown[], liked?: string, events: unknown[] = []) => {
+      sys.route('GET', `${API}/repos/${SLUG}/issues/7/comments?per_page=100&page=1`, { status: 200, json: comments });
+      sys.route('GET', `${API}/repos/${SLUG}/issues/comments/70/reactions?content=%2B1&per_page=100&page=1`, { status: 200, json: liked ? [{ user: { login: OWNER }, created_at: liked }] : [] });
+      sys.route('GET', `${API}/repos/${SLUG}/issues/7/events?per_page=100&page=1`, { status: 200, json: events });
+    };
+
+    it('is labelled again where an ask on it still waits', async () => {
+      const sys = reopen();
+      on7(sys, [ask]);
+      assert.deepEqual((await runJob(sys)).out, [
+        'needs-owner: #7 was reopened and waits on the owner (the Needs you: ask, https://github.com/example-org/example-app/issues/7); labelled needs-owner',
+      ]);
+      assert.deepEqual(calls(sys), [`POST /repos/${SLUG}/issues/7/labels`]);
+    });
+
+    it('is left unlabelled where the owner answered, approved it after the ask, or no agent asked', async () => {
+      const liked = reopen();
+      on7(liked, [ask], at(2));
+      assert.deepEqual((await runJob(liked)).out, ['needs-owner: #7 was reopened, and nothing on it waits on the owner; not labelled needs-owner']);
+      assert.deepEqual(calls(liked), []);
+
+      const approved = reopen();
+      on7(approved, [ask], undefined, [
+        { event: 'labeled', label: { name: 'approved' }, actor: { login: AGENT }, created_at: at(2) },
+        { event: 'labeled', label: { name: 'approved' }, actor: { login: OWNER }, created_at: at(3) },
+      ]);
+      assert.deepEqual((await runJob(approved)).out, ['needs-owner: #7 was reopened, and the owner approved it after its asks; not labelled needs-owner']);
+      assert.deepEqual(calls(approved), []);
+
+      // An approval before the ask answers nothing, so the ask still waits.
+      const early = reopen();
+      on7(early, [ask], undefined, [{ event: 'labeled', label: { name: 'approved' }, actor: { login: OWNER }, created_at: '2026-11-24T23:00:00Z' }]);
+      assert.match((await runJob(early)).out[0] ?? '', /was reopened and waits on the owner/);
+      assert.deepEqual(calls(early), [`POST /repos/${SLUG}/issues/7/labels`]);
+
+      // A label whose time cannot be read, or that is put at noon at +12:00 (00:00 UTC, before the ask), answers nothing.
+      const unread = reopen();
+      on7(unread, [ask], undefined, [
+        { event: 'labeled', label: { name: 'approved' }, actor: { login: OWNER } },
+        { event: 'labeled', label: { name: 'approved' }, actor: { login: OWNER }, created_at: '2026-11-25T12:00:00+12:00' },
+      ]);
+      assert.match((await runJob(unread)).out[0] ?? '', /was reopened and waits on the owner/);
+      assert.deepEqual(calls(unread), [`POST /repos/${SLUG}/issues/7/labels`]);
+
+      const unasked = reopen();
+      on7(unasked, [{ id: 71, body: 'a plain comment', user: { login: AGENT }, created_at: at(1) }]);
+      assert.deepEqual((await runJob(unasked)).out, ['needs-owner: #7 was reopened, and nothing on it waits on the owner; not labelled needs-owner']);
+      assert.deepEqual(calls(unasked), []);
+    });
+
+    it('is left as it is where it still has the label', async () => {
+      const sys = reopen(['needs-owner']);
+      assert.deepEqual((await runJob(sys)).out, ['needs-owner: #7 was reopened, already labelled needs-owner']);
+      assert.deepEqual(sys.requests, []);
+    });
+  });
+
   it('fails when GitHub refuses a read or a label', async () => {
     const list = job('schedule', {});
     list.route('GET', `${API}/repos/${SLUG}/issues?state=open&labels=needs-owner&per_page=100&page=1`, { status: 403, json: null });

@@ -880,10 +880,19 @@ its work item, so a slice taken out and added again waits on the owner
 again. The sweep reads that from the slice's own timeline; unlike the work
 rules, it misses an addition GitHub records only on the work item's. An issue labelled
 with no agent ask on it, such as the weekly job's undo issues, is left as it
-is, unless the owner's batch answer names it. Only comments
+is, unless the owner's batch answer names it.
+
+A closed issue or pull request never keeps the label (#639). Each sweep
+takes it off every closed one, answered or not, since a closed one waits on
+no one. The owner's 👍 sends GitHub no event, and GitHub runs the hourly
+cron far less often than hourly, so a slice 👍'd and then closed by its
+merge before a sweep would otherwise keep the label for good. When an issue
+is reopened, the job judges it as the sweep judges an open issue, and labels
+it again where an ask on it still waits: one with no answer above, and no
+`approved` label of the owner's since the latest such ask. Only comments
 that may ask or decide, from the owner, a member or a collaborator, the
-`approved` label and the hourly cron start the job, so other comments, and an
-outsider's, run nothing.
+`approved` label, an issue reopened, and the hourly cron start the job, so
+other comments, and an outsider's, run nothing.
 
 **Answering review threads.** In an agent session, `niyam
 review-thread <thread-id> --reply <text> --resolve` replies on a review

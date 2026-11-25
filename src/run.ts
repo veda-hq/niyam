@@ -70,7 +70,7 @@ Commands:
   pr-started       Run by the shared workflow: an opened pull request moves its slice to In Progress on the board
   pr-design        Run by the shared workflow: each state of the slice links a frame from the design library
   decisions-weekly Run by the shared workflow weekly: decision checks, undo issues, expiring labels
-  needs-owner      Run by the shared workflow: an ask labels its issue needs-owner; the owner's answer takes it off
+  needs-owner      Run by the shared workflow: an ask labels its issue needs-owner; the owner's answer, or its closing, takes it off
   issue-type       Run by the shared workflow: an issue opened with no type gets the work model's
   reviews-due      For the review routine: open decisions whose review date has come, as JSON lines
   pre-push         Run by the pre-push git hook: the same rules before an agent session pushes
