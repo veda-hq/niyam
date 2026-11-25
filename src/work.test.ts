@@ -995,7 +995,8 @@ describe('prWorkRules', () => {
     });
   }
 
-  // The `closed` event runs after the merge has closed the slice (#649: #598, run 45394953619).
+  // An event after the merge reads the slice the merge closed (#649: #598's description edited 7 seconds after its
+  // merge, run 45394953619).
   for (const [merged, said] of [
     [true, 'merged'],
     [false, 'closed'],

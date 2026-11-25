@@ -644,8 +644,9 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
     io.out(offLine('pr-work-rules', 'work-rules', PERSONAL_REPO));
     return 0;
   }
-  // A closed pull request merges nothing more, so no rule has anything to hold. Its `closed` event runs after the
-  // merge has closed its slice, where an open one's run would read the slice as closed and call it a fix (#649).
+  // A closed pull request merges nothing more, so no rule has anything to hold. The workflow skips its `closed` event,
+  // but an event after it, such as an edit to its description once merged, would read the slice the merge closed and
+  // call the pull request a fix (#649).
   if (pull.state === 'closed') {
     io.out(`pr-work-rules: #${pull.number} is ${pull.merged === true ? 'merged' : 'closed'}; nothing to judge`);
     return 0;

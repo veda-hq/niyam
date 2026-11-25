@@ -654,9 +654,10 @@ slice may be built:
 
 A pull request already merged or closed merges nothing more, so Work rules
 passes it unjudged, saying so: `pr-work-rules: #N is merged; nothing to
-judge`, or `is closed` for one closed without merging. Its `closed` event
-runs after the merge has closed its slice, which would otherwise read as a
-fix still owed (#649).
+judge`, or `is closed` for one closed without merging. Work rules skips
+the `closed` event itself, but an event after it, such as an edit to a
+merged pull request's description, would otherwise read the slice the
+merge closed as a fix still owed (#649).
 
 A refusal that sends the agent to the owner about an issue or a comment,
 here, in Guard, in `propose` and in the needs-owner job, names its full
