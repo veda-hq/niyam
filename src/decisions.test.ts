@@ -69,14 +69,17 @@ describe('lastEditors', () => {
   it("names each issue's last editor with its body, 100 issues a request, and skips the nodes GitHub cannot see", async () => {
     const sys = new FakeSys();
     const issues = Array.from({ length: 101 }, (_, i) => ({ number: i + 1, node_id: `I_${i + 1}` }));
-    sys.route('POST', '/graphql', {
-      status: 200,
-      json: { data: { nodes: [{ number: 1, body: 'Kind: Bet', editor: { login: OWNER } }, { number: 2, editor: null }, null] } },
-    });
+    const answers = [
+      { data: { nodes: [{ number: 1, body: 'Kind: Bet', editor: { login: OWNER } }, { number: 2, editor: null }, null] } },
+      { data: { nodes: [{ number: 101, body: 'Kind: Risk', editor: { login: AGENT } }] } },
+    ];
+    let asks = 0;
+    sys.route('POST', '/graphql', () => ({ status: 200, json: answers[asks++] }));
     const editors = await lastEditors(sys, 'ghs_run', issues);
     assert.deepEqual([...editors], [
       [1, { editor: OWNER, body: 'Kind: Bet' }],
       [2, { editor: undefined, body: '' }],
+      [101, { editor: AGENT, body: 'Kind: Risk' }],
     ]);
     const asked = sys.requests.filter((r) => r.url.endsWith('/graphql'));
     assert.deepEqual(
