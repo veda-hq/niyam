@@ -92,17 +92,13 @@ export class Refused extends Error {
   }
 }
 
-/** Every entry a REST list holds, reading 100 a page; none, when `gone` and GitHub answers 410 Gone. */
-export async function pages(sys: Sys, token: string, url: string, gone = false): Promise<unknown[]> {
-  const entries: unknown[] = [];
-  for (let page = 1; ; page++) {
-    const pageUrl = `${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`;
-    const { status, json } = await sys.http(pageUrl, { token });
-    if (gone && status === 410) return entries;
-    if (status !== 200 || !Array.isArray(json)) throw new Refused(`cannot read ${url} (HTTP ${status})`, status, json);
-    entries.push(...(json as unknown[]));
-    if (json.length < 100) return entries;
-  }
+/** Every entry a REST list holds from `page` on, reading 100 a page; none, when `gone` and GitHub answers 410 Gone. */
+export async function pages(sys: Sys, token: string, url: string, gone = false, page = 1): Promise<unknown[]> {
+  const pageUrl = `${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`;
+  const { status, json } = await sys.http(pageUrl, { token });
+  if (gone && status === 410) return [];
+  if (status !== 200 || !Array.isArray(json)) throw new Refused(`cannot read ${url} (HTTP ${status})`, status, json);
+  return json.length < 100 ? (json as unknown[]) : [...(json as unknown[]), ...(await pages(sys, token, url, gone, page + 1))];
 }
 
 /** The organisation's issue types, enabled and disabled. */
@@ -130,7 +126,7 @@ interface Holder {
 /** A listed issue as a Holder, without its repository's archived flag; undefined for a pull request or a row it cannot read. */
 function asHolder(repo: string, row: unknown, from: string): Omit<Holder, 'archived'> | undefined {
   const issue = row as { number?: unknown; url?: unknown; pull_request?: unknown; parent_issue_url?: unknown; sub_issues_summary?: { total?: unknown }; updated_at?: unknown };
-  if (issue.pull_request || typeof issue.number !== 'number' || typeof issue.url !== 'string') return undefined;
+  if (issue?.pull_request || typeof issue?.number !== 'number' || typeof issue.url !== 'string') return undefined;
   return {
     repo,
     number: issue.number,
@@ -194,13 +190,15 @@ export async function approvalsOf(sys: Sys, token: string, repo: string): Promis
   if (status === 404) return undefined;
   const content = (json as { content?: unknown } | null)?.content;
   if (status !== 200 || typeof content !== 'string') throw new Error(`cannot read ${SETTINGS_PATH} in ${repo} (HTTP ${status})`);
+  let settings: unknown;
   try {
-    const approvals = (JSON.parse(Buffer.from(content, 'base64').toString('utf8')) as { approvals?: unknown } | null)?.approvals;
-    return typeof approvals === 'number' && Number.isInteger(approvals) && approvals > 0 ? approvals : undefined;
+    settings = JSON.parse(Buffer.from(content, 'base64').toString('utf8'));
   } catch {
     // Settings that do not parse name no Approvals issue; onboard in that repository says what is wrong with them.
-    return undefined;
   }
+  const approvals = (settings as { approvals?: unknown } | null | undefined)?.approvals;
+  // Number.isInteger is false for anything but a number.
+  return Number.isInteger(approvals) && (approvals as number) > 0 ? (approvals as number) : undefined;
 }
 
 /**
@@ -245,7 +243,6 @@ export async function typesPlan(sys: Sys, token: string, org: string): Promise<T
   // A parent being retyped is read as the type it gets; any other is asked of GitHub once.
   const byUrl = new Map(holders.map((holder) => [holder.url, holder]));
   const asked = new Map<string, string | undefined>();
-  const decided = new Map<string, Retype>();
   const typeAt = async (url: string): Promise<string | undefined> => {
     const holder = byUrl.get(url);
     if (holder) return (await decide(holder)).to;
@@ -257,13 +254,10 @@ export async function typesPlan(sys: Sys, token: string, org: string): Promise<T
     }
     return asked.get(url);
   };
+  // Deciding an issue again gives the same answer and asks GitHub nothing new, so nothing keeps what it decided.
   const decide = async (holder: Holder): Promise<Retype> => {
-    const known = decided.get(holder.url);
-    if (known) return known;
     const parent = holder.parent ? { number: holder.parent.split('/').at(-1) as string, type: await typeAt(holder.parent) } : undefined;
-    const retype: Retype = { repo: holder.repo, number: holder.number, from: holder.from, ...typeFor(parent, holder.subIssues) };
-    decided.set(holder.url, retype);
-    return retype;
+    return { repo: holder.repo, number: holder.number, from: holder.from, ...typeFor(parent, holder.subIssues) };
   };
   const retype: Retype[] = [];
   const held: Retype[] = [];
@@ -304,7 +298,7 @@ export function typesChange(plan: TypesPlan): boolean {
 
 const names = (types: { name: string }[]): string => types.map((type) => type.name).join(', ');
 const plural = (count: number, word: string): string => `${count} ${word}${count === 1 ? '' : 's'}`;
-const where = (issue: { repo: string; number: number }): string => `${issue.repo.split('/').at(-1)}#${issue.number}`;
+const where = (issue: { repo: string; number: number }): string => `${issue.repo.slice(issue.repo.indexOf('/') + 1)}#${issue.number}`;
 const isBare = (issue: Retype): boolean => issue.from === NO_TYPE;
 
 /** The plan in a few words, for onboard's plan; typesLines names what it counts. */
