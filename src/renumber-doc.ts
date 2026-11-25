@@ -59,8 +59,8 @@ export function rewriteReferences(text: string, kind: DocKind, from: string, to:
  * kind does not own are left alone: a bare number there could name either kind.
  */
 export function rewriteRelationships(text: string, kind: DocKind, from: string, to: string, path: string): string {
+  // With no keys of the kind's, no line matches below, so the text comes back as it was.
   const keys = new Set(relationshipKeysFor(kind, path));
-  if (keys.size === 0) return text;
   const swap = (value: string) => (value === from ? to : value);
   const LIST = /^\s*\d{4}(\s*,\s*\d{4})*\s*$/;
   const swapInner = (inner: string) => (LIST.test(inner) ? inner.replace(/\d{4}/g, swap) : inner.replace(/^(\s*)(\d{4})(?!\d)/, (_whole, lead: string, number: string) => `${lead}${swap(number)}`));
@@ -170,16 +170,17 @@ export function residualBareRefs(settings: DocSettings, text: string, from: stri
   // on purpose, not parsed: a malformed block must still be read.
   const all = text.split('\n').map((line) => line.replace(/\r$/, ''));
   const end = all.findIndex((line, i) => i > 0 && line.startsWith('---'));
-  if (all[0] !== '---' || end < 0) return [];
+  if (all[0] !== '---' || end === -1) return [];
   const bare = new RegExp(`(?<![A-Za-z0-9-])${literal(from)}(?!\\d)`);
-  const classified = new Set(Object.values(settings.kinds).flatMap((kind) => [kind.frontmatterKey, ...relationshipKeysFor(kind, path)]));
+  // Undefined is never a key, so a line under none is never classified.
+  const classified = new Set<string | undefined>(Object.values(settings.kinds).flatMap((kind) => [kind.frontmatterKey, ...relationshipKeysFor(kind, path)]));
   const flagged: string[] = [];
-  let enclosing: string | null = null;
+  let enclosing: string | undefined;
   for (const line of all.slice(1, end)) {
     const entry = /^\s*([A-Za-z_][A-Za-z0-9_]*):/.exec(line);
     if (entry !== null) enclosing = entry[1] as string;
-    else if (!/^\s*-\s/.test(line) && line.trim() !== '') enclosing = null;
-    if (!bare.test(line) || (enclosing !== null && classified.has(enclosing))) continue;
+    else if (!/^\s*-\s/.test(line) && line.trim() !== '') enclosing = undefined;
+    if (!bare.test(line) || classified.has(enclosing)) continue;
     flagged.push(line.trim());
   }
   return flagged;
@@ -267,8 +268,10 @@ export function renumberArgs(args: readonly string[]): { kind: string; from: str
   const rest = args.filter((arg) => arg !== '--apply');
   const odd = rest.find((arg) => arg.startsWith('-'));
   if (odd !== undefined) throw new Error(`renumber-doc: unknown option "${odd}"`);
-  const [kind, from, to, extra] = rest;
-  if (kind === undefined || from === undefined || to === undefined || extra !== undefined || !FOUR_DIGITS.test(from) || !FOUR_DIGITS.test(to)) throw new Error('renumber-doc needs a document kind and two four-digit numbers: renumber-doc <kind> <from> <to> [--apply]');
+  const usage = 'renumber-doc needs a document kind and two four-digit numbers: renumber-doc <kind> <from> <to> [--apply]';
+  if (rest.length !== 3) throw new Error(usage);
+  const [kind, from, to] = rest as [string, string, string];
+  if (!FOUR_DIGITS.test(from) || !FOUR_DIGITS.test(to)) throw new Error(usage);
   if (from === to) throw new Error(`renumber-doc: ${from} and ${to} are the same number`);
   return { kind, from, to, apply: args.includes('--apply') };
 }

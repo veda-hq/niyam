@@ -30,7 +30,8 @@ export async function cloudLogin(sys: Sys): Promise<{ login: string; id?: number
     const { status, json } = await sys.http(`${API}/user`, { token: cloudToken(sys) });
     const { login, id } = (json as { login?: unknown; id?: unknown } | null) ?? {};
     if (status !== 200 || typeof login !== 'string') return { problem: `GitHub answered HTTP ${status} when asked who this session is` };
-    return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? { login, id } : { login };
+    // isSafeInteger is false for anything not a number, so the cast below never sees one.
+    return Number.isSafeInteger(id) && (id as number) > 0 ? { login, id: id as number } : { login };
   } catch (error) {
     return { problem: `GitHub could not be asked who this session is (${error instanceof Error ? error.message : String(error)})` };
   }
@@ -124,7 +125,8 @@ function probeSignature(sys: Sys, root: string, vars: [string, string][], public
 }
 
 function lastLine(text: string): string {
-  return text.trim().split('\n').at(-1) ?? '';
+  // split gives at least one piece, so the last one is always there.
+  return text.trim().split('\n').at(-1) as string;
 }
 
 function messageOf(error: unknown): string {
@@ -158,12 +160,12 @@ export function ranFromSetup(sys: Sys): boolean {
 
 /** The repo's cloud setup file the Setup snippet ran in this environment, as its mark records it; undefined when the mark names none, or none is there. */
 export function fileFromSetup(sys: Sys): string | undefined {
-  if (!sys.exists(FROM_SETUP)) return undefined;
   try {
-    return sys.read(FROM_SETUP).trim().endsWith(`/${CLOUD_SETUP_PATH}`) ? CLOUD_SETUP_PATH : undefined;
+    if (sys.read(FROM_SETUP).trim().endsWith(`/${CLOUD_SETUP_PATH}`)) return CLOUD_SETUP_PATH;
   } catch {
-    return undefined;
+    // No mark, or one that cannot be read, names no file.
   }
+  return undefined;
 }
 
 /** The release `cloudRepoScript` installs, from its first comment; undefined when `text` is not one. */
@@ -186,14 +188,13 @@ export function repoReleases(sys: Sys, root: string): { pinned: string | undefin
     const pins = new Set(workflowPins(sys.read(`${root}/${workflow}`)));
     if (pins.size === 1) [pinned] = pins;
   } catch {
-    pinned = undefined;
+    // A workflow that is missing or cannot be read pins none.
   }
-  const file = `${root}/${script}`;
   let scripted: string | undefined;
   try {
-    scripted = sys.exists(file) ? cloudScriptVersion(sys.read(file)) : undefined;
+    scripted = cloudScriptVersion(sys.read(`${root}/${script}`));
   } catch {
-    scripted = undefined;
+    // A setup file that is missing or cannot be read installs none.
   }
   return { pinned, scripted, workflow, script };
 }
@@ -213,8 +214,8 @@ export async function releaseSha256(sys: Sys, version: string, token: string): P
   try {
     const { status, json } = await sys.http(`${API}/repos/${PRODUCT}/releases/tags/v${version}`, { token });
     if (status !== 200) return { problem: `GitHub answered HTTP ${status} for the v${version} release` };
-    const assets = (json as { assets?: { name?: unknown; digest?: unknown }[] } | null)?.assets ?? [];
-    const digest = assets.find((asset) => asset.name === name)?.digest;
+    const assets = (json as { assets?: { name?: unknown; digest?: unknown }[] } | null)?.assets;
+    const digest = assets?.find((asset) => asset.name === name)?.digest;
     const sha256 = typeof digest === 'string' ? /^sha256:([0-9a-f]{64})$/.exec(digest)?.[1] : undefined;
     return sha256 ? { sha256 } : { problem: `the v${version} release names no sha256 for ${name}` };
   } catch (error) {
