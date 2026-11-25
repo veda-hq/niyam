@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
+import { before, describe, it } from 'node:test';
 
 import {
   commitMessage,
@@ -18,8 +18,13 @@ import {
   type DismissOptions,
 } from './cubic-dismiss.ts';
 import { FakeSys, ROOT, capture, type Call } from './fake.test.ts';
+import { maskProcessGitEnv, removeFixtureRoot } from './hermetic-git.ts';
 import { realSys } from './sys.ts';
 import type { ExecResult } from './types.ts';
+
+// The real-git tests' git, and cubicDismiss's, read no global config: a trace2 target there writes into a fixture's
+// .git as it is removed, and the removal fails.
+before(() => maskProcessGitEnv());
 
 const SHA = 'a'.repeat(40);
 const options = (over: Partial<DismissOptions> = {}): DismissOptions => ({ dismissals: [{ title: 'T', reason: 'r' }], basis: 'evidence', cite: 'src/a.ts', ...over });
@@ -344,7 +349,7 @@ describe('cubicDismiss', () => {
       assert.equal(cubicDismiss(sys, again.io, args), 0, again.err.join('\n'));
       assert.match(git('log', '-1', '--format=%(trailers:key=Dismissal-Basis,valueonly)'), /^evidence/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeFixtureRoot(dir);
     }
   });
 
@@ -395,7 +400,7 @@ describe('cubicDismiss', () => {
       assert.deepEqual(readdirSync(away), ['ledger']);
       assert.equal(readFileSync(join(away, 'ledger'), 'utf8'), 'outside\n');
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeFixtureRoot(dir);
     }
   });
 });
