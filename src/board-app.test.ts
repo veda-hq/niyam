@@ -15,7 +15,13 @@ const ORG_SECRETS = '/orgs/example-org/actions/secrets';
 const INSTALLATIONS = '/orgs/example-org/installations?per_page=100&page=1';
 const CODE = 'code-1';
 const APP = { id: 9, slug: 'niyam-board-example-org', client_id: 'Iv23liExample', pem: '-----BEGIN RSA PRIVATE KEY-----\nMIIexample\n-----END RSA PRIVATE KEY-----\n' };
-const BY_HAND = boardAppSteps(SLUG, BOARD_SECRETS);
+const BY_HAND =
+  'Once for example-org: make a GitHub App with organization Projects read and write and repository Issues read at https://github.com/organizations/example-org/settings/apps/new, ' +
+  'install it on example-org/example-app, and set its client id as NIYAM_BOARD_APP_ID and its private key as NIYAM_BOARD_APP_KEY, Actions secrets of the organization or of https://github.com/example-org/example-app/settings/secrets/actions. ' +
+  'Until then a slice moves to In Progress on the board only from a desktop push.';
+/** The longest a run waits, in sleeps: ten minutes for Create at 500 ms, then ten for Install at 3 s. */
+const MOST_SLEEPS = 1200 + 200;
+const TEXT = { 'content-type': 'text/plain; charset=utf-8' };
 
 /** The value in an HTML attribute, as a browser reads it. */
 function unescape(text: string): string {
@@ -39,9 +45,10 @@ async function noApp(click: 'create' | 'none' = 'create', state?: string): Promi
   await sodium.ready;
   const pair = sodium.crypto_box_keypair();
   const sys = new FakeSys();
-  // Each wait lets the test's own browser act, as time passing would.
+  // Each wait lets the test's own browser act, as time passing would; a wait past the longest a run can take fails.
   sys.sleep = (ms) => {
     sys.slept.push(ms);
+    if (sys.slept.length > MOST_SLEEPS) return Promise.reject(new Error('slept past every wait'));
     return new Promise((resolve) => setImmediate(resolve));
   };
   sys.route('GET', `/repos/${SLUG}`, { status: 200, json: repoJson() });
@@ -84,20 +91,45 @@ describe('the board app', () => {
     assert.equal(boardAppName('example-org'), 'niyam board example-org');
     assert.equal(boardAppName('an-organization-with-a-long-name-x'), 'niyam board an-organization-with-a');
     assert.equal(boardAppName('an-organization-with-a-long-name-x').length, 34);
+    // A cut that ends in a space drops it.
+    assert.equal(boardAppName(`${'x'.repeat(21)} tail`), `niyam board ${'x'.repeat(21)}`);
+  });
+
+  it('says what the owner does by hand, naming the secrets missing, and the ones that may be set already', () => {
+    assert.equal(boardAppSteps(SLUG, BOARD_SECRETS), BY_HAND);
+    assert.equal(
+      boardAppSteps(SLUG, ['NIYAM_BOARD_APP_KEY'], true),
+      'Unless example-org/example-app has the Actions secrets NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY already, once for example-org: make a GitHub App with organization Projects read and write and repository Issues read at https://github.com/organizations/example-org/settings/apps/new, ' +
+        'install it on example-org/example-app, and set its private key as NIYAM_BOARD_APP_KEY, Actions secrets of the organization or of https://github.com/example-org/example-app/settings/secrets/actions. ' +
+        'Until then a slice moves to In Progress on the board only from a desktop push.',
+    );
   });
 
   it("asks for organization Projects write and Issues read alone, with no webhook, and sends the owner back to onboard's page", () => {
-    const manifest = boardAppManifest('example-org', 'http://127.0.0.1:47001/made');
-    assert.deepEqual(manifest.default_permissions, { organization_projects: 'write', issues: 'read' });
-    assert.deepEqual(manifest.hook_attributes, { url: 'https://github.com/veda-hq/niyam', active: false });
-    assert.deepEqual([manifest.redirect_url, manifest.public, manifest.default_events], ['http://127.0.0.1:47001/made', false, []]);
+    assert.deepEqual(boardAppManifest('example-org', 'http://127.0.0.1:47001/made'), {
+      name: 'niyam board example-org',
+      url: 'https://github.com/veda-hq/niyam',
+      description: 'Moves a slice to In Progress on the board when its pull request opens. Made by niyam onboard.',
+      hook_attributes: { url: 'https://github.com/veda-hq/niyam', active: false },
+      redirect_url: 'http://127.0.0.1:47001/made',
+      public: false,
+      default_permissions: { organization_projects: 'write', issues: 'read' },
+      default_events: [],
+    });
   });
 
   it("posts the manifest from its page, escaped, to the organization's new-app page with the run's state", () => {
-    const page = startPage('example-org', { name: 'a "quoted" <name> & more' }, 'abc');
-    assert.ok(page.includes('action="https://github.com/organizations/example-org/settings/apps/new?state=abc"'), page);
-    assert.ok(page.includes('value="{&quot;name&quot;:&quot;a \\&quot;quoted\\&quot; &lt;name&gt; &amp; more&quot;}"'), page);
-    assert.ok(page.includes('document.getElementById("make").submit()'));
+    assert.equal(
+      startPage('example-org', { name: 'a "quoted" <name> & more' }, 'abc'),
+      [
+        '<!doctype html><meta charset="utf-8"><title>niyam: the board app</title>',
+        '<form id="make" method="post" action="https://github.com/organizations/example-org/settings/apps/new?state=abc">',
+        '<input type="hidden" name="manifest" value="{&quot;name&quot;:&quot;a \\&quot;quoted\\&quot; &lt;name&gt; &amp; more&quot;}">',
+        '<p>Taking you to GitHub to make the board app. <button>Go on</button></p>',
+        '</form>',
+        '<script>document.getElementById("make").submit()</script>',
+      ].join('\n'),
+    );
   });
 
   describe('made from the manifest', () => {
@@ -115,10 +147,26 @@ describe('the board app', () => {
       const { io, out } = capture();
       assert.deepEqual(await setUpBoardApp(sys, io, SLUG, OWNER), []);
       assert.deepEqual(sys.opened, [`http://127.0.0.1:${FakeSys.PORT}/start`]);
-      assert.equal(browser.start?.status, 200);
+      assert.deepEqual([browser.start?.status, browser.start?.headers], [200, { 'content-type': 'text/html; charset=utf-8' }]);
       assert.match(browser.state ?? '', /^[0-9a-f]{32}$/);
       assert.equal(browser.action, `https://github.com/organizations/example-org/settings/apps/new?state=${browser.state}`);
-      assert.deepEqual(browser.manifest, boardAppManifest('example-org', `http://127.0.0.1:${FakeSys.PORT}/made`));
+      assert.deepEqual(browser.manifest, {
+        name: 'niyam board example-org',
+        url: 'https://github.com/veda-hq/niyam',
+        description: 'Moves a slice to In Progress on the board when its pull request opens. Made by niyam onboard.',
+        hook_attributes: { url: 'https://github.com/veda-hq/niyam', active: false },
+        redirect_url: `http://127.0.0.1:${FakeSys.PORT}/made`,
+        public: false,
+        default_permissions: { organization_projects: 'write', issues: 'read' },
+        default_events: [],
+      });
+      // It stops waiting for Create once GitHub came back, and for Install once GitHub lists it: one wait, on the first look.
+      assert.ok(sys.slept.filter((ms) => ms === 500).length < 50, `${sys.slept.length} waits`);
+      assert.deepEqual(sys.slept.filter((ms) => ms === 3000), [3000]);
+      assert.ok(
+        sys.requests.filter((r) => r.url.includes(`/repos/${SLUG}`) || r.url.includes('/installations?')).every((r) => r.token === OWNER),
+        'GitHub is asked as the owner',
+      );
       assert.deepEqual(browser.made, { status: 302, headers: { location: `https://github.com/apps/${APP.slug}/installations/new` } });
       assert.equal(sys.servedClosed, 1, 'nothing is served once GitHub came back');
       const id = orgSecret(sys, pair, 'NIYAM_BOARD_APP_ID');
@@ -132,6 +180,16 @@ describe('the board app', () => {
       assert.deepEqual(out, [`✓ made the board app ${APP.slug} and set NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY, shared with ${SLUG}`, `✓ installed the board app on ${SLUG}`]);
     });
 
+    it('looks again after each wait until GitHub lists the install, and takes only the app it made', async () => {
+      const { sys } = await noApp();
+      let looks = 0;
+      const installations = [{ id: 5, app_slug: 'someone-else', repository_selection: 'selected' }, { id: 91, app_slug: APP.slug, repository_selection: 'selected' }];
+      sys.route('GET', INSTALLATIONS, () => ({ status: 200, json: { installations: looks++ < 2 ? [] : installations } }));
+      assert.deepEqual(await setUpBoardApp(sys, capture().io, SLUG, OWNER), []);
+      assert.deepEqual(sys.slept.filter((ms) => ms === 3000), [3000, 3000]);
+      assert.deepEqual(sys.requests.filter((r) => r.url.includes('/user/installations/')).map((r) => r.url), [`https://api.github.com/user/installations/91/repositories/${REPO_ID}`]);
+    });
+
     it('leaves an installation on all repositories as it is', async () => {
       const { sys } = await noApp();
       sys.route('GET', INSTALLATIONS, { status: 200, json: { installations: [{ id: 91, app_slug: APP.slug, repository_selection: 'all' }] } });
@@ -142,7 +200,7 @@ describe('the board app', () => {
     it("refuses a redirect without the run's state, and a second one with it", async () => {
       const { sys, browser } = await noApp('create', 'not-the-state');
       const left = await setUpBoardApp(sys, capture().io, SLUG, OWNER);
-      assert.equal(browser.made?.status, 400);
+      assert.deepEqual(browser.made, { status: 400, headers: TEXT, body: "This is not GitHub's answer to this run of niyam onboard.\n" });
       assert.ok(!sys.requests.some((r) => r.url.includes('/app-manifests/')), 'no code is turned into an app');
       assert.deepEqual(left, [`${BY_HAND} onboard opened GitHub's page for it, but no app was made within 10 minutes.`]);
       assert.equal(sys.slept.reduce((sum, ms) => sum + ms, 0), BOARD_APP_WAIT_MS, 'it waited the ten minutes');
@@ -155,7 +213,7 @@ describe('the board app', () => {
       const first = replay.sys.visit(`http://127.0.0.1:${FakeSys.PORT}/made?code=${CODE}&state=${state}`);
       const again = await replay.sys.visit(`http://127.0.0.1:${FakeSys.PORT}/made?code=${CODE}&state=${state}`);
       assert.equal((await first).status, 302);
-      assert.equal(again.status, 409);
+      assert.deepEqual(again, { status: 409, headers: TEXT, body: 'niyam onboard has this answer already; go back to the terminal.\n' });
       assert.deepEqual(await run, []);
       assert.equal(replay.sys.requests.filter((r) => r.url.includes('/app-manifests/')).length, 1);
     });
@@ -164,7 +222,7 @@ describe('the board app', () => {
       const { sys, browser } = await noApp('none');
       const run = setUpBoardApp(sys, capture().io, SLUG, OWNER);
       await new Promise((resolve) => setImmediate(resolve));
-      assert.equal((await sys.visit(`http://127.0.0.1:${FakeSys.PORT}/favicon.ico`)).status, 404);
+      assert.deepEqual(await sys.visit(`http://127.0.0.1:${FakeSys.PORT}/favicon.ico`), { status: 404, headers: TEXT, body: 'Not found.\n' });
       assert.equal((await sys.visit(`http://127.0.0.1:${FakeSys.PORT}/made?state=${browser.state}`)).status, 400);
       await run;
     });
@@ -181,7 +239,25 @@ describe('the board app', () => {
       assert.deepEqual(await setUpBoardApp(refused.sys, capture().io, SLUG, OWNER), [
         'Once for example-org: GitHub did not give the app it made (HTTP 404). At https://github.com/organizations/example-org/settings/apps, delete the board app if it was made, then run niyam onboard again.',
       ]);
-      assert.equal(refused.browser.made?.status, 502);
+      assert.deepEqual(refused.browser.made, {
+        status: 502,
+        headers: TEXT,
+        body: 'niyam onboard could not get the app: GitHub did not give the app it made (HTTP 404). The terminal says what is left.\n',
+      });
+
+      // Each part of the app GitHub gives is needed, and a 201 for it.
+      for (const [status, json] of [
+        [200, APP],
+        [201, { ...APP, slug: 5 }],
+        [201, { ...APP, client_id: undefined }],
+        [201, { ...APP, pem: null }],
+      ] as const) {
+        const partial = await noApp();
+        partial.sys.route('POST', `/app-manifests/${CODE}/conversions`, { status, json });
+        assert.deepEqual(await setUpBoardApp(partial.sys, capture().io, SLUG, OWNER), [
+          `Once for example-org: GitHub did not give the app it made (HTTP ${status}). At https://github.com/organizations/example-org/settings/apps, delete the board app if it was made, then run niyam onboard again.`,
+        ], JSON.stringify(json));
+      }
 
       const unset = await noApp();
       unset.sys.route('PUT', `${ORG_SECRETS}/NIYAM_BOARD_APP_KEY`, { status: 403, json: { message: 'Must have admin rights' } });
@@ -199,7 +275,11 @@ describe('the board app', () => {
       assert.deepEqual(await setUpBoardApp(sys, capture().io, SLUG, OWNER), [
         'Once for example-org: a request to GitHub failed once it had the code (POST api.github.com/app-manifests: no answer). At https://github.com/organizations/example-org/settings/apps, delete the board app if it was made, then run niyam onboard again.',
       ]);
-      assert.equal(browser.made?.status, 502);
+      assert.deepEqual(browser.made, {
+        status: 502,
+        headers: TEXT,
+        body: 'niyam onboard could not finish: a request to GitHub failed once it had the code (POST api.github.com/app-manifests: no answer). The terminal says what is left.\n',
+      });
       assert.ok(sys.slept.length < 10, 'no ten-minute wait');
     });
 
@@ -217,6 +297,8 @@ describe('the board app', () => {
       const never = await noApp();
       never.sys.route('GET', INSTALLATIONS, { status: 200, json: { installations: [] } });
       assert.deepEqual(await setUpBoardApp(never.sys, capture().io, SLUG, OWNER), [`Once for example-org: install the board app on ${SLUG} at https://github.com/apps/${APP.slug}/installations/new.`]);
+      // Ten minutes, a look every 3 s.
+      assert.equal(never.sys.requests.filter((r) => r.url.endsWith(INSTALLATIONS)).length, 200);
 
       const refused = await noApp();
       refused.sys.route('PUT', `/user/installations/91/repositories/${REPO_ID}`, { status: 403, json: null });
@@ -248,11 +330,52 @@ describe('the board app', () => {
       sys.route('PUT', `${ORG_SECRETS}/NIYAM_BOARD_APP_KEY/repositories/${REPO_ID}`, { status: 409, json: null });
       sys.route('PUT', `${ORG_SECRETS}/NIYAM_BOARD_APP_ID/repositories/${REPO_ID}`, { status: 500, json: null });
       sys.route('GET', INSTALLATIONS, { status: 200, json: { installations: [] } });
-      assert.deepEqual(await setUpBoardApp(sys, capture().io, SLUG, OWNER), [
+      const { io, out } = capture();
+      assert.deepEqual(await setUpBoardApp(sys, io, SLUG, OWNER), [
         `Once for ${SLUG}: share example-org's NIYAM_BOARD_APP_ID secret with it at https://github.com/organizations/example-org/settings/secrets/actions/NIYAM_BOARD_APP_ID, since GitHub did not share example-org's NIYAM_BOARD_APP_ID secret with the repository (HTTP 500).`,
         `Once for ${SLUG}: share example-org's NIYAM_BOARD_APP_KEY secret with it at https://github.com/organizations/example-org/settings/secrets/actions/NIYAM_BOARD_APP_KEY, since example-org's NIYAM_BOARD_APP_KEY secret is visible by type of repository, not to selected ones, so GitHub will not add one to it.`,
         `Once for ${SLUG}: install example-org's board app on it at https://github.com/organizations/example-org/settings/installations.`,
       ]);
+      assert.deepEqual(out, [], 'nothing is said to be shared or installed');
+    });
+
+    it('says to add the repository when GitHub will not put it on the installation', async () => {
+      const sys = new FakeSys();
+      sys.route('GET', `/repos/${SLUG}`, { status: 200, json: repoJson() });
+      sys.route('GET', INSTALLATIONS, { status: 200, json: { installations: [{ id: 77, app_slug: 'niyam-board-example-org', repository_selection: 'selected' }] } });
+      sys.route('PUT', `/user/installations/77/repositories/${REPO_ID}`, { status: 403, json: null });
+      const { io, out } = capture();
+      assert.deepEqual(await setUpBoardApp(sys, io, SLUG, OWNER), [
+        `Once for ${SLUG}: add it to the board app's installation at https://github.com/organizations/example-org/settings/installations/77, since GitHub would not (HTTP 403).`,
+      ]);
+      assert.deepEqual(out, [`✓ example-org's board app secrets shared with ${SLUG}`]);
+    });
+
+    it('says to install it when GitHub will not list the installations, or lists them on one page without it', async () => {
+      const install = `Once for ${SLUG}: install example-org's board app on it at https://github.com/organizations/example-org/settings/installations.`;
+      const board = { id: 77, app_slug: 'niyam-board-example-org', repository_selection: 'all' };
+      for (const [name, answer] of [
+        ['a refusal that lists it', { status: 500, json: { installations: [board] } }],
+        ['an answer of null', { status: 200, json: null }],
+        ['installations that are no list', { status: 200, json: { installations: 'x' } }],
+        // A page of fewer than 100 is the last: a second one is not asked for.
+        ['one short page', { status: 200, json: { installations: [{ id: 5, app_slug: 'someone-else', repository_selection: 'all' }] } }],
+      ] as const) {
+        const sys = new FakeSys();
+        sys.route('GET', `/repos/${SLUG}`, { status: 200, json: repoJson() });
+        sys.route('GET', INSTALLATIONS, answer);
+        sys.route('GET', '/orgs/example-org/installations?per_page=100&page=2', { status: 200, json: { installations: [board] } });
+        assert.deepEqual(await setUpBoardApp(sys, capture().io, SLUG, OWNER), [install], name);
+      }
+    });
+
+    it('passes over installations GitHub lists without a slug', async () => {
+      const sys = new FakeSys();
+      sys.route('GET', `/repos/${SLUG}`, { status: 200, json: repoJson() });
+      sys.route('GET', INSTALLATIONS, { status: 200, json: { installations: [null, { id: 6 }, { id: 77, app_slug: 'niyam-board-example-org', repository_selection: 'all' }] } });
+      const { io, out } = capture();
+      assert.deepEqual(await setUpBoardApp(sys, io, SLUG, OWNER), []);
+      assert.equal(out.at(-1), `✓ example-org's board app installed on ${SLUG}`);
     });
 
     it('reads every page of installations', async () => {
@@ -271,12 +394,20 @@ describe('the board app', () => {
     assert.deepEqual(await setUpBoardApp(shadowed.sys, capture().io, SLUG, OWNER), [
       `Once for ${SLUG}: delete its own NIYAM_BOARD_APP_KEY at https://github.com/${SLUG}/settings/secrets/actions, which would hide the organization's board app secrets, then run niyam onboard again at your own terminal.`,
     ]);
+    const both = await noApp();
+    both.sys.route('GET', `/repos/${SLUG}/actions/secrets?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }, { name: 'NIYAM_BOARD_APP_KEY' }] } });
+    assert.deepEqual(await setUpBoardApp(both.sys, capture().io, SLUG, OWNER), [
+      `Once for ${SLUG}: delete its own NIYAM_BOARD_APP_ID and NIYAM_BOARD_APP_KEY at https://github.com/${SLUG}/settings/secrets/actions, which would hide the organization's board app secrets, then run niyam onboard again at your own terminal.`,
+    ]);
     const half = await noApp();
     half.sys.route('GET', `${ORG_SECRETS}?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_ID' }] } });
     assert.deepEqual(await setUpBoardApp(half.sys, capture().io, SLUG, OWNER), [
       "Once for example-org: it has the secret NIYAM_BOARD_APP_ID but not NIYAM_BOARD_APP_KEY. Set the board app's other one at https://github.com/organizations/example-org/settings/secrets/actions, or delete it and its app, then run niyam onboard again at your own terminal.",
     ]);
-    for (const { sys } of [shadowed, half]) {
+    const otherHalf = await noApp();
+    otherHalf.sys.route('GET', `${ORG_SECRETS}?per_page=100&page=1`, { status: 200, json: { secrets: [{ name: 'NIYAM_BOARD_APP_KEY' }] } });
+    assert.match((await setUpBoardApp(otherHalf.sys, capture().io, SLUG, OWNER))[0] ?? '', /it has the secret NIYAM_BOARD_APP_KEY but not NIYAM_BOARD_APP_ID\./);
+    for (const { sys } of [shadowed, both, half, otherHalf]) {
       assert.deepEqual(sys.opened, [], 'no browser');
       assert.ok(!sys.requests.some((r) => r.method === 'PUT'), 'no secret changed');
       assert.ok(!sys.requests.some((r) => r.method === 'POST'), 'no app made');
@@ -287,6 +418,14 @@ describe('the board app', () => {
     const lost = new FakeSys();
     lost.route('GET', `/repos/${SLUG}`, { status: 404, json: null });
     assert.deepEqual(await setUpBoardApp(lost, capture().io, SLUG, OWNER), [`${BY_HAND} onboard did not: GitHub did not give ${SLUG}'s id (HTTP 404).`]);
+    for (const [status, json] of [
+      [500, repoJson()],
+      [200, {}],
+    ] as const) {
+      const unknown = new FakeSys();
+      unknown.route('GET', `/repos/${SLUG}`, { status, json });
+      assert.deepEqual(await setUpBoardApp(unknown, capture().io, SLUG, OWNER), [`${BY_HAND} onboard did not: GitHub did not give ${SLUG}'s id (HTTP ${status}).`]);
+    }
 
     const ownUnlisted = new FakeSys();
     ownUnlisted.route('GET', `/repos/${SLUG}`, { status: 200, json: repoJson() });
