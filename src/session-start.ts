@@ -120,12 +120,13 @@ function recordFor(sys: Sys): (entry: { agent: string } | { problem: string }) =
     const input = JSON.parse(sys.readStdin() || '{}') as { session_id?: unknown };
     path = typeof input.session_id === 'string' ? sessionRecord(sys.home, input.session_id) : undefined;
   } catch {
-    path = undefined;
+    // Not JSON: no session id, so no path and no record.
   }
   return (entry) => {
     if (!path) return;
+    const folder = path.slice(0, path.lastIndexOf('/'));
     try {
-      sys.mkdir(path.slice(0, path.lastIndexOf('/')));
+      sys.mkdir(folder);
       sys.write(path, `${JSON.stringify(entry)}\n`, 0o600);
     } catch {
       // The guard finds no record and refuses GitHub, which is the safe side.
@@ -266,17 +267,15 @@ function start(sys: Sys): Said {
 export type LocalIdentity = { owner: string; fix: string; session?: string; script?: string } & ({ agent: string; script: string } | { reason: string });
 
 export function localIdentity(sys: Sys): LocalIdentity {
-  let settings: Settings | undefined;
-  let settingsProblem = '';
+  let settings: Settings;
   try {
     settings = loadSettings(sys, repoRoot(sys));
   } catch (error) {
-    settingsProblem = message(error);
+    return { owner: 'the owner', fix: 'tell the owner', reason: message(error) };
   }
-  // Any owner can run machine here: the first is the one to tell.
-  const owner = settings?.owners[0] ?? 'the owner';
+  // Any owner can run machine here: the first is the one to tell. The settings name at least one.
+  const owner = settings.owners[0] as string;
   const tell = `tell ${owner}`;
-  if (!settings) return { owner, fix: tell, reason: settingsProblem };
   const here = agentHere(sys, settings.agents);
   if ('problem' in here) return { owner, fix: `ask ${owner} to run niyam machine <agent> for one of them`, reason: here.problem };
   const { agent } = here;

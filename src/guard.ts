@@ -22,8 +22,8 @@ const GIT_REMOTE_MAYBE = new RegExp(`${GIT_REMOTE}(add|set-head|show)((?:[ \\t]+
  * only read or write `.git/config` (#219).
  */
 function remoteContacted(command: string): boolean {
-  return [...command.matchAll(GIT_REMOTE_MAYBE)].some(([, subcommand, rest = '']) => {
-    const words = rest.trim().split(/\s+/);
+  return [...command.matchAll(GIT_REMOTE_MAYBE)].some(([, subcommand, rest]) => {
+    const words = [...String(rest).matchAll(/\S+/g)].map(([word]) => word);
     if (subcommand === 'show') return !words.includes('-n');
     if (subcommand === 'set-head') return words.some((word) => word === '-a' || word === '--auto');
     const last = words.filter((word) => ['-f', '--fetch', '--no-fetch'].includes(word)).at(-1);
@@ -85,11 +85,11 @@ export function recordedAgent(sys: Sys, sessionId: unknown): { agent: string } |
   if (!path || !sys.exists(path)) {
     return { problem: 'session-start did not run for this session, so it was not given the agent identity' };
   }
-  let entry: { agent?: unknown; problem?: unknown } | null;
+  let entry: { agent?: unknown; problem?: unknown } | null = null;
   try {
     entry = JSON.parse(sys.read(path)) as typeof entry;
   } catch {
-    entry = null;
+    // Unreadable, or not JSON: it stays null, as a record of JSON null would be.
   }
   if (typeof entry !== 'object' || entry === null) return { problem: `${path} is not what session-start writes` };
   if (typeof entry.agent === 'string') return { agent: entry.agent };
