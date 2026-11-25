@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { OWNER_TOKEN } from './fake-board.test.ts';
 import { FakeSys, HOME } from './fake.test.ts';
-import { asOwner, isOrganisation, ownerScopes, signInOnce } from './owner-login.ts';
+import { asOwner, isOrganisation, ownerScopes, signInLines, signInOnce } from './owner-login.ts';
 
 /** The owner's own gh folder, holding a login the one-run sign-in must never read or change. */
 const OWN_HOSTS = `${HOME}/.config/gh/hosts.yml`;
@@ -43,11 +43,51 @@ describe('signInOnce', () => {
     assert.equal(sys.files.get(OWN_HOSTS), OWN, "the owner's own gh login is untouched");
   });
 
-  it('asks gh for no extra scopes when the run needs none', async () => {
+  it('asks gh for no extra scopes when the run needs none, and for each it needs, comma-separated', async () => {
     const sys = approving();
     await signInOnce(sys, []);
-    assert.ok(!sys.calls.some((c) => c.args.includes('-s')));
+    assert.deepEqual(sys.calls[0]?.args, ['auth', 'login', '--web', '-h', 'github.com', '-p', 'ssh', '--skip-ssh-key', '--insecure-storage']);
+    const both = approving();
+    await signInOnce(both, ['project', 'admin:org']);
+    assert.deepEqual(both.calls[0]?.args.slice(-2), ['-s', 'project,admin:org']);
   });
+
+  it("shows the one-time code and the link from gh's sign-in, opens the link, and drops gh's notes on its setup", async () => {
+    const sys = approving();
+    const shown: string[] = [];
+    await signInOnce(sys, ['project'], (line) => shown.push(line));
+    assert.deepEqual(shown, ['one-time code 1881-F156 (copied)', 'approve it at https://github.com/login/device']);
+    assert.deepEqual(sys.opened, ['https://github.com/login/device']);
+  });
+
+  it('takes a sign-in GitHub names no scopes for as having none', async () => {
+    const sys = approving();
+    sys.http = () => Promise.resolve({ status: 200, json: { login: 'example-owner' } });
+    assert.deepEqual(await signInOnce(sys, []), { login: 'example-owner', token: OWNER_TOKEN, scopes: [] });
+    sys.http = () => Promise.resolve({ status: 200, json: { login: 'example-owner' }, headers: { 'x-oauth-scopes': '' } });
+    assert.deepEqual(await signInOnce(sys, []), { login: 'example-owner', token: OWNER_TOKEN, scopes: [] });
+  });
+
+  for (const [name, change, problem] of [
+    [
+      'gh failing as it prints a token',
+      (sys: FakeSys) => (sys.execOverride = (call) => (call.args[1] === 'token' ? { code: 1, stdout: 'gho_half\n', stderr: '' } : undefined)),
+      'gh did not hand over the token from the sign-in',
+    ],
+    [
+      'GitHub refusing the token with a login',
+      (sys: FakeSys) => (sys.http = () => Promise.resolve({ status: 403, json: { login: 'example-owner' } })),
+      'GitHub did not accept the token from the sign-in (HTTP 403)',
+    ],
+    ['GitHub naming no login', (sys: FakeSys) => (sys.http = () => Promise.resolve({ status: 200, json: {} })), 'GitHub did not accept the token from the sign-in (HTTP 200)'],
+  ] as const) {
+    it(`says why after ${name}`, async () => {
+      const sys = approving();
+      change(sys);
+      assert.deepEqual(await signInOnce(sys, []), { problem });
+      assert.deepEqual(sys.removed, sys.temps);
+    });
+  }
 
   for (const [name, change, problem] of [
     ['the owner turning the sign-in down', (sys: FakeSys) => (sys.ghToken = undefined), 'the GitHub sign-in in the browser did not finish'],
@@ -76,6 +116,46 @@ describe('signInOnce', () => {
   });
 });
 
+describe('signInLines', () => {
+  /** What the owner is shown of `lines`, and the links opened. */
+  function shownOf(lines: string[]): { shown: string[]; opened: string[] } {
+    const sys = new FakeSys();
+    const shown: string[] = [];
+    const line = signInLines(sys, (text) => shown.push(text));
+    for (const raw of lines) line(raw);
+    return { shown, opened: sys.opened };
+  }
+
+  it('shows the one-time code, saying when gh copied it', () => {
+    assert.deepEqual(shownOf(['  ! One-time code (1881-F156) copied to clipboard  ', 'First copy your one-time code: AB12-CD34']).shown, [
+      'one-time code 1881-F156 (copied)',
+      'one-time code AB12-CD34',
+    ]);
+  });
+
+  it('shows and opens a link gh asks to open in the browser', () => {
+    assert.deepEqual(shownOf(['Open this URL to continue in your web browser: https://github.com/login/device ']), {
+      shown: ['approve it at https://github.com/login/device'],
+      opened: ['https://github.com/login/device'],
+    });
+  });
+
+  it('shows any other line as gh wrote it, trimmed: a link not for the browser, a browser with no link, an error', () => {
+    assert.deepEqual(shownOf(['See https://docs.github.com/x for more', ' Press Enter to open your browser', 'error: no network ', 'saved a tip', 'so did you know']), {
+      shown: ['See https://docs.github.com/x for more', 'Press Enter to open your browser', 'error: no network', 'saved a tip', 'so did you know'],
+      opened: [],
+    });
+  });
+
+  it("drops empty lines, and gh's tips and notes on its own setup", () => {
+    const sys = new FakeSys();
+    assert.deepEqual(
+      shownOf(['', '   ', ...sys.ghSignedInLines, ' Tip: gh help', 'Did you know? gh browse opens the repository']).shown,
+      [],
+    );
+  });
+});
+
 describe('asOwner', () => {
   const signed = { login: 'Example-Owner', token: OWNER_TOKEN, scopes: ['repo', 'project'] };
 
@@ -91,6 +171,7 @@ describe('asOwner', () => {
 
   it('refuses a sign-in short of the scopes', () => {
     assert.deepEqual(asOwner(signed, 'example-owner', ['project', 'admin:org']), { problem: 'the GitHub sign-in did not grant admin:org' });
+    assert.deepEqual(asOwner(signed, 'example-owner', ['admin:org', 'workflow']), { problem: 'the GitHub sign-in did not grant admin:org, workflow' });
   });
 
   it('passes on a failed sign-in', () => {
@@ -145,6 +226,14 @@ describe('isOrganisation', () => {
     await assert.rejects(isOrganisation(sys, 'veda-hq', 'ghp_agent'), {
       message: "cannot tell whether veda-hq is an organisation: GitHub's rate limit for the token has run out until 08:55 UTC (HTTP 429)",
     });
+  });
+
+  it('refuses to guess from a refusal that names a type, or an answer that names none', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', '/users/refused', { status: 403, json: { type: 'User' } });
+    sys.route('GET', '/users/untyped', { status: 200, json: { login: 'untyped' } });
+    await assert.rejects(isOrganisation(sys, 'refused', 'ghp_agent'), { message: 'cannot tell whether refused is an organisation (HTTP 403)' });
+    await assert.rejects(isOrganisation(sys, 'untyped', 'ghp_agent'), { message: 'cannot tell whether untyped is an organisation (HTTP 200)' });
   });
 
   it('keeps the bare status for a 403 that is not the rate limit', async () => {

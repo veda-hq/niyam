@@ -92,12 +92,18 @@ describe('pushIdentityProblem', () => {
     const sys = withCredentials('ghp_agent', 'examplebot');
     assert.equal(await pushIdentityProblem(sys, ROOT, HTTPS, [AGENT]), undefined);
     const fill = sys.calls.find((c) => c.args[0] === 'credential');
-    assert.deepEqual({ cwd: fill?.cwd, input: fill?.input, prompt: fill?.env?.GIT_TERMINAL_PROMPT, askpass: fill?.env?.GIT_ASKPASS }, {
-      cwd: ROOT,
-      input: `url=${HTTPS}\n\n`,
-      prompt: '0',
-      askpass: '',
-    });
+    assert.deepEqual(
+      { command: fill?.command, args: fill?.args, cwd: fill?.cwd, input: fill?.input, prompt: fill?.env?.GIT_TERMINAL_PROMPT, askpass: fill?.env?.GIT_ASKPASS, ssh: fill?.env?.SSH_ASKPASS },
+      {
+        command: 'git',
+        args: ['credential', 'fill'],
+        cwd: ROOT,
+        input: `url=${HTTPS}\n\n`,
+        prompt: '0',
+        askpass: '',
+        ssh: '',
+      },
+    );
     assert.equal(sys.requests.at(-1)?.token, 'ghp_agent');
   });
 
@@ -125,6 +131,31 @@ describe('pushIdentityProblem', () => {
     down.http = () => Promise.reject('offline');
     assert.equal(await pushIdentityProblem(down, ROOT, HTTPS, [AGENT]), 'GitHub cannot be asked who this push is from (offline)');
   });
+
+  it('reads the password from the line that starts with it, the whole line', async () => {
+    const sys = withCredentials('ghp_agent', AGENT);
+    sys.execOverride = () => ({ code: 0, stdout: 'username=my-password=ghp_wrong\npassword=ghp_agent\n', stderr: '' });
+    assert.equal(await pushIdentityProblem(sys, ROOT, HTTPS, [AGENT]), undefined);
+    assert.equal(sys.requests.at(-1)?.token, 'ghp_agent');
+  });
+
+  it('refuses when git fails, even having printed a password', async () => {
+    const sys = withCredentials('ghp_agent', AGENT);
+    sys.execOverride = () => ({ code: 1, stdout: 'password=ghp_agent\n', stderr: '' });
+    assert.match((await pushIdentityProblem(sys, ROOT, HTTPS, [AGENT])) ?? '', /^git has no credentials for github\.com here/);
+    assert.deepEqual(sys.requests, []);
+  });
+
+  for (const [what, answer] of [
+    ['a refusal that names a login', { status: 401, json: { login: AGENT } }],
+    ['an answer of null', { status: 200, json: null }],
+  ] as const) {
+    it(`refuses the credentials on ${what}`, async () => {
+      const sys = withCredentials('ghp_agent');
+      sys.http = () => Promise.resolve(answer);
+      assert.match((await pushIdentityProblem(sys, ROOT, HTTPS, [AGENT])) ?? '', /^GitHub does not accept the credentials git would push with/);
+    });
+  }
 
   it('leaves remotes that are not GitHub alone', async () => {
     const sys = new FakeSys();

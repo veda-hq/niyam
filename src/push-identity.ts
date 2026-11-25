@@ -49,7 +49,8 @@ export async function pushIdentityProblem(sys: Sys, root: string, url: string, a
     env: { ...sys.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '' },
     timeoutMs: 20_000,
   });
-  const password = /^password=(.*)$/m.exec(filled.stdout)?.[1];
+  // `.` stops at a line's end, so the password is the rest of its line.
+  const password = /^password=(.*)/m.exec(filled.stdout)?.[1];
   if (filled.code !== 0 || !password) {
     return `git has no credentials for ${GITHUB_HOST} here, so this push cannot reach GitHub as ${agent}: ${notSetUp}`;
   }

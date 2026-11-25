@@ -31,10 +31,10 @@ export async function newestRelease(sys: Sys): Promise<{ version: string; packag
     return { problem: `GitHub could not be asked for the newest release (${error instanceof Error ? error.message : String(error)})` };
   }
   if (answer.status !== 200) return { problem: `GitHub answered HTTP ${answer.status} when asked for the newest release` };
-  const json = answer.json as { tag_name?: unknown; assets?: { name?: unknown }[] } | null;
-  const version = typeof json?.tag_name === 'string' ? /^v(\d+\.\d+\.\d+)$/.exec(json.tag_name)?.[1] : undefined;
-  if (version === undefined) return { problem: `the newest release's tag, ${JSON.stringify(json?.tag_name ?? null)}, is not vX.Y.Z` };
-  const packaged = (json?.assets ?? []).some((asset) => asset.name === tarballName(version));
+  const { tag_name: tag, assets } = (answer.json ?? {}) as { tag_name?: unknown; assets?: { name?: unknown }[] };
+  const version = typeof tag === 'string' ? /^v(\d+\.\d+\.\d+)$/.exec(tag)?.[1] : undefined;
+  if (version === undefined) return { problem: `the newest release's tag, ${JSON.stringify(tag ?? null)}, is not vX.Y.Z` };
+  const packaged = assets?.some((asset) => asset.name === tarballName(version)) ?? false;
   return { version, packaged };
 }
 
@@ -47,11 +47,12 @@ export interface Copy {
 
 /** Each `name` on PATH, as `type -a <name>` lists them, first the one the shell runs. */
 export function copiesOnPath(sys: Sys, name: string = CLI): Copy[] {
-  if (!sys.env.PATH) return [];
+  const entries = sys.env.PATH;
+  if (!entries) return [];
   // The shell reads an empty or relative entry against the folder it is in, so this does too.
-  const dirs = [...new Set((sys.env.PATH ?? '').split(':').map((dir) => (dir.startsWith('/') ? dir : `${sys.cwd}/${dir || '.'}`.replace(/\/\.$/, ''))))];
-  return dirs
-    .map((dir) => `${dir.replace(/\/+$/, '')}/${name}`)
+  const dirs = entries.split(':').map((dir) => (dir.startsWith('/') ? dir : `${sys.cwd}/${dir}`).replace(/\/+$/, '').replace(/\/\.$/, ''));
+  return [...new Set(dirs)]
+    .map((dir) => `${dir}/${name}`)
     .filter((path) => sys.exists(path))
     .map((path) => {
       const run = sys.exec(path, ['--version'], { timeoutMs: VERSION_MS });

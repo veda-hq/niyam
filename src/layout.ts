@@ -91,7 +91,7 @@ export const BY_HAND_WIDTH = 80;
 export function wrap(text: string, width: number): string[] {
   const lines: string[] = [];
   let line = '';
-  for (const word of text.split(/\s+/).filter(Boolean)) {
+  for (const word of text.split(/\s/).filter(Boolean)) {
     if (line && line.length + 1 + word.length > width) {
       lines.push(line);
       line = word;
