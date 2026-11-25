@@ -20,7 +20,9 @@ export function lane(env = process.env) {
     plugins: ['@stryker-mutator/tap-runner'],
     tap: {
       ...(suites.length > 0 ? { testFiles: suites } : {}),
-      nodeArgs: ['--test-reporter=tap', '-r', '{{hookFile}}', '{{testFile}}'],
+      // --test-force-exit ends a suite once its tests have run: a mutant that leaves a server or timer open
+      // (sys.ts's serve without close) would otherwise keep the process alive to the timeout.
+      nodeArgs: ['--test-reporter=tap', '--test-force-exit', '-r', '{{hookFile}}', '{{testFile}}'],
       forceBail: true,
     },
     coverageAnalysis: 'perTest',
