@@ -144,29 +144,32 @@ function refusesType(json: unknown): boolean {
   return Array.isArray(errors) && errors.length > 0 && errors.every((error) => (error as { field?: unknown } | null)?.field === 'type');
 }
 
-/**
- * The issues in a repository that hold the type, open and closed; pull
- * requests have no type. Undefined for a `disabled` type GitHub will not
- * list issues by: it answers 422 Validation Failed, its error on the `type`
- * field, to a filter naming a disabled type, which says nothing of whether
- * an issue holds it. Any other 422, and every 422 for an enabled type, stays
- * a failure.
- */
-async function holding(sys: Sys, token: string, repo: string, type: string, disabled = false): Promise<Omit<Holder, 'archived'>[] | undefined> {
-  let rows: unknown[];
-  try {
-    // GitHub answers 410 Gone for a repository with issues turned off, a fork's usual setting: it holds none to retype.
-    rows = await pages(sys, token, `${API}/repos/${repo}/issues?type=${encodeURIComponent(type)}&state=all`, true);
-  } catch (error) {
-    if (disabled && error instanceof Refused && error.status === 422 && refusesType(error.json)) return undefined;
-    throw error;
-  }
+/** The issues in a repository that hold the type, open and closed; pull requests have no type. */
+async function holding(sys: Sys, token: string, repo: string, type: string): Promise<Omit<Holder, 'archived'>[]> {
+  // GitHub answers 410 Gone for a repository with issues turned off, a fork's usual setting: it holds none to retype.
+  const rows = await pages(sys, token, `${API}/repos/${repo}/issues?type=${encodeURIComponent(type)}&state=all`, true);
   return rows.flatMap((row) => {
     const name = (row as { type?: { name?: unknown } | null } | null)?.type?.name;
     // Only an issue GitHub shows holding the type, so a filter GitHub ignored retypes nothing.
     const holder = typeof name === 'string' && same(name, type) ? asHolder(repo, row, name) : undefined;
     return holder ? [holder] : [];
   });
+}
+
+/**
+ * holding, for a type that may be disabled: undefined for a disabled type
+ * GitHub will not list issues by. It answers 422 Validation Failed, its
+ * error on the `type` field, to a filter naming a disabled type, which says
+ * nothing of whether an issue holds it. Any other 422, and every 422 for an
+ * enabled type, stays a failure.
+ */
+async function holdingListed(sys: Sys, token: string, repo: string, type: OrgType): Promise<Omit<Holder, 'archived'>[] | undefined> {
+  try {
+    return await holding(sys, token, repo, type.name);
+  } catch (error) {
+    if (!type.is_enabled && error instanceof Refused && error.status === 422 && refusesType(error.json)) return undefined;
+    throw error;
+  }
 }
 
 /** The open issues in a repository with no type; closed ones are left as they are. */
@@ -228,7 +231,7 @@ export async function typesPlan(sys: Sys, token: string, org: string): Promise<T
     for (const type of others) {
       // GitHub's refusal is the type's, not the repository's, so an unlisted type is not asked of the others.
       if (unlisted.has(type.name)) continue;
-      const found = await holding(sys, token, repo.slug, type.name, !type.is_enabled);
+      const found = await holdingListed(sys, token, repo.slug, type);
       if (found === undefined) unlisted.add(type.name);
       else holders.push(...found.map((issue) => ({ ...issue, archived: repo.archived })));
     }
@@ -441,7 +444,7 @@ export async function typesDrift(sys: Sys, token: string, org: string, slug: str
   const missing = ISSUE_TYPES.filter((type) => !types.some((had) => same(had.name, type.name) && had.is_enabled));
   const extra = types.filter((type) => !inModel(type.name) && type.is_enabled);
   const here: string[] = [];
-  for (const type of extra) here.push(...((await holding(sys, token, slug, type.name)) ?? []).map((issue) => `#${issue.number} ${issue.from}`));
+  for (const type of extra) here.push(...(await holding(sys, token, slug, type.name)).map((issue) => `#${issue.number} ${issue.from}`));
   const bare = (await untyped(sys, token, slug)).filter((issue) => issue.number !== approvals).map((issue) => `#${issue.number}`);
   if (missing.length === 0 && extra.length === 0 && bare.length === 0) return { mark: '✓', text: `issue types in ${org}: the work model’s alone, and every open issue here has one` };
   const parts = [
@@ -484,10 +487,11 @@ interface Facts {
   sub_issues_summary?: { total?: unknown };
 }
 
-async function readIssue(sys: Sys, token: string, url: string, number: number): Promise<Facts | null> {
+/** The issue at `url`, as GitHub shows it now; an empty body says nothing of it, so it reads as not open. */
+async function readIssue(sys: Sys, token: string, url: string, number: number): Promise<Facts> {
   const read = await sys.http(url, { token });
   if (read.status !== 200) throw new Error(`cannot read #${number} (HTTP ${read.status})`);
-  return read.json as Facts | null;
+  return (read.json as Facts | null) ?? {};
 }
 
 /**
@@ -497,9 +501,9 @@ async function readIssue(sys: Sys, token: string, url: string, number: number): 
  */
 async function setType(sys: Sys, token: string, url: string, number: number, { to, why }: { to: string; why: string }): Promise<{ line: string; typed: boolean }> {
   const fresh = await readIssue(sys, token, url, number);
-  const had = fresh?.type?.name;
+  const had = fresh.type?.name;
   if (typeof had === 'string') return { line: `issue-type: #${number} is a ${had} now, typed since the job read it; left as it is`, typed: false };
-  if (fresh?.state !== 'open') return { line: `issue-type: #${number} is closed now, since the job read it; left as it is`, typed: false };
+  if (fresh.state !== 'open') return { line: `issue-type: #${number} is closed now, since the job read it; left as it is`, typed: false };
   const { status, json } = await sys.http(url, { method: 'PATCH', token, body: { type: to } });
   const now = (json as { type?: { name?: unknown } | null } | null)?.type?.name;
   if (status !== 200 || typeof now !== 'string' || !same(now, to)) {
@@ -595,11 +599,11 @@ export async function issueType(sys: Sys, io: Output): Promise<number> {
   }
   const url = `${API}/repos/${slug}/issues/${number}`;
   /** The line saying why the issue is left as it is; undefined when it is open with no type. */
-  const leave = (issue: Facts | null): string | undefined => {
-    if (issue?.pull_request) return `issue-type: #${number} is a pull request, which has no type`;
+  const leave = (issue: Facts): string | undefined => {
+    if (issue.pull_request) return `issue-type: #${number} is a pull request, which has no type`;
     // Closed since the event, as a queued run may find it: a closed issue with no type is left as it is.
-    if (issue?.state !== 'open') return `issue-type: #${number} is not open; left as it is`;
-    if (typeof issue?.type?.name === 'string') return `issue-type: #${number} is a ${issue.type.name} already; nothing to do`;
+    if (issue.state !== 'open') return `issue-type: #${number} is not open; left as it is`;
+    if (typeof issue.type?.name === 'string') return `issue-type: #${number} is a ${issue.type.name} already; nothing to do`;
     return undefined;
   };
   let issue = await readIssue(sys, token, url, number);
@@ -615,9 +619,9 @@ export async function issueType(sys: Sys, io: Output): Promise<number> {
     io.out(left);
     return 0;
   }
-  const parentUrl = typeof issue?.parent_issue_url === 'string' ? issue.parent_issue_url : undefined;
+  const parentUrl = typeof issue.parent_issue_url === 'string' ? issue.parent_issue_url : undefined;
   const parent = parentUrl ? { number: parentUrl.split('/').at(-1) as string, type: await typeOf(sys, token, parentUrl, number) } : undefined;
-  const subIssues = issue?.sub_issues_summary?.total;
+  const subIssues = issue.sub_issues_summary?.total;
   io.out((await setType(sys, token, url, number, typeFor(parent, typeof subIssues === 'number' ? subIssues : 0))).line);
   return 0;
 }

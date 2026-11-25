@@ -634,6 +634,32 @@ describe('typesDrift', () => {
       fix: 'the owner reruns niyam onboard, which gives those issues work model types and disables the other types',
     });
   });
+
+  it('names each kind of drift alone, as the only part of its finding', async () => {
+    const fix = 'the owner reruns niyam onboard, which gives those issues work model types and disables the other types';
+    const drift = async (types: string[], disabled: string[], issues: Board['issues']) => {
+      const sys = new FakeSys();
+      const board = new Board(sys);
+      board.issueTypes = types;
+      board.disabledTypes = disabled;
+      board.issues = issues;
+      return typesDrift(sys, OWNER_TOKEN, 'example-org', SLUG);
+    };
+    assert.deepEqual(await drift([...MODEL], ['Slice'], []), { mark: '▲', text: "example-org lacks the work model's Slice", fix });
+    assert.deepEqual(await drift([...MODEL, 'Bug'], [], []), { mark: '▲', text: 'example-org has issue types outside the work model: Bug', fix });
+    assert.deepEqual(await drift([...MODEL, 'Bug'], [], [{ repo: SLUG, number: 4, type: 'Bug' }]), {
+      mark: '▲',
+      text: 'example-org has issue types outside the work model: Bug; 1 issue here holds one (#4 Bug)',
+      fix,
+    });
+    assert.deepEqual(
+      await drift([...MODEL], [], [
+        { repo: SLUG, number: 5, type: null },
+        { repo: SLUG, number: 3, type: null },
+      ]),
+      { mark: '▲', text: '2 open issues here have no type (#5, #3)', fix },
+    );
+  });
 });
 
 /** A repository's settings on GitHub, naming its Approvals issue, as the contents API gives them. */
@@ -997,6 +1023,11 @@ describe('issueType', () => {
     dropped.route('GET', URL, { status: 200, json: { number: 7, state: 'open', type: null } });
     dropped.route('PATCH', URL, { status: 200, json: { number: 7, type: null } });
     await assert.rejects(issueType(dropped, capture().io), /GitHub did not make #7 a Brief \(HTTP 200\)/);
+    // Only a 200 is GitHub setting it, whatever the answer's body says.
+    const odd = job(opened());
+    odd.route('GET', URL, { status: 200, json: { number: 7, state: 'open', type: null } });
+    odd.route('PATCH', URL, { status: 201, json: { number: 7, type: { name: 'Brief' } } });
+    await assert.rejects(issueType(odd, capture().io), /GitHub did not make #7 a Brief \(HTTP 201\)/);
     await assert.rejects(issueType(job(opened()), capture().io), /cannot read #7 \(HTTP 404\)/);
     const orphan = job(opened());
     orphan.route('GET', URL, { status: 200, json: { number: 7, state: 'open', type: null, parent_issue_url: `https://api.github.com/repos/${SLUG}/issues/2` } });
@@ -1004,5 +1035,96 @@ describe('issueType', () => {
     const outside = job(opened());
     outside.env = {};
     await assert.rejects(issueType(outside, capture().io), /issue-type runs in GitHub Actions/);
+  });
+
+  it('runs only with every variable GitHub Actions sets, each one checked', async () => {
+    for (const key of ['GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GH_TOKEN']) {
+      const sys = job(opened());
+      delete sys.env[key];
+      await assert.rejects(issueType(sys, capture().io), /^Error: issue-type runs in GitHub Actions: GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set$/, key);
+      assert.deepEqual(sys.requests, [], key);
+    }
+  });
+
+  it('types only on an issues event opening or reopening a numbered issue, in an organisation', async () => {
+    const cases: [FakeSys, string][] = [
+      // Only the schedule event is the hourly sweep, whatever the payload says.
+      [job({ schedule: '41 * * * *' }, undefined, 'workflow_dispatch'), 'issue-type: nothing to do on a workflow_dispatch event'],
+      [job(opened(), undefined, 'issue_comment'), 'issue-type: nothing to do on a issue_comment event (opened)'],
+      [job({ action: 'opened', issue: {}, repository: { owner: { type: 'Organization' } } }), 'issue-type: nothing to do on a issues event (opened)'],
+      [job({ action: 'opened', issue: { number: 7 } }), 'issue-type: GitHub has issue types for organisations only; #7 is left as it is'],
+      [job({ action: 'opened', issue: { number: 7 }, repository: {} }), 'issue-type: GitHub has issue types for organisations only; #7 is left as it is'],
+    ];
+    for (const [sys, line] of cases) {
+      assert.deepEqual(await run(sys), { code: 0, out: [line] });
+      assert.deepEqual(sys.requests, [], line);
+    }
+  });
+
+  it('reads an issue GitHub answers with no body as not open', async () => {
+    const sys = job(opened());
+    sys.route('GET', URL, { status: 200, json: null });
+    assert.deepEqual(await run(sys), { code: 0, out: ['issue-type: #7 is not open; left as it is'] });
+  });
+
+  it("reads a parent's type only where GitHub gives it as text, with the run's token", async () => {
+    for (const json of [null, { number: 2, type: null }, { number: 2, type: { name: 5 } }]) {
+      const sys = job(opened());
+      sys.route('GET', URL, { status: 200, json: { number: 7, state: 'open', type: null, parent_issue_url: `https://api.github.com/repos/${SLUG}/issues/2` } });
+      sys.route('GET', `/repos/${SLUG}/issues/2`, { status: 200, json });
+      sys.route('PATCH', URL, { status: 200, json: { number: 7, type: { name: 'Brief' } } });
+      assert.deepEqual(await run(sys), { code: 0, out: ['issue-type: #7 had no type; now a Brief: its parent #2 is neither a Work item nor a Slice, and it has no sub-issues'] }, JSON.stringify(json));
+      assert.deepEqual(
+        sys.requests.map((request) => [request.method, request.url, request.token]),
+        [
+          ['GET', `https://api.github.com${URL}`, 'ghs_run'],
+          ['GET', `https://api.github.com${URL}`, 'ghs_run'],
+          ['GET', `https://api.github.com/repos/${SLUG}/issues/2`, 'ghs_run'],
+          ['GET', `https://api.github.com${URL}`, 'ghs_run'],
+          ['PATCH', `https://api.github.com${URL}`, 'ghs_run'],
+        ],
+      );
+    }
+  });
+
+  it('reads a parent link or a sub-issue count GitHub does not give as text or a number as none', async () => {
+    const sys = job(opened());
+    sys.route('GET', URL, { status: 200, json: { number: 7, state: 'open', type: null, parent_issue_url: 5, sub_issues_summary: { total: '2' } } });
+    sys.route('PATCH', URL, { status: 200, json: { number: 7, type: { name: 'Brief' } } });
+    assert.deepEqual(await run(sys), { code: 0, out: ['issue-type: #7 had no type; now a Brief: it has no parent and no sub-issues'] });
+  });
+
+  it('reads, hourly, an issue GitHub answers with no body as closed, and asks once of a parent outside the list', async () => {
+    const row = (number: number, extra: object = {}) => ({ number, url: `https://api.github.com/repos/${SLUG}/issues/${number}`, state: 'open', type: null, ...extra });
+    const empty = job({ schedule: '41 * * * *' }, undefined, 'schedule');
+    empty.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, { status: 200, json: [row(8)] });
+    empty.route('GET', `/repos/${SLUG}/issues/8`, { status: 200, json: null });
+    assert.deepEqual((await run(empty)).out, ['issue-type: #8 is closed now, since the job read it; left as it is', 'issue-type: 0 open issues with no type typed']);
+    // #12 is #13's parent and is typed in the same run; its own parent, #2, is not listed, so GitHub is asked of it once.
+    const family = job({ schedule: '41 * * * *' }, undefined, 'schedule');
+    family.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, {
+      status: 200,
+      json: [row(13, { parent_issue_url: `https://api.github.com/repos/${SLUG}/issues/12` }), row(12, { parent_issue_url: `https://api.github.com/repos/${SLUG}/issues/2` })],
+    });
+    family.route('GET', `/repos/${SLUG}/issues/2`, { status: 200, json: { number: 2, type: { name: 'Work item' } } });
+    for (const number of [12, 13]) family.route('GET', `/repos/${SLUG}/issues/${number}`, { status: 200, json: row(number) });
+    family.route('PATCH', `/repos/${SLUG}/issues/13`, { status: 200, json: { type: { name: 'State' } } });
+    family.route('PATCH', `/repos/${SLUG}/issues/12`, { status: 200, json: { type: { name: 'Slice' } } });
+    assert.deepEqual((await run(family)).out, [
+      'issue-type: #13 had no type; now a State: its parent #12 is a Slice',
+      'issue-type: #12 had no type; now a Slice: its parent #2 is a Work item',
+      'issue-type: 2 open issues with no type typed',
+    ]);
+    assert.equal(family.requests.filter((request) => request.url.endsWith('/issues/2')).length, 1);
+  });
+
+  it('types, hourly, an issue that changed just the wait ago', async () => {
+    const sys = job({ schedule: '41 * * * *' }, undefined, 'schedule');
+    const row = { number: 9, url: `https://api.github.com/repos/${SLUG}/issues/9`, state: 'open', type: null };
+    const edge = new Date(sys.now().getTime() - OPENER_WAIT_MS).toISOString();
+    sys.route('GET', `/repos/${SLUG}/issues?type=none&state=open&per_page=100&page=1`, { status: 200, json: [{ ...row, updated_at: edge }] });
+    sys.route('GET', `/repos/${SLUG}/issues/9`, { status: 200, json: row });
+    sys.route('PATCH', `/repos/${SLUG}/issues/9`, { status: 200, json: { type: { name: 'Brief' } } });
+    assert.deepEqual((await run(sys)).out, ['issue-type: #9 had no type; now a Brief: it has no parent and no sub-issues', 'issue-type: 1 open issue with no type typed']);
   });
 });
