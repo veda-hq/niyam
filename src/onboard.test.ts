@@ -18,7 +18,7 @@ import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { BY_HAND_WIDTH, wrap } from './layout.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_READ_ONLY_IF, READ_ONLY_IF, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, autoFixRuleNeeds, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_READ_ONLY_IF, READ_ONLY_IF, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, PRODUCT, autoFixRuleNeeds, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, runsSarathiFor, sarathiRunner, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
@@ -1863,6 +1863,52 @@ describe('onboard', () => {
       assert.throws(() => claudeSettings(settings, '{'), /^Error: \.claude\/sarathi\.json is not JSON \(/);
       assert.throws(() => claudeSettings(settings, '[]'), /^Error: \.claude\/sarathi\.json is not a JSON object$/);
       assert.throws(() => claudeSettings(settings, '{ "hooks": [] }'), /^Error: \.claude\/sarathi\.json: hooks is not an object$/);
+      for (const text of ['7', 'null']) {
+        assert.throws(() => claudeSettings(settings, text), /^Error: \.claude\/sarathi\.json is not a JSON object$/, text);
+        assert.throws(() => claudeSettings(text), /^Error: \.claude\/settings\.json is not a JSON object$/, text);
+      }
+    });
+
+    it("moves the guard under sarathi only where sarathi's matcher, as names or a regular expression, takes Bash", () => {
+      const moved = (matcher: string): boolean => claudeSettings(JSON.stringify({ hooks: { PreToolUse: [runner('PreToolUse', 70, matcher)] } }), '{ "hooks": {} }').sarathi !== undefined;
+      for (const [matcher, want] of [
+        ['^Bash', true],
+        ['', true],
+        ['Bas', false],
+        ['(', false],
+      ] as const) {
+        assert.equal(moved(matcher), want, matcher);
+      }
+      const start = claudeSettings(JSON.stringify({ hooks: { SessionStart: [runner('SessionStart', 600, '.*')] } }), '{ "hooks": {} }');
+      assert.deepEqual(JSON.parse(start.text).hooks.SessionStart, [runner('SessionStart', 600, '.*'), SESSION_ENTRY], 'a handler for every source is not one any matcher covers');
+    });
+
+    it("reads sarathi's entry and its handlers past what is not a hook, and times only niyam's handler", () => {
+      assert.equal(sarathiRunner(null, 'PreToolUse'), undefined);
+      assert.equal(sarathiRunner({}, 'PreToolUse'), undefined);
+      const groups = [null, { hooks: 'x' }, { matcher: 7, hooks: [null, { command: 'echo' }, { command: 'sarathi hook PreToolUse', timeout: 'x' }] }];
+      assert.deepEqual(sarathiRunner({ hooks: { PreToolUse: groups } }, 'PreToolUse'), { group: 2, hook: 2 });
+      assert.equal(runsSarathiFor('sarathi check', 'PreToolUse'), false);
+      assert.equal(runsSarathiFor('run PreToolUse', 'PreToolUse'), false);
+      assert.equal(runsSarathiFor('sarathi hook PreToolUse', 'PreToolUse'), true);
+      const settings = JSON.stringify(UNDER_SARATHI);
+      const listed = claudeSettings(settings, JSON.stringify({ hooks: { PreToolUse: [null, SARATHI_HANDLERS.PreToolUse], SessionStart: [{ command: 'echo other' }, { command: HOOK_COMMAND, timeout: '900' }] } }));
+      assert.deepEqual(JSON.parse(listed.sarathi?.text ?? '').hooks, { PreToolUse: [null, SARATHI_HANDLERS.PreToolUse], SessionStart: [{ command: 'echo other' }, { command: HOOK_COMMAND, timeout: 600 }] });
+      const short = claudeSettings(settings, JSON.stringify({ hooks: { PreToolUse: [SARATHI_HANDLERS.PreToolUse], SessionStart: [{ command: HOOK_COMMAND, timeout: 60 }] } }));
+      assert.deepEqual(JSON.parse(short.sarathi?.text ?? '').hooks.SessionStart, [SARATHI_HANDLERS.SessionStart]);
+    });
+
+    it('adds its hook past settings entries that are not hooks, and finds none in a list that is not one', () => {
+      const odd = [null, { hooks: 'x' }, { hooks: [null, 'x'] }, { hooks: { type: 'command', command: HOOK_COMMAND } }];
+      const { text } = claudeSettings(JSON.stringify({ ...CLAUDE, hooks: { ...CLAUDE.hooks, SessionStart: odd } }));
+      assert.deepEqual(JSON.parse(text).hooks.SessionStart, [...odd, SESSION_ENTRY]);
+      assert.throws(() => claudeSettings(JSON.stringify({ hooks: { SessionStart: { hooks: [{ type: 'command', command: HOOK_COMMAND }] } } })), /^Error: \.claude\/settings\.json: hooks\.SessionStart is not an array$/);
+    });
+
+    it('adds a handler to a sarathi.json with no hooks yet, and finds none in a list that is not one', () => {
+      const settings = JSON.stringify({ hooks: { PreToolUse: [runner('PreToolUse', 70, 'Bash')] } });
+      assert.deepEqual(JSON.parse(claudeSettings(settings, '{}').sarathi?.text ?? '').hooks, { PreToolUse: [SARATHI_HANDLERS.PreToolUse] });
+      assert.throws(() => claudeSettings(settings, JSON.stringify({ hooks: { PreToolUse: { command: GUARD_COMMAND } } })), /^Error: \.claude\/sarathi\.json: hooks\.PreToolUse is not an array$/);
     });
 
     it("opens a pull request that changes both files, and runs again changing nothing", async () => {
@@ -2022,6 +2068,36 @@ describe('onboard', () => {
       assert.equal((await run(sys)).code, 0);
     });
 
+    it('reads the invitations as the agent, a page at a time, a short page the last, and takes no answer but a list for none', async () => {
+      const INVITES = '/user/repository_invitations?per_page=100';
+      const ours = [{ id: 9, repository: { full_name: 'example-org/example-app' } }];
+      for (const answer of [
+        { status: 200, json: [{ id: 1, repository: { full_name: 'example-org/other' } }] },
+        { status: 500, json: ours },
+        { status: 200, json: {} },
+      ]) {
+        const sys = fresh();
+        sys.route('GET', REPO, { status: 404, json: null });
+        sys.route('GET', `${INVITES}&page=1`, answer);
+        sys.route('PUT', COLLABORATOR, { status: 204, json: null });
+        await run(sys);
+        const read = sys.requests.filter((r) => r.url.includes(INVITES));
+        assert.ok(read.length > 0 && read.every((r) => r.token === TOKEN && r.url.endsWith('&page=1')), JSON.stringify(answer));
+        assert.ok(!sys.requests.some((r) => r.method === 'PATCH'), 'accepts no invitation it did not read');
+      }
+    });
+
+    it("reads GitHub's answer for the repository whatever it holds: none, no permissions, no default branch", async () => {
+      for (const json of [null, { default_branch: 'main' }, { permissions: { push: true } }, { permissions: { push: false }, default_branch: 7 }]) {
+        const sys = fresh();
+        sys.route('GET', REPO, { status: 200, json });
+        sys.route('GET', '/user/repository_invitations?per_page=100&page=1', { status: 200, json: [] });
+        await run(sys);
+        assert.ok(sys.requests.some((r) => r.url.includes('/user/repository_invitations')), `${JSON.stringify(json)}: read, so the agent is given access`);
+        assert.ok(!sys.requests.some((r) => /\/contents\/.*\?ref=(?:undefined|7|Stryker)/.test(r.url)), `${JSON.stringify(json)}: no branch read but a named one`);
+      }
+    });
+
     it('accepts a pending invitation without inviting again', async () => {
       const sys = fresh();
       let accepted = false;
@@ -2095,6 +2171,13 @@ describe('onboard', () => {
           }),
         [
           'onboard: the organisation does not allow classic tokens ("example-org forbids access via a personal access tokens (classic)."); an organisation owner can allow them under Settings → Personal access tokens',
+        ],
+      ],
+      [
+        'an organisation blocking classic tokens, said of one token',
+        (sys: FakeSys) => sys.route('GET', REPO, { status: 403, json: { message: 'example-org forbids a personal access token (classic).' } }),
+        [
+          'onboard: the organisation does not allow classic tokens ("example-org forbids a personal access token (classic)."); an organisation owner can allow them under Settings → Personal access tokens',
         ],
       ],
       [
@@ -3174,6 +3257,9 @@ describe('workflowUpdate', () => {
       assert.deepEqual(workflowUpdate(threeJobs('0.5.26', figma), 'main', '0.5.27', figma), { kind: 'repin', text: workflow('main', '0.5.27', figma), from: '0.5.26', asks: true, types: true, drafts: true });
     }
     assert.deepEqual(workflowUpdate(threeJobs('0.5.27', true), 'main', '0.5.27', true), { kind: 'repin', text: workflow('main', '0.5.27', true), asks: true, types: true, drafts: true });
+    // One already given the queue-draft skip by hand: adding the job is all that changes.
+    const skipped = threeJobs('0.5.27', true).replace(OLDER_READ_ONLY_IF, READ_ONLY_IF);
+    assert.deepEqual(workflowUpdate(skipped, 'main', '0.5.27', true), { kind: 'repin', text: workflow('main', '0.5.27', true), asks: true, types: true });
     assert.deepEqual(workflowUpdate(threeJobs('0.5.26', true, '0 9 * * 1-5'), 'main', '0.5.27', true, '0 9 * * 1-5'), { kind: 'repin', text: workflow('main', '0.5.27', true, '0 9 * * 1-5'), from: '0.5.26', asks: true, types: true, drafts: true });
     const own = threeJobs('0.5.26', true).replace(/^# The weekly and merged jobs[^\n]*\n/m, '').replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
     const update = workflowUpdate(own, 'main', '0.5.27', true);
@@ -3237,6 +3323,103 @@ describe('workflowUpdate', () => {
     assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false));
   });
 
+});
+
+describe('workflowUpdate, read to the letter', () => {
+  const V = '0.5.5';
+  /** This release's workflow at V, every feature on. */
+  const NOW = full('main', V);
+  const update = (before: string, branch = 'main', schedule?: string) => workflowUpdate(before, branch, V, true, schedule, undefined, true);
+  const USES = '    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.1.0';
+
+  it('names the jobs that pass no FIGMA_LIBRARY, reading the jobs under jobs: alone, each to its last line', () => {
+    const PUSH = 'on:\n  push:\n    # veda-hq/niyam/.github/workflows/checks.yml@v0.1.0 runs below\n';
+    const LIBRARY = `${USES}\n    secrets:\n      FIGMA_LIBRARY: \${{ secrets.FIGMA_LIBRARY }}\n`;
+    for (const [why, text, want] of [
+      ['jobs: alone, not a line that ends with it', `# Calls the shared jobs:\n${PUSH}jobs:\n  niyam:\n${LIBRARY}`, []],
+      ['jobs: with a space after it', `${PUSH}jobs: \n  niyam:\n${LIBRARY}`, []],
+      ['jobs: alone, not a line that starts with it', `jobs: below\n${PUSH}jobs:\n  niyam:\n${LIBRARY}`, []],
+      ['a job whose key has spaces after it', `jobs:\n  niyam:  \n${USES}\n`, ['niyam']],
+      ['a job read past its first line and a blank one', `jobs:\n  niyam:\n    name: x\n\n${USES}\n`, ['niyam']],
+      ['a last line with no newline', `jobs:\n  niyam:\n${USES}`, ['niyam']],
+      ['a key indented under a key that is not a job', `jobs:\n  rules: # ours\n    steps:\n      - uses: veda-hq/niyam/.github/workflows/checks.yml@v1\n`, []],
+      ['secrets inherited only by name', `jobs:\n  niyam:\n${USES}\n    secrets: inherited\n`, ['niyam']],
+      ['secrets: inherit deeper than a job passes it', `jobs:\n  niyam:\n${USES}\n    with:\n      secrets: inherit\n`, ['niyam']],
+      ['secrets: inherit spaced', `jobs:\n  niyam:\n${USES}\n    secrets:  inherit  \n`, []],
+    ] as const) {
+      assert.deepEqual(jobsWithoutLibrary(text), want, why);
+    }
+  });
+
+  it("reads the pins of its own lines alone, and calls the product's shared workflow by a name no pattern reads as more", () => {
+    assert.deepEqual(workflowPins('      niyam-ref:v0.1.0\n#  niyam-ref: v9.9.9\n'), ['0.1.0']);
+    assert.match(PRODUCT, /^[\w-]+\/[\w-]+$/);
+  });
+
+  it('moves a header with no last dot, and reads only the first line as the header', () => {
+    const plain = full('main', '0.5.2').replace(/\.\n/, '\n');
+    const moved = update(plain);
+    assert.ok(moved.kind === 'repin' && moved.text === NOW.replace(/\.\n/, '\n'), JSON.stringify(moved));
+    const own = NOW.replace(/^.*\n/, '# Our own header.\n').replace('name: niyam\n', 'name: niyam\n  # Written by niyam onboard: the shared niyam checks at v0.5.2.\n');
+    assert.deepEqual(update(own), { kind: 'same' });
+  });
+
+  it("moves the push branch only where it stands alone on its line in brackets, spaced or not, and after the trigger's own key", () => {
+    assert.deepEqual(update(NOW.replace('branches: ["main"]', 'branches: ["main"] # the default'), 'trunk'), { kind: 'same' });
+    const spaced = NOW.replace('branches: ["main"]', 'branches: [ main ]');
+    assert.deepEqual(update(spaced, 'trunk'), { kind: 'repin', text: spaced.replace('[ main ]', '[ trunk ]'), branch: 'trunk' });
+    const note = '# Pushes run on  push:\n    branches: ["main"]\n';
+    const moved = update(`${note}${NOW}`, 'trunk');
+    assert.ok(moved.kind === 'repin' && moved.text === `${note}${NOW.replace('branches: ["main"]', 'branches: ["trunk"]')}`, JSON.stringify(moved));
+  });
+
+  it('writes a branch bare only where YAML reads it as that word', () => {
+    const bare = NOW.replace('branches: ["main"]', 'branches: [main]');
+    for (const branch of ['nope', 'canon']) {
+      const moved = update(bare, branch);
+      assert.ok(moved.kind === 'repin' && moved.text.includes(`branches: [${branch}]`), branch);
+    }
+  });
+
+  it('replaces a workflow whose jobs are not the template, by id or by pin count, at every age', () => {
+    const own = (id: string) => `\n  ${id}:\n    runs-on: x\n`;
+    const pin = '\n  own:\n    with:\n      niyam-ref: v0.5.5\n';
+    for (const [why, before] of [
+      ['the pull request job renamed', NOW.replace('\n  niyam:\n', '\n  rules:\n')],
+      ['two jobs, the weekly one renamed', twoJobs(V, true).replace('\n  niyam-weekly:\n', '\n  niyam-later:\n')],
+      ['two jobs and one of its own named as the merged job', `${twoJobs(V, true)}${own('niyam-merged')}`],
+      ['two jobs and a fifth pin', `${twoJobs(V, true)}${pin}`],
+      ['three jobs, the weekly one renamed', threeJobs(V, true).replace('\n  niyam-weekly:\n', '\n  niyam-later:\n')],
+      ['three jobs and one of its own named as the needs-owner job', `${threeJobs(V, true)}${own('niyam-asks')}`],
+      ['three jobs and a seventh pin', `${threeJobs(V, true)}${pin}`],
+    ] as const) {
+      assert.equal(update(before).kind, 'replace', why);
+    }
+  });
+
+  it('adds the merged job alone to two jobs whose schedule the needs-owner job cannot be added to', () => {
+    const before = twoJobs(V, true).replace("    - cron: '17 6 * * 1'\n", "    - cron: '17 6 * * 1'\n    - cron: '0 0 * * *'\n");
+    const added = update(before);
+    assert.ok(added.kind === 'repin' && added.merged === true, JSON.stringify(added));
+    assert.ok(added.text.includes('\n  niyam-merged:\n') && !added.text.includes('\n  niyam-asks:\n'), added.text);
+  });
+
+  it('reads a cron only as the schedule onboard writes, trimmed, and leaves one it cannot read', () => {
+    const two = NOW.replace("    - cron: '17 6 * * 1'\n", "    - cron: '17 6 * * 1'\n    - cron: '0 0 * * *'\n");
+    assert.deepEqual(update(two, 'main', '5 4 * * 2'), { kind: 'same' });
+    assert.deepEqual(update(NOW.replace("- cron: '17 6 * * 1'", "- cron: ' 17 6 * * 1 '")), { kind: 'same' });
+  });
+
+  it("leaves the needs-owner job's triggers alone where its label clause is not one a release wrote", () => {
+    const edited = NOW.replace("  # opened, reopened: an issue with no type gets the work model's.\n  issues:\n    types: [labeled, opened, reopened]\n", '  issues:\n    types: [labeled]\n')
+      .replace("      (github.event_name == 'issues' && (github.event.action == 'opened' || github.event.action == 'reopened')) ||\n", '')
+      .replace("github.event.label.name == 'approved'", "github.event.label.name == 'ok'");
+    assert.deepEqual(update(edited), { kind: 'same' });
+  });
+
+  it('reads a job key with spaces after it as that job', () => {
+    assert.deepEqual(update(NOW.replace('  niyam-weekly:\n', '  niyam-weekly:  \n')), { kind: 'same' });
+  });
 });
 
 describe("the shared Guard's caller (#470)", () => {
@@ -3593,6 +3776,35 @@ describe('onboard never moves the pin backwards', () => {
       assert.equal(code, 1, path);
       assert.ok(err[0]?.includes(`(${path.slice(ROOT.length + 1)} in this checkout)`), err[0]);
       assert.equal(opened(sys), undefined);
+    }
+  });
+
+  it('names the newest of the pins it finds, wherever it stands among them, and where', async () => {
+    const here = fresh();
+    here.files.set(WORKFLOW, workflow('main', newer, false));
+    here.files.set(CALLER, guardCaller('main', '98.0.0'));
+    assert.match((await run(here)).err[0] ?? '', new RegExp(`v${newer} \\(${WORKFLOW_PATH.replaceAll('.', '\\.')} in this checkout\\)`));
+    const remote = fresh();
+    remote.route('GET', `${REPO}/contents/${WORKFLOW_PATH}?ref=main`, encoded(workflow('main', newer, false)));
+    remote.route('GET', `${REPO}/contents/${GUARD_CALLER_PATH}?ref=main`, encoded(guardCaller('main', '98.0.0')));
+    assert.match((await run(remote)).err[0] ?? '', new RegExp(`v${newer} \\(${WORKFLOW_PATH.replaceAll('.', '\\.')} on main\\)`));
+  });
+
+  it("says GitHub gave no answer, or not a list, about onboard's open pull request", async () => {
+    for (const [answer, said] of [
+      ['throws', 'no answer'],
+      [{ status: 500, json: [] }, 'HTTP 500'],
+      [{ status: 200, json: {} }, 'HTTP 200'],
+    ] as const) {
+      const sys = fresh();
+      if (answer === 'throws') {
+        const http = sys.http.bind(sys);
+        sys.http = (url, options) => (url.endsWith(OPEN_PULLS) ? Promise.reject(new Error('socket hang up')) : http(url, options));
+      } else {
+        sys.route('GET', OPEN_PULLS, answer);
+      }
+      const { code, err } = await run(sys);
+      assert.deepEqual({ code, err }, { code: 1, err: [`onboard: GitHub did not say whether an onboard pull request is open (${said}); run it again`] });
     }
   });
 
