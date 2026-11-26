@@ -14,6 +14,7 @@ import { approvalsOf } from './issue-types.ts';
 import { PAGE_LINK, askProblem } from './asks.ts';
 import { Pulls, type PullsOf, RETIRED_REFUSAL, refuseRetired } from './pr-autocreate.ts';
 import { errorDetail } from './error-detail.ts';
+import { closeIfDone } from './work-done.ts';
 
 /** An issue a `Slice:` or `State:` line names: its repository, `owner/name`, and its number. */
 export interface IssueRef {
@@ -1021,6 +1022,7 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
   };
   // The slices named that are Slices: a State is closed only under one of them.
   const built: number[] = [];
+  const builtSlices: Issue[] = [];
   for (const ref of slices) {
     if (elsewhere(ref)) continue;
     const slice = ref.number;
@@ -1030,6 +1032,7 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
       continue;
     }
     built.push(slice);
+    builtSlices.push(issue);
     // GitHub closes a slice itself when the pull request also says "Closes #N"; the slice still gets its comment, once.
     await closeBuilt(sys, io, token, issue, pull);
   }
@@ -1053,7 +1056,31 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
     }
     await closeBuilt(sys, io, token, issue, pull);
   }
+  await closeWorkItems(sys, io, token, slug, builtSlices, pull.number);
   return 0;
+}
+
+/**
+ * Closes each Work item above `slices` that this merge left done (#655):
+ * one Work item once, however many of its slices the pull request names.
+ * A Work item in another repository is left to that repository's own jobs,
+ * since this workflow's GITHUB_TOKEN writes only here.
+ */
+async function closeWorkItems(sys: Sys, io: Output, token: string, slug: string, slices: Issue[], pull: number): Promise<void> {
+  const items: number[] = [];
+  const here = `${API}/repos/${slug}/issues/`.toLowerCase();
+  for (const slice of slices) {
+    const { parent, problem } = await parentOf(sys, token, slice);
+    if (problem) throw new Error(`cannot judge #${slice.number}'s Work item: ${problem}`);
+    if (parent?.type?.name !== 'Work item') continue;
+    if (!parent.url.toLowerCase().startsWith(here)) {
+      io.out(`- #${slice.number}'s Work item is in another repository; left to its own jobs`);
+      continue;
+    }
+    if (!items.includes(parent.number)) items.push(parent.number);
+  }
+  const { owners } = loadSettings(sys, sys.cwd);
+  for (const number of items) await closeIfDone(sys, io, token, slug, number, owners, `#${pull}`);
 }
 
 /**

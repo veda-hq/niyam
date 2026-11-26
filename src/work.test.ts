@@ -93,6 +93,9 @@ function answer(issue: Node | null, url: string, issues = ISSUES): { status: num
   if (path === '/12/parent') {
     return parent ? { status: 200, json: { ...parent, url: `${issues}/10` } } : { status: 404, json: { message: 'No parent issue found' } };
   }
+  // The work item itself, open with no "**Slices:** all filed" line unless the parent says otherwise, and its comments.
+  if (path === '/10') return parent ? { status: 200, json: { state: 'open', body: '', labels: [], ...parent, url: `${issues}/10` } } : undefined;
+  if (path === '/10/comments') return page((parent?.comments as Node[] | undefined) ?? []);
   if (path === '/10/timeline') return page(issue.timeline as Node[]);
   if (path === '/12/timeline') return page(issue.own as Node[]);
   const siblings = (issue.siblings as Node[] | undefined) ?? [];
@@ -2174,6 +2177,8 @@ describe('prMerged', () => {
     return sys;
   }
   const merged = (body: string | null, base = 'main'): Node => ({ number: 40, body, merged: true, base: { ref: base } });
+  /** What a run says of slice #12's Work item, #10, whose spec does not say its slices are all filed. */
+  const STAYS = '- #10 stays open: its body has no "**Slices:** all filed" line, so it may have slices still to file';
   async function run(sys: FakeSys): Promise<{ code: number; out: string[] }> {
     const { io, out } = capture();
     return { code: await prMerged(sys, io), out };
@@ -2182,7 +2187,7 @@ describe('prMerged', () => {
 
   it('closes the slice a merged pull request names, with a comment linking it', async () => {
     const sys = actions(merged('Builds the thing.\n\nSlice: #12'));
-    assert.deepEqual(await run(sys), { code: 0, out: ['✓ #12: closed, built in #40'] });
+    assert.deepEqual(await run(sys), { code: 0, out: ['✓ #12: closed, built in #40', STAYS] });
     assert.deepEqual(writes(sys), [
       ['POST', `${ISSUE}/comments`, { body: 'Built in #40, merged into main.' }, 'ghs_run'],
       ['PATCH', ISSUE, { state: 'closed', state_reason: 'completed' }, 'ghs_run'],
@@ -2196,7 +2201,7 @@ describe('prMerged', () => {
     github(sys, g.issue);
     assert.deepEqual(await run(sys), {
       code: 0,
-      out: ['✓ #12 is closed already; commented that it was built in #40', '- #99 is not a Slice in example-org/example-app; left as it is'],
+      out: ['✓ #12 is closed already; commented that it was built in #40', '- #99 is not a Slice in example-org/example-app; left as it is', STAYS],
     });
     assert.deepEqual(writes(sys), [['POST', `${ISSUE}/comments`, { body: 'Built in #40, merged into main.' }, 'ghs_run']]);
   });
@@ -2213,12 +2218,12 @@ describe('prMerged', () => {
     g.comments.push(comment('Built in #400, merged into main.', LATEST, 'github-actions[bot]'), comment('Built in #40, merged into main.', LATEST, 'github-actions[bot]'));
     const open = actions(merged('Slice: #12'));
     github(open, g.issue);
-    assert.deepEqual(await run(open), { code: 0, out: ['✓ #12: closed, built in #40'] });
+    assert.deepEqual(await run(open), { code: 0, out: ['✓ #12: closed, built in #40', STAYS] });
     assert.deepEqual(writes(open), [['PATCH', ISSUE, { state: 'closed', state_reason: 'completed' }, 'ghs_run']]);
     g.issue.state = 'closed';
     const closed = actions(merged('Slice: #12'));
     github(closed, g.issue);
-    assert.deepEqual(await run(closed), { code: 0, out: ['✓ #12 is closed already and says it was built in #40'] });
+    assert.deepEqual(await run(closed), { code: 0, out: ['✓ #12 is closed already and says it was built in #40', STAYS] });
     assert.deepEqual(writes(closed), []);
   });
 
@@ -2228,7 +2233,7 @@ describe('prMerged', () => {
     g.comments.push(comment('Built in #400, merged into main.', LATEST, 'github-actions[bot]'));
     const sys = actions(merged('Slice: #12'));
     github(sys, g.issue);
-    assert.deepEqual((await run(sys)).out, ['✓ #12 is closed already; commented that it was built in #40']);
+    assert.deepEqual((await run(sys)).out, ['✓ #12 is closed already; commented that it was built in #40', STAYS]);
   });
 
   for (const [name, pull, line] of [
@@ -2297,7 +2302,7 @@ describe('prMerged', () => {
 
     it('closes each State under the slice a "State: #N" line names, with a comment linking the pull request', async () => {
       const sys = delivering('Fixes the thing on narrow pages.\n\nSlice: #12\nState: #31');
-      assert.deepEqual(await run(sys), { code: 0, out: ['✓ #12 is closed already; commented that it was built in #40', '✓ #31: closed, built in #40'] });
+      assert.deepEqual(await run(sys), { code: 0, out: ['✓ #12 is closed already; commented that it was built in #40', '✓ #31: closed, built in #40', STAYS] });
       assert.deepEqual(writes(sys), [
         ['POST', `${ISSUE}/comments`, { body: 'Built in #40, merged into main.' }, 'ghs_run'],
         ['POST', `${STATE}/comments`, { body: 'Built in #40, merged into main.' }, 'ghs_run'],
@@ -2307,7 +2312,7 @@ describe('prMerged', () => {
 
     it('leaves a State named only in prose open, as before', async () => {
       const sys = delivering('Builds State #31 of P-01.\n\nSlice: #12');
-      assert.deepEqual((await run(sys)).out, ['✓ #12 is closed already; commented that it was built in #40']);
+      assert.deepEqual((await run(sys)).out, ['✓ #12 is closed already; commented that it was built in #40', STAYS]);
       assert.deepEqual(writes(sys).filter((write) => String((write as string[])[1]).startsWith(STATE)), []);
     });
 
@@ -2332,7 +2337,7 @@ describe('prMerged', () => {
       unsliced.route('GET', ISSUE, { status: 200, json: { number: 12, type: { name: 'Task' }, state: 'closed', url: `https://api.github.com${ISSUE}` } });
       assert.deepEqual((await run(unsliced)).out, ['- #12 is not a Slice in example-org/example-app; left as it is', '- #31 is not a State under a slice #40 names; left as it is']);
       const other = delivering('Slice: #12\nState: #31\nState: #99', { type: { name: 'Task' } });
-      assert.deepEqual((await run(other)).out.slice(1), ['- #31 is not a State in example-org/example-app; left as it is', '- #99 is not a State in example-org/example-app; left as it is']);
+      assert.deepEqual((await run(other)).out.slice(1), ['- #31 is not a State in example-org/example-app; left as it is', '- #99 is not a State in example-org/example-app; left as it is', STAYS]);
       assert.deepEqual([dropped, elsewhere, orphan, unsliced, other].flatMap((sys) => writes(sys).filter((write) => String((write as string[])[1]).startsWith(STATE))), []);
     });
 
@@ -2343,6 +2348,86 @@ describe('prMerged', () => {
       const refused = delivering('Slice: #12\nState: #31');
       refused.route('PATCH', STATE, { status: 403, json: { message: 'Resource not accessible by integration' } });
       await assert.rejects(run(refused), /cannot close #31: Resource not accessible by integration; the client workflow needs a job with issues: write/);
+    });
+  });
+
+  describe('the Work item above it (#655)', () => {
+    const ITEM = `/repos/${SLUG}/issues/10`;
+    const STATE = `/repos/${SLUG}/issues/31`;
+    const CLOSING = 'All of its sub-issues are closed (#12), the last by #40, and its spec says its slices are all filed: closing this Work item.';
+    /** Slice #12 under Work item #10, whose spec says its slices are all filed; a close GitHub records, as it would. */
+    function finishing(body: string, change: (g: ReturnType<typeof graph>) => void = () => {}): FakeSys {
+      const sys = actions(merged(body));
+      const g = graph();
+      g.issue.parent = { number: 10, type: { name: 'Work item' }, body: 'The spec.\n\n**Slices:** all filed', labels: [{ name: 'approved' }], comments: [] };
+      change(g);
+      github(sys, g.issue);
+      const closes = (one: Node) => (): { status: number; json: unknown } => {
+        Object.assign(one, { state: 'closed', state_reason: 'completed', closed_at: LATEST });
+        return { status: 200, json: {} };
+      };
+      sys.route('PATCH', ISSUE, closes(g.issue));
+      const state = g.states[0];
+      if (state) {
+        sys.route('POST', `${STATE}/comments`, { status: 201, json: {} });
+        sys.route('PATCH', STATE, closes(state));
+      }
+      sys.route('POST', `${ITEM}/comments`, { status: 201, json: {} });
+      sys.route('PATCH', ITEM, { status: 200, json: {} });
+      return sys;
+    }
+    const onItem = (sys: FakeSys): unknown[] => writes(sys).filter((write) => String((write as string[])[1]).startsWith(ITEM));
+
+    it('closes the Work item when the merge closes its last slice, saying which pull request did', async () => {
+      const sys = finishing('Slice: #12');
+      assert.deepEqual(await run(sys), { code: 0, out: ['✓ #12: closed, built in #40', '✓ #10: closed, since all 1 of its sub-issues are closed (#12)'] });
+      assert.deepEqual(onItem(sys), [
+        ['POST', `${ITEM}/comments`, { body: CLOSING }, 'ghs_run'],
+        ['PATCH', ITEM, { state: 'closed', state_reason: 'completed' }, 'ghs_run'],
+      ]);
+    });
+
+    it('closes it when the merge closes the last State under its closed slice', async () => {
+      const sys = finishing('Slice: #12\nState: #31', (g) => {
+        Object.assign(g.issue, { state: 'closed', state_reason: 'completed', closed_at: LATER });
+        g.states.push({ number: 31, title: 'Fix: the thing', type: { name: 'State' }, state: 'open', state_reason: null, closed_at: null, comments: [] });
+      });
+      assert.deepEqual((await run(sys)).out, [
+        '✓ #12 is closed already; commented that it was built in #40',
+        '✓ #31: closed, built in #40',
+        '✓ #10: closed, since all 1 of its sub-issues are closed (#12)',
+      ]);
+    });
+
+    it('judges a Work item once, however many of its slices the pull request names', async () => {
+      const sys = finishing('Slice: #12\nSlice: #13', (g) => {
+        g.siblings.push({ number: 13, title: 'Add more', type: { name: 'Slice' }, state: 'open', state_reason: null, closed_at: null, own: [] });
+      });
+      const SIBLING = `/repos/${SLUG}/issues/13`;
+      const sibling = { number: 13, title: 'Add more', type: { name: 'Slice' }, state: 'open', url: `https://api.github.com${SIBLING}` };
+      sys.route('GET', SIBLING, { status: 200, json: sibling });
+      sys.route('GET', `${SIBLING}/parent`, { status: 200, json: { number: 10, type: { name: 'Work item' }, url: `https://api.github.com${ITEM}` } });
+      sys.route('GET', `${SIBLING}/comments?per_page=100&page=1`, { status: 200, json: [] });
+      sys.route('POST', `${SIBLING}/comments`, { status: 201, json: {} });
+      sys.route('PATCH', SIBLING, { status: 200, json: {} });
+      assert.deepEqual((await run(sys)).out, ['✓ #12: closed, built in #40', '✓ #13: closed, built in #40', '- #10 stays open: #13 is still open']);
+      assert.equal(sys.requests.filter((request) => request.method === 'GET' && request.url.endsWith(ITEM)).length, 1);
+    });
+
+    it("leaves a Work item in another repository to that repository's jobs, and a slice under no Work item alone", async () => {
+      const foreign = finishing('Slice: #12');
+      foreign.route('GET', `${ISSUE}/parent`, { status: 200, json: { number: 10, type: { name: 'Work item' }, url: `https://api.github.com/repos/${PLANS}/issues/10` } });
+      assert.deepEqual((await run(foreign)).out, ['✓ #12: closed, built in #40', "- #12's Work item is in another repository; left to its own jobs"]);
+      const orphan = finishing('Slice: #12');
+      orphan.route('GET', `${ISSUE}/parent`, { status: 404, json: { message: 'No parent issue found' } });
+      assert.deepEqual((await run(orphan)).out, ['✓ #12: closed, built in #40']);
+      assert.deepEqual([...onItem(foreign), ...onItem(orphan)], []);
+    });
+
+    it("fails when it cannot read a slice's Work item", async () => {
+      const sys = finishing('Slice: #12');
+      sys.route('GET', `${ISSUE}/parent`, { status: 502, json: null });
+      await assert.rejects(run(sys), /^Error: cannot judge #12's Work item: could not read #12's parent \(HTTP 502\)$/);
     });
   });
 });
