@@ -18,10 +18,11 @@ import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { BY_HAND_WIDTH, wrap } from './layout.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, autoFixRuleNeeds, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_READ_ONLY_IF, READ_ONLY_IF, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, autoFixRuleNeeds, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
+  CALLER_0720,
   CLOUD_SETUP_068,
   GUARD_COMMAND_052,
   GUARD_COMMAND_0610,
@@ -2789,8 +2790,8 @@ describe('workflow', () => {
     assert.deepEqual(workflowUpdate(oldIds(workflow('main', '0.6.1', false)), 'main', '0.6.2', false), { kind: 'replace', text: workflow('main', '0.6.2', false) });
   });
 
-  it('writes, at the same pin, what 0.6.8 wrote for veda-hq/niyam, but for the ids P-56 renamed', () => {
-    assert.equal(oldIds(workflow('main', '0.6.8', false)), WORKFLOW_068_NIYAM);
+  it('writes, at the same pin, what 0.6.8 wrote for veda-hq/niyam, but for the ids P-56 renamed and the queue-draft skip (#685)', () => {
+    assert.equal(oldIds(workflow('main', '0.6.8', false)).replace(READ_ONLY_IF, OLDER_READ_ONLY_IF), WORKFLOW_068_NIYAM);
   });
 
   it("calls the product's shared checks on pull requests and the default branch", () => {
@@ -2807,7 +2808,17 @@ describe('workflow', () => {
     assert.match(text, /^permissions:\n {2}contents: read\n {2}issues: read\n {2}pull-requests: read$/m);
     assert.match(text, /^ {4}types: \[opened, synchronize, reopened, edited, closed\]$/m);
     const [, prJob = '', weeklyJob = '', mergedJob = '', asksJob = ''] = text.split(/^ {2}(?:niyam|niyam-weekly|niyam-merged|niyam-asks):$/m);
-    assert.match(prJob, /^ {4}if: \(github\.event_name == 'pull_request' && github\.event\.action != 'closed'\) \|\| github\.event_name == 'push'$/m);
+    assert.ok(
+      prJob.includes(
+        "    name: niyam\n    # Not on an edit of Mergify's queue draft that changes no title or base: its head's runs stand (veda-hq/niyam#685).\n    if: >-\n" +
+          "      (github.event_name == 'pull_request' && github.event.action != 'closed' && !(github.event.action == 'edited' && !github.event.changes.title && !github.event.changes.base &&\n" +
+          "      github.event.pull_request.user.login == 'mergify[bot]' && github.event.pull_request.user.type == 'Bot' &&\n" +
+          "      startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/') &&\n" +
+          '      github.event.pull_request.head.repo.full_name == github.repository &&\n' +
+          "      !contains(github.event.pull_request.title, ' pull requests ahead'))) || github.event_name == 'push'\n    uses:",
+      ),
+      'every pull request event but closed and an edit of Mergify\'s queue draft at its head, and pushes',
+    );
     assert.doesNotMatch(prJob, /permissions:|: write/);
     assert.match(weeklyJob, /^ {4}if: \(github\.event_name == 'schedule' && github\.event\.schedule != '41 \* \* \* \*'\) \|\| github\.event_name == 'workflow_dispatch'$/m);
     assert.match(weeklyJob, /^ {4}permissions:\n {6}contents: read\n {6}issues: write\n {6}pull-requests: read$/m);
@@ -2834,9 +2845,18 @@ describe('workflow', () => {
 const ASKS_WHAT =
   "add a job that labels an issue needs-owner where the agent asks the owner, and takes it off at the owner's approved label, Decision: comment or (hourly) 👍 and start the needs-owner job when an issue is opened or reopened too, which gives one with no type the work model's";
 
+/** What adding the queue-draft skip (#685) says. */
+const DRAFTS_WHAT = "skip the pull request job on an edit of Mergify's queue draft that changes no title or base, so the draft's last niyam checks at its head stand";
+
+/** `text`, a workflow onboard writes, with the read-only job's condition as releases before the queue-draft skip (#685) wrote it. */
+function beforeDrafts(text: string): string {
+  assert.equal(text.split(READ_ONLY_IF).length, 2);
+  return text.replace(READ_ONLY_IF, OLDER_READ_ONLY_IF);
+}
+
 /** The three-job workflow releases before the needs-owner job wrote, from this release's. */
 function threeJobs(version: string, figma: boolean, schedule?: string): string {
-  return workflow('main', version, figma, schedule)
+  return beforeDrafts(workflow('main', version, figma, schedule))
     .replace(/\n {2}# An ask labels its issue[\s\S]*$/, '\n')
     .replace('# The weekly, merged and needs-owner jobs are split out', '# The weekly and merged jobs are split out')
     .replace(/ {2}# A comment that asks the owner[^\n]*\n {2}issue_comment:\n {4}types: \[created\]\n {2}pull_request_review_comment:\n {4}types: \[created\]\n(?: {2}# opened, reopened:[^\n]*\n)? {2}issues:\n {4}types: \[labeled(?:, opened, reopened)?\]\n/, '')
@@ -3125,7 +3145,7 @@ describe('workflowUpdate', () => {
 
   it('adds the merged job to a two-job workflow, moving its pins and keeping what the client changed', () => {
     for (const figma of [true, false]) {
-      assert.deepEqual(workflowUpdate(twoJobs('0.5.6', figma), 'main', '0.5.16', figma), { kind: 'repin', text: workflow('main', '0.5.16', figma), from: '0.5.6', merged: true, asks: true, types: true });
+      assert.deepEqual(workflowUpdate(twoJobs('0.5.6', figma), 'main', '0.5.16', figma), { kind: 'repin', text: workflow('main', '0.5.16', figma), from: '0.5.6', merged: true, asks: true, types: true, drafts: true });
     }
     const own = twoJobs('0.5.6', true)
       .replace('# The weekly job is split out so pull request and push runs stay read-only.\n', '')
@@ -3143,18 +3163,18 @@ describe('workflowUpdate', () => {
     sys.files.set(CLOUD, CLOUD_FILE).set(CALLER, CALLER_FILE);
     sys.files.set(WORKFLOW, twoJobs('0.5.6', false));
     const { out } = await run(sys);
-    assert.deepEqual(planned(out, 'Pull request'), [`workflow: pins → v${packageVersion()}, merged job, needs-owner job, issue types for new issues`, 'auto-merge: when checks pass']);
+    assert.deepEqual(planned(out, 'Pull request'), [`workflow: pins → v${packageVersion()}, merged job, needs-owner job, issue types for new issues, skips Mergify's queue-draft edits`, 'auto-merge: when checks pass']);
     assert.equal(out[0], `◆  niyam onboard   v0.5.6 → v${packageVersion()}`);
-    assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, move the version pins from v0.5.6 to v${packageVersion()} and add a job that closes the slice a merged pull request names, the one pull request run that writes to issues and ${ASKS_WHAT}, leaving the rest as it is\n`));
+    assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, move the version pins from v0.5.6 to v${packageVersion()} and add a job that closes the slice a merged pull request names, the one pull request run that writes to issues and ${ASKS_WHAT} and ${DRAFTS_WHAT}, leaving the rest as it is\n`));
     assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false));
   });
 
   it('adds the needs-owner job to a three-job workflow, moving its pins and keeping what the client changed', () => {
     for (const figma of [true, false]) {
-      assert.deepEqual(workflowUpdate(threeJobs('0.5.26', figma), 'main', '0.5.27', figma), { kind: 'repin', text: workflow('main', '0.5.27', figma), from: '0.5.26', asks: true, types: true });
+      assert.deepEqual(workflowUpdate(threeJobs('0.5.26', figma), 'main', '0.5.27', figma), { kind: 'repin', text: workflow('main', '0.5.27', figma), from: '0.5.26', asks: true, types: true, drafts: true });
     }
-    assert.deepEqual(workflowUpdate(threeJobs('0.5.27', true), 'main', '0.5.27', true), { kind: 'repin', text: workflow('main', '0.5.27', true), asks: true, types: true });
-    assert.deepEqual(workflowUpdate(threeJobs('0.5.26', true, '0 9 * * 1-5'), 'main', '0.5.27', true, '0 9 * * 1-5'), { kind: 'repin', text: workflow('main', '0.5.27', true, '0 9 * * 1-5'), from: '0.5.26', asks: true, types: true });
+    assert.deepEqual(workflowUpdate(threeJobs('0.5.27', true), 'main', '0.5.27', true), { kind: 'repin', text: workflow('main', '0.5.27', true), asks: true, types: true, drafts: true });
+    assert.deepEqual(workflowUpdate(threeJobs('0.5.26', true, '0 9 * * 1-5'), 'main', '0.5.27', true, '0 9 * * 1-5'), { kind: 'repin', text: workflow('main', '0.5.27', true, '0 9 * * 1-5'), from: '0.5.26', asks: true, types: true, drafts: true });
     const own = threeJobs('0.5.26', true).replace(/^# The weekly and merged jobs[^\n]*\n/m, '').replace('name: niyam\n', 'name: niyam\n# Our own note.\n');
     const update = workflowUpdate(own, 'main', '0.5.27', true);
     assert.ok(update.kind === 'repin' && update.asks);
@@ -3212,8 +3232,8 @@ describe('workflowUpdate', () => {
     sys.files.set(CLOUD, CLOUD_FILE).set(CALLER, CALLER_FILE);
     sys.files.set(WORKFLOW, threeJobs(packageVersion(), false));
     const { out } = await run(sys);
-    assert.deepEqual(planned(out, 'Pull request'), ['workflow: needs-owner job, issue types for new issues', 'auto-merge: when checks pass']);
-    assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, ${ASKS_WHAT}, leaving the rest as it is\n`));
+    assert.deepEqual(planned(out, 'Pull request'), ["workflow: needs-owner job, issue types for new issues, skips Mergify's queue-draft edits", 'auto-merge: when checks pass']);
+    assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, ${ASKS_WHAT} and ${DRAFTS_WHAT}, leaving the rest as it is\n`));
     assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false));
   });
 
@@ -3392,6 +3412,40 @@ describe("the shared Guard's caller (#470)", () => {
     assert.deepEqual(callerUpdate('on: push\n', undefined, 'main', v), { kind: 'rewrite', text: CALLER_FILE });
   });
 
+  it("adds the queue-draft skip to a caller from before it, saying so, and reads that caller as onboard's (#685)", async () => {
+    assert.deepEqual(await callerAt(CALLER_0720), { version: '0.7.20', branch: 'main', older: true });
+    assert.equal(guardCaller('main', '0.7.20', true), CALLER_0720, 'older is the caller 0.7.20 wrote');
+    assert.deepEqual(await callerAt(guardCaller('trunk', v, true)), { version: v, branch: 'trunk', older: true });
+    const pinned = callerUpdate(CALLER_0720, { version: '0.7.20', branch: 'main', older: true }, 'main', v);
+    assert.deepEqual(pinned, { kind: 'repin', text: CALLER_FILE, from: '0.7.20', drafts: true });
+    assert.equal(pinned.kind === 'repin' && callerDetail(pinned, v), `pin → v${v}, skips Mergify's queue-draft edits`);
+    const at = guardCaller('main', v, true);
+    const same = callerUpdate(at, { version: v, branch: 'main', older: true }, 'main', v);
+    assert.deepEqual(same, { kind: 'repin', text: CALLER_FILE, drafts: true });
+    assert.equal(same.kind === 'repin' && callerDetail(same, v), "skips Mergify's queue-draft edits");
+    assert.equal(
+      same.kind === 'repin' && callerWhat(same, v, 'main'),
+      `in ${GUARD_CALLER_PATH}, the shared Guard's caller, skip an edit of Mergify's queue draft that changes no title or base, so the draft's last niyam-guard / judge at its head stands`,
+    );
+
+    const sys = onboarded(v);
+    sys.files.set(WORKFLOW, beforeDrafts(full('main', '0.7.20')));
+    sys.files.set(CALLER, CALLER_0720);
+    const { code, out } = await run(sys, []);
+    assert.equal(code, 0, out.join('\n'));
+    const plan = planned(out, 'Pull request');
+    assert.ok(plan.includes(`workflow: pins → v${v}, skips Mergify's queue-draft edits`), plan.join('\n'));
+    assert.ok(plan.includes(`guard caller: pin → v${v}, skips Mergify's queue-draft edits`), plan.join('\n'));
+    assert.equal(repo(sys).get(WORKFLOW), full('main', v));
+    assert.equal(repo(sys).get(CALLER), CALLER_FILE);
+    const body = opened(sys)?.body ?? '';
+    assert.ok(body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, move the version pins from v0.7.20 to v${v} and ${DRAFTS_WHAT}, leaving the rest as it is\n`), body);
+    assert.ok(
+      body.includes(`\n- \`${GUARD_CALLER_PATH}\`: in ${GUARD_CALLER_PATH}, the shared Guard's caller, move its pin from v0.7.20 to v${v} and skip an edit of Mergify's queue draft that changes no title or base, so the draft's last niyam-guard / judge at its head stands\n`),
+      body,
+    );
+  });
+
   it("writes a branch YAML would read as another value quoted, and the caller's header names no release", async () => {
     for (const branch of ['main', 'release/1.0', 'true', '1.0', "it's"]) {
       const text = guardCaller(branch, v);
@@ -3408,7 +3462,11 @@ describe("the shared Guard's caller (#470)", () => {
       assert.deepEqual(doc.on.pull_request_target, { types: ['opened', 'edited', 'synchronize', 'reopened'], branches: [branch] });
       const read = { contents: 'read', 'pull-requests': 'read', issues: 'read' };
       assert.deepEqual(doc.permissions, read);
-      assert.deepEqual(doc.jobs, { 'niyam-guard': { name: 'niyam-guard', permissions: read, uses: `veda-hq/niyam/.github/workflows/shared-guard.yml@v${v}` } });
+      const skip =
+        "${{ !(github.event.action == 'edited' && !github.event.changes.title && !github.event.changes.base && github.event.pull_request.user.login == 'mergify[bot]' && github.event.pull_request.user.type == 'Bot' && " +
+        "startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/') && github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.title, ' pull requests ahead')) }}";
+      assert.deepEqual(doc.jobs, { 'niyam-guard': { name: 'niyam-guard', if: skip, permissions: read, uses: `veda-hq/niyam/.github/workflows/shared-guard.yml@v${v}` } });
+      assert.ok(guardCaller(branch, v).includes("    name: niyam-guard\n    # Not on an edit of Mergify's queue draft that changes no title or base: its head's runs stand (veda-hq/niyam#685).\n    if: >-\n      ${{ !(github.event.action"));
       assert.match(doc.jobs['niyam-guard']?.uses as string, /^veda-hq\/niyam\/\.github\/workflows\/shared-guard\.yml@(v\d+\.\d+\.\d+|[0-9a-f]{40})$/);
       assert.equal(`${doc.jobs['niyam-guard']?.name as string} / judge`, CALLER_CHECK);
     }

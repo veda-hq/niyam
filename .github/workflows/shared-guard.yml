@@ -11,6 +11,7 @@ name: niyam guard
 #   jobs:
 #     niyam-guard:
 #       name: niyam-guard
+#       if: not an edit of Mergify's queue draft that changes no title or base
 #       permissions: { contents: read, pull-requests: read, issues: read }
 #       uses: veda-hq/niyam/.github/workflows/shared-guard.yml@vX.Y.Z
 #
@@ -43,6 +44,9 @@ jobs:
     # #3829). The draft's body is not judged, so each run reaches the same verdict, and none is skipped: a skipped
     # run would pass the check over a refusal. Waiting instead (queue: max) is no way out either: GitHub refuses it
     # with cancel-in-progress, which an ordinary pull request keeps.
+    # So this job has no if:. The caller skips such an edit before this job is reached (veda-hq/niyam#685): GitHub
+    # reports the skipped caller job as niyam-guard alone, never niyam-guard / judge, so the draft's last verdict at
+    # its head stands, a refusal or a failed read included. A caller that does not skip still runs every edit here.
     concurrency:
       group: niyam-guard-${{ github.event.pull_request.number }}-${{ github.event.pull_request.user.login == 'mergify[bot]' && github.event.pull_request.user.type == 'Bot' && startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/') && github.event.pull_request.head.repo.full_name == github.repository && github.run_id || 'pull' }}
       cancel-in-progress: true
