@@ -46,6 +46,7 @@ import {
 } from './onboard-pull.ts';
 import { SIGNING_KEY_VAR, cloudRepoScript, cloudScriptVersion, releaseSha256 } from './cloud.ts';
 import { GUARD_CALLER_PATH, callerAt, callerIsOnboards, callerPins, callerDetail, callerUpdate, callerWhat, policySteps } from './guard-caller.ts';
+import { skipQueueDraftEdit } from './queue-draft.ts';
 import { CLOUD_KEY_TITLE, cloudKeyRefusal, listedKeys, makeCloudKey, pasteLines } from './cloud-key.ts';
 import { newKey, publicLine } from './sshsig.ts';
 import { detail } from './doc-numbers.ts';
@@ -510,8 +511,15 @@ const TRIGGER_TYPES = [
 ];
 /** The pull request events before P-46. */
 const OLDER_TRIGGER_TYPES = ['    # edited: a changed "Slice: #N" line is checked again.', '    types: [opened, synchronize, reopened, edited]'];
-/** The read-only job's condition: a closed pull request runs the merged job alone. */
-const READ_ONLY_IF = "    if: (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push'";
+/**
+ * The read-only job's condition: a closed pull request runs the merged job
+ * alone, and an edit of Mergify's queue draft that changes no title or base
+ * runs nothing. GitHub reports the skipped job as `niyam` alone, so the
+ * draft's last `niyam / …` checks at its head stand (veda-hq/niyam#685).
+ */
+export const READ_ONLY_IF = skipQueueDraftEdit("(github.event_name == 'pull_request' && github.event.action != 'closed' && ", ") || github.event_name == 'push'").join('\n');
+/** The read-only job's condition before the queue-draft skip. */
+export const OLDER_READ_ONLY_IF = "    if: (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push'";
 const SPLIT_COMMENT = '# The weekly, merged and needs-owner jobs are split out so pull request and push runs stay read-only.';
 /** The comment before the needs-owner job. */
 const MERGED_SPLIT_COMMENT = '# The weekly and merged jobs are split out so pull request and push runs stay read-only.';
@@ -608,7 +616,7 @@ function mergedJob(version: string, secrets: string[]): string[] {
 const BEFORE_MERGED: { was: string; now: string; optional?: true }[] = [
   { was: '# The weekly job is split out so pull request and push runs stay read-only.', now: MERGED_SPLIT_COMMENT, optional: true },
   { was: OLDER_TRIGGER_TYPES.join('\n'), now: TRIGGER_TYPES.join('\n') },
-  { was: "    if: github.event_name == 'pull_request' || github.event_name == 'push'", now: READ_ONLY_IF },
+  { was: "    if: github.event_name == 'pull_request' || github.event_name == 'push'", now: OLDER_READ_ONLY_IF },
 ];
 
 /**
@@ -831,7 +839,7 @@ function flowScalar(value: string, quote: string): string {
 export type WorkflowUpdate =
   | { kind: 'same' }
   | { kind: 'write' | 'replace'; text: string; from?: string }
-  | { kind: 'repin'; text: string; from?: string; branch?: string; schedule?: string; secrets?: true; board?: true; merged?: true; asks?: true; authors?: true; types?: true };
+  | { kind: 'repin'; text: string; from?: string; branch?: string; schedule?: string; secrets?: true; board?: true; merged?: true; asks?: true; authors?: true; types?: true; drafts?: true };
 
 /**
  * What onboard does with the client's workflow: write it, or, in a workflow
@@ -898,7 +906,11 @@ function repinned(before: string, branch: string, version: string, figma: boolea
           .replace(olderLabelIf, `\n${ASKS_LABEL_IF}\n${ASKS_TYPE_IF}\n`)
           .replace(`${ASKS_COMMENT}\n  ${CLI}-asks:`, `${ASKS_COMMENT}\n${ASKS_TYPE_COMMENT}\n  ${CLI}-asks:`)
       : before;
+    // Before 0.7.22 the read-only job judged every edit of Mergify's queue draft (veda-hq/niyam#685).
+    const olderReadOnly = `\n${OLDER_READ_ONLY_IF}\n`;
+    const drafts = typed.split(olderReadOnly).length === 2;
     const pinned = typed
+      .replace(olderReadOnly, () => `\n${READ_ONLY_IF}\n`)
       .replace(OLDER_ASKS_COMMENT_IF.join('\n'), ASKS_COMMENT_IF.join('\n'))
       .replace(CHECKS_PIN, () => `${PRODUCT}/.github/workflows/checks.yml@v${version}`)
       .replace(REF_PIN, (_, head: string) => `${head}${version}`)
@@ -932,6 +944,7 @@ function repinned(before: string, branch: string, version: string, figma: boolea
       ...(changed.board ? { board: true as const } : {}),
       ...(authors ? { authors: true as const } : {}),
       ...(types ? { types: true as const } : {}),
+      ...(drafts ? { drafts: true as const } : {}),
     };
   }
   return { kind: 'replace', text: wanted };
@@ -1409,6 +1422,7 @@ function workflowDetail(update: Exclude<WorkflowUpdate, { kind: 'same' }>, versi
       ...(update.asks ? ['needs-owner job'] : []),
       ...(update.authors ? ['needs-owner job only for owners, members and collaborators'] : []),
       ...(update.types ? ['issue types for new issues'] : []),
+      ...(update.drafts ? ["skips Mergify's queue-draft edits"] : []),
     ].join(', ') || `header → v${version}`
   );
 }
@@ -1433,6 +1447,7 @@ function workflowWhat(update: Exclude<WorkflowUpdate, { kind: 'same' }>, version
     ...(update.asks ? ["add a job that labels an issue needs-owner where the agent asks the owner, and takes it off at the owner's approved label, Decision: comment or (hourly) 👍"] : []),
     ...(update.authors ? ['start the needs-owner job only on a comment by the owner, a member or a collaborator'] : []),
     ...(update.types ? ["start the needs-owner job when an issue is opened or reopened too, which gives one with no type the work model's"] : []),
+    ...(update.drafts ? ["skip the pull request job on an edit of Mergify's queue draft that changes no title or base, so the draft's last niyam checks at its head stand"] : []),
   ];
   return `in ${file}, ${parts.join(' and ') || `set the version in its header comment to v${version}`}, leaving the rest as it is`;
 }

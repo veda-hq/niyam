@@ -2087,6 +2087,13 @@ Any other draft, or one whose title names no pull request, is judged as itself, 
 
 On a pull request, Guard's newer run cancels its older one. On Mergify's draft it does not: each run there has a concurrency group of its own, and every run reaches a verdict. This holds for any draft by `mergify[bot]` on a `mergify/merge-queue/` branch of the repository, whatever its title. Mergify edits the draft's body many times a minute. A cancelled required check makes it drop the pull request it tests ("checks interrupted"). Guard does not judge the draft's body, so the verdicts agree.
 
+**One run per draft head (#685).** Each of those edits used to start niyam's checks and Guard again, at the same head. One draft in athya_mono had 223 runs in 33 minutes. Together they used up the repository's 1,000 API requests an hour, and every check in the queue then failed with HTTP 403. So the two caller jobs onboard writes, `niyam` in `niyam.yml` and `niyam-guard` in `niyam-guard.yml`, skip an edit of Mergify's draft when all of these hold:
+- the event is `edited`, and its `changes` name neither the title nor the base;
+- the draft is known as above: `mergify[bot]`, a Bot, a `mergify/merge-queue/` branch of the repository;
+- its title is not the `stacked on N pull requests ahead` form, whose tested pull requests come from the body.
+
+GitHub reports a skipped caller job under its own name, `niyam` or `niyam-guard`, never as `niyam / PR identity` or `niyam-guard / judge`. So the draft's last verdict at its head stands, a refusal or a failed read included, and no required check is reported skipped. `opened`, `synchronize` and `reopened` judge every head. An ordinary pull request's edits run as before, since a body edit can change its `Slice:` line. So do the draft's title and base edits, `merged #A` included. The skip is on the callers alone, not on `shared-guard.yml`'s `judge` or the jobs in `checks.yml`. A skip there would report the required check as `skipped`, the newest run of that name, and pass it over an earlier refusal. `onboard` adds the skip to a `niyam.yml` and a caller from before 0.7.22, and its plan says so: `skips Mergify's queue-draft edits`.
+
 A name is a path, a folder ending in `/`, or a pattern where `*` matches
 within one folder and `**` across them. The guard files are a floor every
 repository has, everything under `.github/`, `.githooks/` and `.husky/`,
