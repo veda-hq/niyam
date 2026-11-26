@@ -700,8 +700,6 @@ function workflowHead(branch: string, version: string, comments: string[], sched
 
 /** The Figma secrets a job passes the shared checks, when the figma feature is on. */
 const FIGMA_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}', '      FIGMA_LIBRARY: ${{ secrets.FIGMA_LIBRARY }}'];
-/** The secrets every job passed before P-23, whether figma was on or not. */
-const OLDER_SECRETS = ['    secrets:', '      FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}'];
 /** The board GitHub App's secrets, which the Slice started job makes its board token from (P-70). */
 const BOARD_SECRET_LINES = BOARD_SECRETS.map((name) => `      ${name}: \${{ secrets.${name} }}`);
 export { BOARD_SECRETS, boardAppSteps };
@@ -717,7 +715,7 @@ export interface Passed {
  * every job, and the board app's on the pull request job alone, since only
  * its Slice started job uses them.
  */
-function secretsOf(id: string, { figma, board }: Passed): string[] {
+function secretsOf(id: string | undefined, { figma, board }: Passed): string[] {
   const lines = [...(figma ? FIGMA_SECRETS.slice(1) : []), ...(board && id === CLI ? BOARD_SECRET_LINES : [])];
   return lines.length > 0 ? ['    secrets:', ...lines] : [];
 }
@@ -731,20 +729,26 @@ const OWN_SECRET = String.raw`(?:FIGMA_(?:TOKEN|LIBRARY)|NIYAM_BOARD_APP_(?:ID|K
  */
 const SECRETS_AFTER_REF = new RegExp(String.raw`^( {6}niyam-ref:[^\n]*\n)(?: {4}secrets:\n(?: {6}${OWN_SECRET}: \$\{\{ secrets\.${OWN_SECRET} \}\}\n)+(?! {6})|(?! {4}secrets:))`, 'gm');
 
-/** The id of the job whose lines run through `offset` in workflow `text`: the last two-space key before it. */
+/**
+ * The id of the job whose lines run through `offset` in workflow `text`: the
+ * last two-space key before it, or undefined. Under `jobs:` every two-space
+ * key is a job's.
+ */
 function jobAt(text: string, offset: number): string | undefined {
-  return [...text.slice(0, offset).matchAll(/^ {2}([\w-]+):[ \t]*$/gm)].at(-1)?.[1];
+  return [...text.slice(0, offset).matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]).at(-1);
 }
 
 /**
  * The jobs of a workflow that call the shared checks without passing them
  * FIGMA_LIBRARY, by name: each job's own block is read, so one job missing it
- * is found though another passes it.
+ * is found though another passes it. A job's block is its lines indented
+ * three or more, blank ones among them; the text read ends in a newline, so
+ * the last line needs no case of its own.
  */
 export function jobsWithoutLibrary(text: string): string[] {
-  const jobs = text.slice(Math.max(0, text.search(/^jobs:\s*$/m)));
-  return [...jobs.matchAll(/^ {2}([\w-]+):\s*\n((?:(?: {3,}.*)?\n|(?: {3,}.*)$)*)/gm)].flatMap(([, name, body = '']) =>
-    /checks\.yml@/.test(body) && !/secrets\.FIGMA_LIBRARY\b|^ {4}secrets:\s*inherit\s*$/m.test(body) ? [name as string] : [],
+  const jobs = `${text.slice(Math.max(0, text.search(/^jobs:\s*$/m)))}\n`;
+  return [...jobs.matchAll(/^ {2}([\w-]+):[ \t]*\n((?:(?: {3,}.*)?\n)*)/gm)].flatMap(([, name, body]) =>
+    /checks\.yml@/.test(String(body)) && !/secrets\.FIGMA_LIBRARY\b|^ {4}secrets:\s*inherit\s*$/m.test(String(body)) ? [name as string] : [],
   );
 }
 
@@ -801,9 +805,8 @@ export function workflow(branch: string, version: string, figma: boolean, schedu
   ].join('\n');
 }
 
-const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-/** A call of the shared workflow, and its version. */
-const CHECKS_PIN = new RegExp(`(${escape(PRODUCT)}/\\.github/workflows/checks\\.yml@v)([^\\s'"#]+)`, 'g');
+/** A call of the shared workflow, and its version. PRODUCT, `owner/name`, holds no character a pattern reads as more. */
+const CHECKS_PIN = new RegExp(`(${PRODUCT}/\\.github/workflows/checks\\.yml@v)([^\\s'"#]+)`, 'g');
 const REF_PIN = /^(\s+niyam-ref:\s*['"]?v)([^\s'"#]+)/gm;
 const HEADER_PIN = /^(# Written by niyam onboard: the shared niyam checks at v)(\S+?)(\.?)$/m;
 
@@ -865,27 +868,29 @@ export function workflowUpdate(
 
 /** The secrets of onboard's own a block of a job names, by what they are for. */
 function ownSecrets(block: string): { figma: string; board: string } {
-  const names = [...block.matchAll(/^ {6}([\w-]+):/gm)].map((match) => match[1] as string);
-  return { figma: names.filter((name) => name.startsWith('FIGMA_')).join(','), board: names.filter((name) => name.startsWith('NIYAM_BOARD_')).join(',') };
+  // Compared only with each other: no line of a secret holds a comma.
+  const lines = block.split('\n');
+  return { figma: lines.filter((line) => line.includes('FIGMA_')).join(), board: lines.filter((line) => line.includes('NIYAM_BOARD_')).join() };
 }
 
 /** workflowUpdate on a workflow that is there. */
 function repinned(before: string, branch: string, version: string, figma: boolean, schedule: string, settings: string, board: boolean): WorkflowUpdate {
+  // A workflow that is already this one reads as the same below: it is split, with all eight pins at `version`.
   const wanted = workflow(branch, version, figma, schedule, settings, board);
-  if (before === wanted) return { kind: 'same' };
   const pins = workflowPins(before);
-  const from = pins[0];
+  // The release a workflow of four or six pins pins first, where the job it lacks is added.
+  const from = pins[0] as string;
   const pushed = PUSH_BRANCH.exec(before)?.[3];
   const job = (id: string): boolean => new RegExp(String.raw`^ {2}${id}:\s*$`, 'm').test(before);
   const split = job(CLI) && job(`${CLI}-weekly`);
   const merged = job(`${CLI}-merged`);
-  const added = split && !merged && pins.length === 4 && from !== undefined ? addMergedJob(before, from, figma) : undefined;
+  const added = split && !merged && pins.length === 4 ? addMergedJob(before, from, figma) : undefined;
   if (added !== undefined) {
     const update = repinned(added, branch, version, figma, schedule, settings, board);
     return { ...(update.kind === 'repin' ? update : { text: added }), kind: 'repin', merged: true };
   }
   const asks = job(`${CLI}-asks`);
-  const withAsks = split && merged && !asks && pins.length === 6 && from !== undefined ? addAsksJob(before, from, figma) : undefined;
+  const withAsks = split && merged && !asks && pins.length === 6 ? addAsksJob(before, from, figma) : undefined;
   if (withAsks !== undefined) {
     const update = repinned(withAsks, branch, version, figma, schedule, settings, board);
     // The asks job it adds also types each new issue, so the plan says so.
@@ -893,7 +898,8 @@ function repinned(before: string, branch: string, version: string, figma: boolea
   }
   if (split && merged && asks && pins.length === 8) {
     const moved = pushed !== undefined && pushed !== branch;
-    const cron = SCHEDULE.exec(before)?.[4]?.trim();
+    const scheduled = SCHEDULE.exec(before);
+    const cron = scheduled ? String(scheduled[4]).trim() : undefined;
     const rescheduled = cron !== undefined && cron.split(/\s+/).join(' ') !== schedule;
     const authors = before.includes(OLDER_ASKS_COMMENT_IF.join('\n'));
     // Before 0.6.4 the asks job ran on the approved label alone; both its trigger and its condition gain opened and reopened.
@@ -922,14 +928,15 @@ function repinned(before: string, branch: string, version: string, figma: boolea
         rescheduled ? `${comment === undefined ? '' : `${scheduleComment(schedule, settings)}\n`}${head}${quote || "'"}${schedule}${quote || "'"}${tail}` : line,
       );
     // Each job's block as that job passes it; which part changed, Figma's or the board app's, is said apart.
-    const changed = { figma: false, board: false };
+    let figmaChanged = false;
+    let boardChanged = false;
     const text = pinned.replace(SECRETS_AFTER_REF, (block: string, ref: string, offset: number, whole: string) => {
-      const lines = secretsOf(jobAt(whole, offset) ?? '', { figma, board });
+      const lines = secretsOf(jobAt(whole, offset), { figma, board });
       const now = `${ref}${lines.map((line) => `${line}\n`).join('')}`;
       const had = ownSecrets(block);
       const has = ownSecrets(now);
-      changed.figma ||= had.figma !== has.figma;
-      changed.board ||= had.board !== has.board;
+      figmaChanged ||= had.figma !== has.figma;
+      boardChanged ||= had.board !== has.board;
       return now;
     });
     if (text === before) return { kind: 'same' };
@@ -940,8 +947,8 @@ function repinned(before: string, branch: string, version: string, figma: boolea
       ...(stale ? { from: stale } : {}),
       ...(moved ? { branch } : {}),
       ...(rescheduled ? { schedule } : {}),
-      ...(changed.figma ? { secrets: true as const } : {}),
-      ...(changed.board ? { board: true as const } : {}),
+      ...(figmaChanged ? { secrets: true as const } : {}),
+      ...(boardChanged ? { board: true as const } : {}),
       ...(authors ? { authors: true as const } : {}),
       ...(types ? { types: true as const } : {}),
       ...(drafts ? { drafts: true as const } : {}),
@@ -968,11 +975,13 @@ function newest(pins: Pin[], version: string): Pin | undefined {
  * release added.
  */
 function newerPinHere(fileAt: (path: string) => string | undefined, version: string): Pin | undefined {
+  // A file that is not there reads as "undefined", which pins nothing, and a cloud setup file naming no release
+  // pins "undefined", which no release is newer than.
   return newest(
     [
-      ...workflowPins(fileAt(WORKFLOW_PATH) ?? '').map((pin) => ({ version: pin, where: `${WORKFLOW_PATH} in this checkout` })),
-      ...callerPins(fileAt(GUARD_CALLER_PATH) ?? '').map((pin) => ({ version: pin, where: `${GUARD_CALLER_PATH} in this checkout` })),
-      ...[cloudScriptVersion(fileAt(CLOUD_SETUP_PATH) ?? '')].filter((pin) => pin !== undefined).map((pin) => ({ version: pin, where: `${CLOUD_SETUP_PATH} in this checkout` })),
+      ...workflowPins(String(fileAt(WORKFLOW_PATH))).map((pin) => ({ version: pin, where: `${WORKFLOW_PATH} in this checkout` })),
+      ...callerPins(String(fileAt(GUARD_CALLER_PATH))).map((pin) => ({ version: pin, where: `${GUARD_CALLER_PATH} in this checkout` })),
+      { version: String(cloudScriptVersion(String(fileAt(CLOUD_SETUP_PATH)))), where: `${CLOUD_SETUP_PATH} in this checkout` },
     ],
     version,
   );
@@ -990,16 +999,16 @@ async function newerPinOnGitHub(sys: Sys, slug: string, token: string, branch: s
   const pulls = await sys.http(`${API}/repos/${slug}/pulls?state=open&head=${slug.split('/')[0]}:${ONBOARD_BRANCH}`, { token }).catch(() => ({ status: 0, json: undefined }));
   if (pulls.status !== 200 || !Array.isArray(pulls.json)) return { problem: `GitHub did not say whether an onboard pull request is open (${pulls.status === 0 ? 'no answer' : `HTTP ${pulls.status}`})` };
   if (pulls.json.length > 0) refs.push(ONBOARD_BRANCH);
-  const pins: Pin[] = [];
+  const pins = new Set<Pin>();
   for (const ref of refs) {
     const read = await remoteFile(sys, slug, WORKFLOW_PATH, ref, token);
     if ('problem' in read) return read;
-    pins.push(...workflowPins(read.text ?? '').map((pin) => ({ version: pin, where: `${WORKFLOW_PATH} on ${ref}` })));
+    for (const pin of workflowPins(String(read.text))) pins.add({ version: pin, where: `${WORKFLOW_PATH} on ${ref}` });
     const caller = await remoteFile(sys, slug, GUARD_CALLER_PATH, ref, token);
     if ('problem' in caller) return caller;
-    pins.push(...callerPins(caller.text ?? '').map((pin) => ({ version: pin, where: `${GUARD_CALLER_PATH} on ${ref}` })));
+    for (const pin of callerPins(String(caller.text))) pins.add({ version: pin, where: `${GUARD_CALLER_PATH} on ${ref}` });
   }
-  return newest(pins, version);
+  return newest([...pins], version);
 }
 
 /** onboard's refusal of a repository that pins a newer release than this one. */
@@ -1013,7 +1022,7 @@ function refuseOlder(io: Output, slug: string, pin: Pin, version: string): numbe
 type Access =
   /** `public` when GitHub says the repository is public, as the shared Guard's caller needs a policy there. */
   | { kind: 'push'; branch: string; public?: true }
-  | { kind: 'read'; branch?: string }
+  | { kind: 'read'; branch: string | undefined }
   | { kind: 'none' }
   | { kind: 'refused'; reason: string };
 
@@ -1025,10 +1034,11 @@ async function access(sys: Sys, slug: string, token: string): Promise<Access> {
     const open = repo?.private === false || repo?.visibility === 'public';
     return repo?.permissions?.push === true && typeof repo.default_branch === 'string'
       ? { kind: 'push', branch: repo.default_branch, ...(open ? { public: true as const } : {}) }
-      : { kind: 'read', ...(typeof repo?.default_branch === 'string' ? { branch: repo.default_branch } : {}) };
+      : { kind: 'read', branch: typeof repo?.default_branch === 'string' ? repo.default_branch : undefined };
   }
   if (status === 404) return { kind: 'none' };
-  const sso = /url=(\S+)/.exec(headers['x-github-sso'] ?? '')?.[1];
+  // No header reads as "undefined", which names no address.
+  const sso = /url=(\S+)/.exec(String(headers['x-github-sso']))?.[1];
   if (sso) {
     return { kind: 'refused', reason: `the organisation requires SAML single sign-on; authorise the token for it at ${sso}` };
   }
@@ -1042,28 +1052,32 @@ async function access(sys: Sys, slug: string, token: string): Promise<Access> {
   return { kind: 'refused', reason: `GitHub refused (HTTP ${status}${message ? `: ${message}` : ''})` };
 }
 
-/** The agent's pending invitation to `slug`, if any, looking through every page GitHub lists. */
-async function invitation(sys: Sys, slug: string, token: string): Promise<number | undefined> {
-  for (let page = 1; ; page++) {
-    const { status, json } = await sys.http(`${API}/user/repository_invitations?per_page=100&page=${page}`, { token });
-    if (status !== 200 || !Array.isArray(json)) return undefined;
-    const found = json.find((entry: unknown) => {
-      const name = (entry as { repository?: { full_name?: unknown } } | null)?.repository?.full_name;
-      return typeof name === 'string' && sameLogin(name, slug);
-    }) as { id?: unknown } | undefined;
-    if (typeof found?.id === 'number') return found.id;
-    if (json.length < 100) return undefined;
-  }
+/**
+ * The agent's pending invitation to `slug`, if any, looking through every
+ * page GitHub lists from page `page` on; a full page reads the next.
+ */
+async function invitation(sys: Sys, slug: string, token: string, page = 1): Promise<number | undefined> {
+  const { status, json } = await sys.http(`${API}/user/repository_invitations?per_page=100&page=${page}`, { token });
+  if (status !== 200 || !Array.isArray(json)) return undefined;
+  const found = json.find((entry: unknown) => {
+    const name = (entry as { repository?: { full_name?: unknown } } | null)?.repository?.full_name;
+    return typeof name === 'string' && sameLogin(name, slug);
+  }) as { id?: unknown } | undefined;
+  if (typeof found?.id === 'number') return found.id;
+  return json.length === 100 ? invitation(sys, slug, token, page + 1) : undefined;
 }
 
 /** The command entries under one hook event, as written in the settings object. */
 function hooksOf(settings: object, event: string): { command?: unknown }[] {
-  const groups = (settings as { hooks?: Record<string, unknown> }).hooks?.[event];
-  if (!Array.isArray(groups)) return [];
-  return groups.flatMap((group: unknown) => {
-    const hooks = (group as { hooks?: unknown } | null)?.hooks;
-    return Array.isArray(hooks) ? hooks.filter((hook): hook is { command?: unknown } => typeof hook === 'object' && hook !== null) : [];
-  });
+  // [value] keeps a value only when it is an array, and flat() unwraps it, so anything else lists nothing.
+  const groups: unknown[] = [(settings as { hooks?: Record<string, unknown> }).hooks?.[event]].filter(Array.isArray).flat();
+  return groups.flatMap((group) =>
+    [(group as { hooks?: unknown } | null)?.hooks]
+      .filter(Array.isArray)
+      .flat()
+      // Of JSON's values only null has no members to read; any other reads as no command.
+      .filter((hook): hook is { command?: unknown } => hook !== null),
+  );
 }
 
 /** A sarathi handler, as `.claude/sarathi.json` lists it under an event. */
@@ -1091,22 +1105,31 @@ export const SARATHI_HANDLERS: Readonly<Record<'SessionStart' | 'PreToolUse', Ha
 /** A matcher's plain form, as Claude Code and sarathi read it: names, or `A|B`. Anything else is a regular expression. */
 const PLAIN_MATCHER = /^[\w|-]+$/;
 
-/** Whether a hook with `matcher` fires for `target`, by Claude Code's rules: absent, empty and `*` match all. */
-function matcherTakes(matcher: string | undefined, target: string): boolean {
-  if (matcher === undefined || matcher === '' || matcher === '*') return true;
+/**
+ * Whether a hook with `matcher`, one that is neither absent nor `*`, fires
+ * for `target`, by Claude Code's rules: names, or a regular expression, an
+ * empty one matching all.
+ */
+function matcherTakes(matcher: string, target: string): boolean {
   if (PLAIN_MATCHER.test(matcher)) return matcher.split('|').includes(target);
   try {
     return new RegExp(matcher).test(target);
   } catch {
-    return false;
+    // fail-open: a matcher that is no regular expression fires for nothing, so niyam's hook stays in the settings.
   }
+  return false;
 }
 
-/** Whether a settings entry with `runner`'s matcher lets a handler with `handler`'s fire whenever it would. */
+/**
+ * Whether a settings entry with `runner`'s matcher lets one of niyam's
+ * handlers, whose matcher is absent or names one tool, fire whenever it
+ * would: absent and `*` match all, and a handler with no matcher fires for
+ * every tool, which only those match.
+ */
 function matcherCovers(runner: string | undefined, handler: string | undefined): boolean {
-  if (runner === undefined || runner === '' || runner === '*') return true;
-  if (handler === undefined || handler === '' || handler === '*' || !PLAIN_MATCHER.test(handler)) return false;
-  return handler.split('|').every((name) => matcherTakes(runner, name));
+  if (runner === undefined || runner === '*') return true;
+  if (handler === undefined) return false;
+  return matcherTakes(runner, handler);
 }
 
 /**
@@ -1133,9 +1156,10 @@ export function sarathiRunner(settings: unknown, event: string): Runner | undefi
   if (!Array.isArray(groups)) return undefined;
   for (const [group, entry] of groups.entries()) {
     const { matcher, hooks } = (entry ?? {}) as { matcher?: unknown; hooks?: unknown };
-    for (const [hook, item] of (Array.isArray(hooks) ? hooks : []).entries()) {
+    for (const [hook, item] of ([hooks].filter(Array.isArray).flat() as unknown[]).entries()) {
       const { command, timeout } = (item ?? {}) as { command?: unknown; timeout?: unknown };
-      if (typeof command !== 'string' || !runsSarathiFor(command, event)) continue;
+      // A command that is not text reads as words that run no sarathi.
+      if (!runsSarathiFor(String(command), event)) continue;
       return { group, hook, ...(typeof matcher === 'string' ? { matcher } : {}), ...(typeof timeout === 'number' ? { timeout } : {}) };
     }
   }
@@ -1144,8 +1168,11 @@ export function sarathiRunner(settings: unknown, event: string): Runner | undefi
 
 /** The handlers `.claude/sarathi.json` lists under `event`. */
 function handlersOf(sarathi: object, event: string): { command?: unknown; timeout?: unknown }[] {
-  const list = (sarathi as { hooks?: Record<string, unknown> }).hooks?.[event];
-  return Array.isArray(list) ? list.filter((entry): entry is { command?: unknown; timeout?: unknown } => typeof entry === 'object' && entry !== null) : [];
+  return [(sarathi as { hooks?: Record<string, unknown> }).hooks?.[event]]
+    .filter(Array.isArray)
+    .flat()
+    // Of JSON's values only null has no members to read; any other reads as no command and no timeout.
+    .filter((entry): entry is { command?: unknown; timeout?: unknown } => entry !== null);
 }
 
 /** The edits onboard makes to `.claude/sarathi.json`, said as for settings.json. */
@@ -1199,24 +1226,26 @@ export function claudeSettings(
   }
   let handlersChanged: 'added' | 'updated' | undefined;
   let handlersTimed = false;
-  const hooks: ['SessionStart' | 'PreToolUse', string, readonly string[], string, Record<string, unknown>][] = [
-    ['SessionStart', HOOK_COMMAND, OLDER_HOOK_COMMANDS, 'the SessionStart hook that runs niyam session-start', {}],
-    ['PreToolUse', GUARD_COMMAND, OLDER_GUARD_COMMANDS, "the PreToolUse hook that refuses gh and git's remote commands outside the agent identity", { matcher: 'Bash' }],
+  // Each hook by its event, its command, the commands older releases wrote, and what it is, said after "the".
+  const hooks: ['SessionStart' | 'PreToolUse', string, readonly unknown[], string, Record<string, unknown>][] = [
+    ['SessionStart', HOOK_COMMAND, OLDER_HOOK_COMMANDS, 'SessionStart hook that runs niyam session-start', {}],
+    ['PreToolUse', GUARD_COMMAND, OLDER_GUARD_COMMANDS, "PreToolUse hook that refuses gh and git's remote commands outside the agent identity", { matcher: 'Bash' }],
   ];
   for (const [event, command, older, name, extra] of hooks) {
     const handler = SARATHI_HANDLERS[event];
-    const runner = sarathi === undefined ? undefined : sarathiRunner(first, event);
+    const runner = sarathiRunner(first, event);
     if (sarathi !== undefined && runner !== undefined && matcherCovers(runner.matcher, handler.matcher)) {
       const edit = sarathi;
       try {
-        const swapped = replaceValues(edit.text, ['hooks', event, '*', 'command'], (value) => (typeof value === 'string' && older.includes(value) ? command : undefined));
+        // Only text is an older release's command.
+        const swapped = replaceValues(edit.text, ['hooks', event, '*', 'command'], (value) => (older.includes(value) ? command : undefined));
         if (swapped.replaced > 0) {
           edit.text = swapped.text;
-          edit.changes.push(`replace the older ${name.replace(/^the /, '')} with this release's`);
+          edit.changes.push(`replace the older ${name} with this release's`);
           handlersChanged = 'updated';
         } else if (!handlersOf(JSON.parse(edit.text) as object, event).some((entry) => entry.command === command)) {
           edit.text = appendToArray(edit.text, ['hooks'], event, handler);
-          edit.changes.push(`add ${name}, as a handler sarathi runs`);
+          edit.changes.push(`add the ${name}, as a handler sarathi runs`);
           handlersChanged ??= 'added';
         }
         // A handler moved there by hand may have sarathi's 60 s, too short for session-start's installs.
@@ -1224,7 +1253,7 @@ export function claudeSettings(
         for (const [at, entry] of handlersOf(JSON.parse(edit.text) as object, event).entries()) {
           if (wanted === undefined || entry.command !== command || (typeof entry.timeout === 'number' && entry.timeout >= wanted)) continue;
           edit.text = setMember(edit.text, ['hooks', event, String(at)], 'timeout', wanted);
-          edit.changes.push(`give ${name} ${wanted} s, as long as Claude Code gives it in the settings`);
+          edit.changes.push(`give the ${name} ${wanted} s, as long as Claude Code gives it in the settings`);
           handlersTimed = true;
         }
       } catch (error) {
@@ -1243,7 +1272,7 @@ export function claudeSettings(
         const single = removeElements(groups.text, ['hooks', event, '*', 'hooks'], own);
         if (groups.removed + single.removed > 0) {
           text = single.text;
-          changes.push(`take out ${name}, which ${SARATHI_PATH} now runs under sarathi`);
+          changes.push(`take out the ${name}, which ${SARATHI_PATH} now runs under sarathi`);
           moved = true;
         }
         // Found again: taking niyam's groups out moves sarathi's.
@@ -1265,11 +1294,11 @@ export function claudeSettings(
       );
       if (swapped.replaced > 0) {
         text = swapped.text;
-        changes.push(`replace the older ${name.replace(/^the /, '')} with this release's`);
+        changes.push(`replace the older ${name} with this release's`);
         hooksChanged = 'updated';
       } else if (!hooksOf(parsed(), event).some((hook) => hook.command === command)) {
         text = appendToArray(text, ['hooks'], event, { ...extra, hooks: [{ type: 'command', command }] });
-        changes.push(`add ${name}`);
+        changes.push(`add the ${name}`);
         hooksChanged ??= 'added';
       }
     } catch (error) {
