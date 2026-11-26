@@ -53,9 +53,19 @@ export function textHash(body: string): string {
 
 /** The text the weekly job last vetted, as its hash, from the workflow's own comment: only the workflow writes as its bot. */
 function vettedHash(comments: Comment[]): { hash: string; id: number | undefined } | undefined {
-  const mark = comments.filter((comment) => comment.user?.login === WORKFLOW_BOT && VETTED.test(comment.body ?? '')).at(-1);
-  const hash = mark && VETTED.exec(mark.body ?? '')?.[1];
-  return hash ? { hash, id: mark.id } : undefined;
+  // "undefined", for a comment with no body, holds no mark.
+  const marks = comments.flatMap((comment) => {
+    const hash = comment.user?.login === WORKFLOW_BOT && VETTED.exec(String(comment.body))?.[1];
+    return hash ? [{ hash, id: comment.id }] : [];
+  });
+  return marks.at(-1);
+}
+
+/** A decision's review date, from its body, when it is one: YYYY-MM-DD, and a real day. */
+function reviewDate(body: string): string | undefined {
+  const { review } = parseDecision(body);
+  // "undefined", for a decision with no review date, is no date.
+  return DATE.test(String(review)) && !Number.isNaN(Date.parse(String(review))) ? review : undefined;
 }
 
 /**
@@ -84,16 +94,12 @@ export async function reviewsDue(sys: Sys, io: Output): Promise<number> {
   }
   const trusted = (login: string | undefined): boolean => anyLogin(owners, login) || anyLogin(agents, login);
   const today = sys.now().toISOString().slice(0, 10);
-  const open: Issue[] = [];
-  for (let page = 1; ; page++) {
-    const { status, json } = await sys.http(`${API}/repos/${slug}/issues?state=open&type=Decision&per_page=100&page=${page}`, { token });
-    if (status !== 200 || !Array.isArray(json)) throw new Error(`cannot list open decisions (HTTP ${status})`);
-    open.push(...(json as Issue[]));
-    if (json.length < 100) break;
-  }
+  const open = await all<Issue>(sys, token, `/repos/${slug}/issues?state=open&type=Decision`, 'list open decisions');
   let due = 0;
   for (const issue of open) {
-    const decision = parseDecision(issue.body ?? '');
+    // A body that is "null" has no review date, so the decisions read past this have their own.
+    const body = String(issue.body);
+    const decision = parseDecision(body);
     if (!decision.review) continue;
     if (!DATE.test(decision.review) || Number.isNaN(Date.parse(decision.review))) {
       io.err(`#${issue.number}: its Review date "${decision.review}" is not YYYY-MM-DD; fix it so the decision can come up`);
@@ -109,7 +115,7 @@ export async function reviewsDue(sys: Sys, io: Output): Promise<number> {
     const waiting = issue.labels.filter((label) => WAITING.includes(label.name)).map((label) => label.name);
     // A decision the weekly job labeled for want of a verdict still waits on the routine, until the agent has had its say.
     if (waiting.length > 0 && !(waiting.join() === 'needs-owner' && (await overdueUnanswered(sys, token, slug, issue.number, agents, comments)))) continue;
-    if (vettedHash(await comments())?.hash !== textHash(issue.body ?? '')) {
+    if (vettedHash(await comments())?.hash !== textHash(body)) {
       io.err(
         `#${issue.number}: not reviewed; the weekly job has not vetted this text as written and last edited by ${either([...owners, ...agents])}. It vets their edits on its next run`,
       );
@@ -124,7 +130,7 @@ export async function reviewsDue(sys: Sys, io: Output): Promise<number> {
         kind: decision.kind ?? null,
         review: decision.review,
         labels: issue.labels.map((label) => label.name),
-        body: issue.body ?? '',
+        body,
       }),
     );
   }
@@ -175,7 +181,7 @@ async function overdueUnanswered(sys: Sys, token: string, slug: string, number: 
 export async function watchReviews(sys: Sys, io: Output, slug: string, token: string, settings: { owners: string[]; agents: string[] }): Promise<void> {
   const { owners, agents } = settings;
   const verdictSince = (comments: Comment[], since: number): boolean =>
-    comments.some((comment) => VERDICT.test(comment.body ?? '') && Date.parse(comment.created_at) >= since);
+    comments.some((comment) => VERDICT.test(String(comment.body)) && Date.parse(comment.created_at) >= since);
   const read = new Map<number, Promise<Comment[]>>();
   const commentsOf = (number: number): Promise<Comment[]> => {
     let comments = read.get(number);
@@ -203,11 +209,8 @@ export async function watchReviews(sys: Sys, io: Output, slug: string, token: st
 
   const today = sys.now().toISOString().slice(0, 10);
   const open = await all<Issue>(sys, token, `/repos/${slug}/issues?state=open&type=Decision`, 'list open decisions');
-  const dated = open.filter((issue) => {
-    const review = parseDecision(issue.body ?? '').review;
-    return review !== undefined && DATE.test(review) && !Number.isNaN(Date.parse(review));
-  });
-  if (dated.length === 0) return;
+  const dated = open.filter((issue) => reviewDate(String(issue.body)) !== undefined);
+  // With none dated, nothing below asks GitHub anything.
   const trusted = (login: string | undefined): boolean => anyLogin(owners, login) || anyLogin(agents, login);
   const editors = await lastEditors(sys, token, dated);
   // reviews-due leaves out the rest, saying why, so the routine is neither shown them nor late on them.
@@ -235,14 +238,11 @@ export async function watchReviews(sys: Sys, io: Output, slug: string, token: st
   }
 
   // Its review date from that same body, so an edit moving the date since the listing counts.
-  const reviewOf = (issue: Issue): string | undefined => {
-    const review = parseDecision((editors.get(issue.number) as Edited).body).review;
-    return review !== undefined && DATE.test(review) && !Number.isNaN(Date.parse(review)) ? review : undefined;
-  };
+  const reviewOf = (issue: Issue): string | undefined => reviewDate((editors.get(issue.number) as Edited).body);
   const overdue = theirs.filter((issue) => {
     if (issue.labels.some((label) => WAITING.includes(label.name)) && !cleared.has(issue.number)) return false;
-    const review = reviewOf(issue);
-    return review !== undefined && (Date.parse(today) - Date.parse(review)) / DAY_MS > OVERDUE_DAYS;
+    // "undefined", for a body with no date, parses as no time, which is never overdue.
+    return (Date.parse(today) - Date.parse(String(reviewOf(issue)))) / DAY_MS > OVERDUE_DAYS;
   });
   for (const issue of overdue) {
     const review = reviewOf(issue) as string;
@@ -273,14 +273,15 @@ const INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/
 
 /** A GitHub timestamp in milliseconds, or undefined for one that is not such a time, or names no real date. */
 function instant(text: string | undefined): number | undefined {
-  const parts = INSTANT.exec(text ?? '');
+  // "undefined", for a comment with no time, is not one.
+  const parts = INSTANT.exec(String(text));
   if (!parts) return undefined;
   // Milliseconds count, so a verdict a moment after the cutoff, in its second, is not taken for one before it.
   const milliseconds = (parts[7] ?? '').padEnd(3, '0').slice(0, 3);
   const [year, month, day, hour, minute, second, ms] = [...parts.slice(1, 7), milliseconds].map(Number) as [number, number, number, number, number, number, number];
   const time = Date.UTC(year, month - 1, day, hour, minute, second, ms);
   // Date.UTC rolls 30 February into March: a time that does not read back the same was never a date.
-  return new Date(time).toISOString().slice(0, 19) === (text as string).slice(0, 19) ? time : undefined;
+  return new Date(time).toISOString().slice(0, 19) === parts[0].slice(0, 19) ? time : undefined;
 }
 
 interface RepoComment {
@@ -306,9 +307,10 @@ export async function routineTrace(sys: Sys, slug: string, agent: string, token:
     for (const comment of json as RepoComment[]) {
       // `since` is by last update: an older verdict edited lately is not a recent run.
       const created = instant(comment.created_at);
-      const number = Number(/\/issues\/(\d+)$/.exec(comment.issue_url ?? '')?.[1]);
+      // "undefined", for a comment with no issue or no body, names no issue and gives no verdict.
+      const number = Number(/\/issues\/(\d+)$/.exec(String(comment.issue_url))?.[1]);
       if (created === undefined || created < cutoff || !Number.isInteger(number)) continue;
-      if (anyLogin([agent], comment.user?.login ?? undefined) && ROUTINE_VERDICT.test(comment.body ?? '')) return { number, date: (comment.created_at as string).slice(0, 10) };
+      if (anyLogin([agent], comment.user?.login ?? undefined) && ROUTINE_VERDICT.test(String(comment.body))) return { number, date: (comment.created_at as string).slice(0, 10) };
     }
     if (json.length < 100) return undefined;
   }

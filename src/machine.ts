@@ -125,11 +125,11 @@ export function machineArgs(args: readonly string[]): { named?: string; yes?: tr
  * one plan and asks once (`--yes` skips the question, `--dry-run` stops at
  * the plan); a no changes nothing. With nothing to change it asks nothing.
  * After the yes each step shows as one line; the token's step opens
- * GitHub's page and asks for the paste, hidden.
+ * GitHub's page and asks for the paste, hidden. `store` is this platform's
+ * token store, unless a test gives another.
  */
-export async function machine(sys: Sys, io: Output, args: readonly string[] = []): Promise<number> {
+export async function machine(sys: Sys, io: Output, args: readonly string[] = [], store: TokenStore | undefined = tokenStore(sys)): Promise<number> {
   const { named, yes, dryRun } = machineArgs(args);
-  const store = tokenStore(sys);
   if (!store) {
     io.err(`machine: ${unsupported(sys)}`);
     return 1;
@@ -188,8 +188,8 @@ export async function machine(sys: Sys, io: Output, args: readonly string[] = []
 
   // The key on GitHub: a new key is registered; an existing one unless GitHub lists it.
   const listedNow = async (): Promise<boolean> => {
-    const half = publicHalf ?? (sys.exists(`${paths.key}.pub`) ? sys.read(`${paths.key}.pub`) : undefined);
-    if (half === undefined) return false;
+    // An existing key has its public half: derived above, or in its file, which keyPairProblem found.
+    const half = publicHalf ?? sys.read(`${paths.key}.pub`);
     // With no token that stays, the public list; when GitHub cannot say, the step after the yes asks again.
     return (await signingKeys(sys, agent, token).catch(() => [] as string[])).includes(keyBody(half));
   };

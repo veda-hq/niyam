@@ -189,6 +189,90 @@ describe('reviewsDue', () => {
     unread.route('GET', `/repos/${SLUG}/issues/5/comments?per_page=100&page=1`, { status: 502, json: null });
     await assert.rejects(reviewsDue(unread, capture().io), /cannot read #5's comments \(HTTP 502\)/);
   });
+
+  it('lists nothing, asking GitHub nothing, with review off, or on a repository a personal account owns', async () => {
+    const off = session([issue(5, 'Review: 2026-10-01')]);
+    off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: ['example-owner'], agent: [AGENT], features: ['identity'] }));
+    const quiet = capture();
+    assert.equal(await reviewsDue(off, quiet.io), 0);
+    assert.deepEqual([quiet.out, quiet.err, off.requests], [[], ['reviews-due: review is off in .github/niyam.json; nothing to check'], []]);
+    const personal = session([issue(5, 'Review: 2026-10-01')]);
+    personal.ownerType = 'User';
+    const mine = capture();
+    assert.equal(await reviewsDue(personal, mine.io), 0);
+    assert.deepEqual(
+      [mine.out, mine.err],
+      [[], ['reviews-due: review is off on a repository owned by a personal account, since GitHub has issue types for organisations only; nothing to check']],
+    );
+    assert.deepEqual(personal.requests.map((r) => r.url), ['https://api.github.com/repos/example-org/example-app']);
+  });
+
+  it('asks every page of decisions and comments with the agent token, and takes only lists from GitHub', async () => {
+    const many = Array.from({ length: 100 }, (_, i) => issue(100 + i, 'Review: 2027-01-01'));
+    const sys = session(many, [issue(9, 'Review: 2026-01-01')]);
+    await reviewsDue(sys, capture().io);
+    assert.ok(sys.requests.every((r) => r.token === 'ghp_good'), JSON.stringify(sys.requests.filter((r) => r.token !== 'ghp_good')));
+    for (const [status, json] of [
+      [200, { message: 'not a list' }],
+      [500, []],
+    ] as const) {
+      const odd = session([]);
+      odd.route('GET', `${DECISIONS}&page=1`, { status, json });
+      await assert.rejects(reviewsDue(odd, capture().io), new RegExp(`cannot list open decisions \\(HTTP ${status}\\)`));
+      const comments = session([issue(5, 'Review: 2026-10-01')]);
+      comments.route('GET', `/repos/${SLUG}/issues/5/comments?per_page=100&page=1`, { status, json });
+      await assert.rejects(reviewsDue(comments, capture().io), new RegExp(`cannot read #5's comments \\(HTTP ${status}\\)`));
+    }
+  });
+
+  it('takes a Review date only as YYYY-MM-DD alone, whatever else Date.parse reads', async () => {
+    const { io, out, err } = capture();
+    await reviewsDue(session([issue(5, 'Review: Mon 2026-10-01'), issue(6, 'Review: 2026-10-01T00:00Z')]), io);
+    assert.deepEqual([out, err.slice(0, 2)], [
+      [],
+      [
+        '#5: its Review date "Mon 2026-10-01" is not YYYY-MM-DD; fix it so the decision can come up',
+        '#6: its Review date "2026-10-01T00:00Z" is not YYYY-MM-DD; fix it so the decision can come up',
+      ],
+    ]);
+  });
+
+  it("reads the job's mark only from the job's own comments with a mark, its last one counting", async () => {
+    const text = 'Review: 2026-10-01';
+    const sys = session([issue(5, text), issue(6, text)], undefined, {}, [5, 6]);
+    sys.route('GET', `/repos/${SLUG}/issues/5/comments?per_page=100&page=1`, {
+      status: 200,
+      json: [{ ...vetted(text), user: null }, vetted(text), { id: 2, user: { login: 'github-actions[bot]' }, created_at: '2026-10-27T00:00:00Z' }, { ...vetted(text), body: 'Thanks.' }],
+    });
+    sys.route('GET', `/repos/${SLUG}/issues/6/comments?per_page=100&page=1`, { status: 200, json: [{ ...vetted(text), user: null }, { id: 3, created_at: '2026-10-27T00:00:00Z' }] });
+    const { io, out } = capture();
+    await reviewsDue(sys, io);
+    assert.deepEqual(out.map((line) => JSON.parse(line).number), [5]);
+  });
+
+  it('lists a decision the weekly job labeled only while no comment of the agent follows the label, one at its very time included', async () => {
+    const sys = session([issue(5, 'Review: 2026-10-01', ['needs-owner']), issue(6, 'Review: 2026-10-01', ['needs-owner']), issue(7, 'Review: 2026-10-01', ['needs-owner'])]);
+    const at = '2026-10-09T00:00:00Z';
+    const events = [
+      { event: 'labeled', label: { name: 'needs-owner' }, actor: { login: 'github-actions[bot]' }, created_at: at },
+      { event: 'commented', created_at: '2026-10-10T00:00:00Z' },
+      { event: 'labeled', created_at: '2026-10-10T00:00:00Z' },
+      { event: 'unlabeled', label: { name: 'needs-owner' }, actor: { login: 'example-owner' }, created_at: '2026-10-11T00:00:00Z' },
+      { event: 'labeled', label: { name: 'veto' }, actor: { login: 'example-owner' }, created_at: '2026-10-12T00:00:00Z' },
+    ];
+    for (const number of [5, 6]) sys.route('GET', `/repos/${SLUG}/issues/${number}/events?per_page=100&page=1`, { status: 200, json: events });
+    // Labeled by no one GitHub names: not the job's label.
+    sys.route('GET', `/repos/${SLUG}/issues/7/events?per_page=100&page=1`, { status: 200, json: [{ event: 'labeled', label: { name: 'needs-owner' }, created_at: at }] });
+    const agent = (created_at: string) => ({ body: 'Noted.', user: { login: AGENT }, created_at });
+    sys.route('GET', `/repos/${SLUG}/issues/5/comments?per_page=100&page=1`, {
+      status: 200,
+      json: [vetted('Review: 2026-10-01'), agent('2026-10-08T00:00:00Z'), { body: 'Kept: anyone', user: null, created_at: '2026-10-10T00:00:00Z' }],
+    });
+    sys.route('GET', `/repos/${SLUG}/issues/6/comments?per_page=100&page=1`, { status: 200, json: [vetted('Review: 2026-10-01'), agent('2026-10-08T00:00:00Z'), agent(at)] });
+    const { io, out } = capture();
+    await reviewsDue(sys, io);
+    assert.deepEqual(out.map((line) => JSON.parse(line).number), [5]);
+  });
 });
 
 describe('expireVetoes', () => {
@@ -239,6 +323,16 @@ describe('expireVetoes', () => {
     const { io, out } = capture();
     await expireVetoes(sys, io, SLUG, 'ghs_run');
     assert.deepEqual(out, ['#5: the week to veto has passed; removed veto']);
+  });
+
+  it('removes veto at the very end of its week', async () => {
+    const sys = github();
+    // Now is 2026-10-30T12:00:00Z.
+    sys.route('GET', `/repos/${SLUG}/issues/6/events?per_page=100&page=1`, { status: 200, json: [{ event: 'labeled', label: { name: 'veto' }, created_at: '2026-10-23T12:00:00Z' }] });
+    sys.route('DELETE', `/repos/${SLUG}/issues/6/labels/veto`, { status: 200, json: [] });
+    const { io, out } = capture();
+    await expireVetoes(sys, io, SLUG, 'ghs_run');
+    assert.deepEqual(out, ['#5: the week to veto has passed; removed veto', '#6: the week to veto has passed; removed veto']);
   });
 
   for (const [name, change, message] of [
@@ -487,6 +581,56 @@ describe('watchReviews', () => {
     await watchReviews(sys, io, SLUG, 'ghs_run', SETTINGS);
     assert.deepEqual(out, ['#20: the review routine gave its verdict; removed needs-owner']);
   });
+
+  it("counts as a verdict only the agent's comment that starts with one, from its review date's very start, reading each decision's comments once", async () => {
+    const after = '2026-10-21T00:00:00Z';
+    const sys = github(
+      [
+        issue(5, 'Review: 2026-10-20'),
+        issue(6, 'Review: 2026-10-20'),
+        issue(7, 'Review: 2026-10-20'),
+        issue(8, 'Review: 2026-10-20'),
+        issue(9, 'Review: 2026-10-20'),
+        { ...issue(10, 'Review: 2026-10-20'), user: null },
+      ],
+      [],
+      {
+        5: [comment(AGENT, '  Kept: indented, still a verdict.', after)],
+        6: [comment(AGENT, 'I Kept: nothing, this is no verdict.', after)],
+        7: [comment(AGENT, '**Kept:** in bold is no verdict.', after)],
+        8: [comment(AGENT, 'Settled: on the review date itself.', '2026-10-20T00:00:00Z')],
+        9: [{ user: { login: AGENT }, created_at: after }, { body: 'Kept: by no one GitHub names.', user: null, created_at: after }],
+      },
+    );
+    const { io, out } = capture();
+    await watchReviews(sys, io, SLUG, 'ghs_run', SETTINGS);
+    assert.deepEqual(out, [6, 7, 9].map((number) => `#${number}: its review, 2026-10-20, is over a week past with no verdict from the agent; labeled needs-owner`));
+    const labels = sys.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/labels'));
+    assert.deepEqual(labels.map((r) => [r.url, r.token, r.body]), [6, 7, 9].map((number) => [`https://api.github.com/repos/${SLUG}/issues/${number}/labels`, 'ghs_run', { labels: ['needs-owner'] }]));
+    const reads = sys.requests.filter((r) => r.method === 'GET' && r.url.includes('/comments')).map((r) => r.url);
+    assert.deepEqual(reads, [...new Set(reads)], 'each decision\'s comments are read once');
+    assert.equal(reads.length, 5);
+  });
+
+  it('takes a review date only as YYYY-MM-DD alone, in the listing and in the body GitHub gave with its editor', async () => {
+    const listed = github([issue(5, 'Review: Mon 2026-10-01'), issue(6, 'Review: 2026-10-01T00:00Z')]);
+    await watchReviews(listed, capture().io, SLUG, 'ghs_run', SETTINGS);
+    assert.deepEqual(listed.requests.map((r) => r.url.replace(`https://api.github.com/repos/${SLUG}`, '')), [
+      '/issues?state=all&type=Decision&labels=needs-owner&per_page=100&page=1',
+      '/issues?state=open&type=Decision&per_page=100&page=1',
+    ]);
+    const edited = github([issue(5, 'Review: 2026-10-01'), issue(6, 'Review: 2026-10-01')], [], { 5: [], 6: [] }, {}, {}, [5, 6], { 5: 'Review: Mon 2026-10-01', 6: 'Review: 2026-10-01T00:00Z' });
+    const { io, out } = capture();
+    await watchReviews(edited, io, SLUG, 'ghs_run', SETTINGS);
+    assert.deepEqual(out, ['#5: vetted its text for the review routine', '#6: vetted its text for the review routine']);
+  });
+
+  it('takes off only a label GitHub names the job as adding', async () => {
+    const sys = github([], [issue(25, '', ['needs-owner'])], { 25: [comment(AGENT, 'Settled: done', '2026-10-25T00:00:00Z')] }, { 25: [{ event: 'labeled', label: { name: 'needs-owner' }, created_at: '2026-10-09T00:00:00Z' }] });
+    const { io, out } = capture();
+    await watchReviews(sys, io, SLUG, 'ghs_run', SETTINGS);
+    assert.deepEqual([out, written(sys)], [[], []]);
+  });
 });
 
 describe('routineTrace', () => {
@@ -542,6 +686,36 @@ describe('routineTrace', () => {
     const sys = new FakeSys();
     sys.route('GET', page(1), { status: 403, json: { message: 'Resource not accessible' } });
     await assert.rejects(routineTrace(sys, SLUG, AGENT, 'ghp_agent'), /cannot list example-org\/example-app's issue comments \(HTTP 403\)/);
+  });
+
+  it("takes only a verdict that starts the agent's comment, on an issue, at a time GitHub gives to the millisecond, from the cutoff on", async () => {
+    const sys = new FakeSys();
+    // Three weeks back is 2026-10-09T12:00:00.250Z: the last comment is at that very millisecond.
+    sys.now = () => new Date('2026-10-30T12:00:00.250Z');
+    sys.route('GET', page(1).replace('12:00:00.000Z', '12:00:00.250Z'), {
+      status: 200,
+      json: [
+        { ...comment(1, 'Kept: by no one GitHub names.'), user: null },
+        comment(2, 'Kept: at a time with more after it.', AGENT, '2026-10-28T06:00:00Zjunk'),
+        comment(3, 'Kept: at a time with more before it.', AGENT, 'x2026-10-28T06:00:00Z'),
+        { ...comment(4, 'Kept: on no issue alone.'), issue_url: `https://api.github.com/repos/${SLUG}/issues/4/comments` },
+        comment(5, 'I Kept: nothing, this is no verdict.'),
+        comment(6, '**Kept:** in bold is no verdict.'),
+        comment(7, '  Held for example-owner: indented, still a verdict.', AGENT, '2026-10-09T12:00:00.2500Z'),
+      ],
+    });
+    assert.deepEqual(await routineTrace(sys, SLUG, AGENT, 'ghp_agent'), { number: 7, date: '2026-10-09' });
+  });
+
+  it('throws where GitHub gives no list, or a list with another status', async () => {
+    for (const [status, json] of [
+      [200, { message: 'not a list' }],
+      [500, []],
+    ] as const) {
+      const sys = new FakeSys();
+      sys.route('GET', page(1), { status, json });
+      await assert.rejects(routineTrace(sys, SLUG, AGENT, 'ghp_agent'), new RegExp(`cannot list example-org/example-app's issue comments \\(HTTP ${status}\\)`));
+    }
   });
 
   it('throws where the request fails', async () => {
