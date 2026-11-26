@@ -1,7 +1,7 @@
 import { API, type Settings, anyLogin, either, isNoToken, loadSettings, repoAt, sameLogin } from './agent.ts';
 import { PERSONAL_REPO, isOn, isPersonal, notAdoptedLine, offLine, readRepo } from './features.ts';
 import { agentSession, pushIdentityProblem } from './push-identity.ts';
-import { MOST_COMMITS, RECORD_READS, RECORD_WAIT_MS, commitsOf, whoPushed } from './identity.ts';
+import { MOST_COMMITS, commitsOf, recordedPushers } from './identity.ts';
 import { cloudToken } from './cloud.ts';
 import { MOVED_FILES, ONBOARD_BRANCH, ONBOARD_FILES } from './onboard-pull.ts';
 import type { Output, Sys } from './types.ts';
@@ -124,7 +124,7 @@ const tagOf = (slice: Slice): string => (typeof slice === 'number' ? `#${slice}`
  * REST alone, so they run wherever GitHub's REST API answers, a Claude
  * cloud session's GitHub proxy included, which refuses GraphQL.
  */
-async function rest(sys: Sys, token: string, slice: Slice, url: string, missing = false): Promise<unknown> {
+async function rest(sys: Sys, token: string, slice: Slice, url: string, missing: boolean): Promise<unknown> {
   const { status, json } = await sys.http(url, { token });
   if (status === 404 && missing) return undefined;
   if (status !== 200) {
@@ -134,23 +134,36 @@ async function rest(sys: Sys, token: string, slice: Slice, url: string, missing 
     const hint = /not accessible/i.test(why)
       ? typeof slice === 'number'
         ? '; the client workflow needs issues: read, so run niyam onboard to update it'
-        : `; this token cannot read ${slice.replace(/#\d+$/, '')}`
+        : `; this token cannot read ${slice.slice(0, slice.lastIndexOf('#'))}`
       : '';
     throw new Error(`cannot read ${tagOf(slice)}: ${why} (${url.replace(API, '')})${hint}`);
   }
   return json;
 }
 
-/** Every item of a REST list at `url`, 100 a page: GitHub's most. */
-async function every<T>(sys: Sys, token: string, slice: Slice, url: string, missing = false): Promise<T[]> {
-  const items: T[] = [];
-  for (let page = 1; ; page++) {
-    const json = await rest(sys, token, slice, `${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`, missing);
-    if (json === undefined) return items;
-    if (!Array.isArray(json)) throw new Error(`cannot read ${tagOf(slice)}: GitHub did not answer a list (${url.replace(API, '')})`);
-    items.push(...(json as T[]));
-    if (json.length < 100) return items;
-  }
+/** Page `page` of a REST list at `url`, 100 a page: GitHub's most. */
+const pageOf = (url: string, page: number): string => `${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`;
+
+/**
+ * Every item of a REST list at `url` from page `page` on. It recurses rather
+ * than loops, so a page that never ends the list ends the run at a page
+ * GitHub does not answer.
+ */
+async function every<T>(sys: Sys, token: string, slice: Slice, url: string, page = 1): Promise<T[]> {
+  return andAfter<T>(sys, token, slice, url, await rest(sys, token, slice, pageOf(url, page), false), page);
+}
+
+/** Every item of a REST list at `url`, or undefined when GitHub holds no such list: a deleted comment's reactions, an Approvals issue not there. */
+async function everyIfThere<T>(sys: Sys, token: string, slice: Slice, url: string): Promise<T[] | undefined> {
+  const json = await rest(sys, token, slice, pageOf(url, 1), true);
+  return json === undefined ? undefined : andAfter<T>(sys, token, slice, url, json, 1);
+}
+
+/** Page `page`'s items, `json`, then those of the pages after it while each is full. */
+async function andAfter<T>(sys: Sys, token: string, slice: Slice, url: string, json: unknown, page: number): Promise<T[]> {
+  if (!Array.isArray(json)) throw new Error(`cannot read ${tagOf(slice)}: GitHub did not answer a list (${url.replace(API, '')})`);
+  // Only a full page reads on, so an answer that is no list ends here, whatever checks it.
+  return json.length === 100 ? [...(json as T[]), ...(await every<T>(sys, token, slice, url, page + 1))] : (json as T[]);
 }
 
 /** When a comment was last edited, or undefined: GitHub moves `updated_at` on an edit, not on a reaction. */
@@ -210,12 +223,12 @@ interface Owed {
 }
 
 /**
- * Whether an owner reacted 👍 to one of `proposals`, after `since` when
- * given and after the proposal's last edit, from the reactions read by id.
+ * Whether an owner reacted 👍 to one of the proposals, after `since` when
+ * given and after the proposal's last edit, from each proposal's reactions.
  */
-function thumbsUp(proposals: Comment[], reactions: Map<Comment['id'], Reaction[]>, owners: string[], since?: string): boolean {
-  return proposals.some((proposal) =>
-    (reactions.get(proposal.id) ?? []).some((reaction) => {
+function thumbsUp(reacted: { proposal: Comment; reactions: Reaction[] }[], owners: string[], since?: string): boolean {
+  return reacted.some(({ proposal, reactions }) =>
+    reactions.some((reaction) => {
       const edited = editedAt(proposal);
       return anyLogin(owners, reaction.user?.login) && (!since || reaction.created_at > since) && (!edited || reaction.created_at > edited);
     }),
@@ -252,8 +265,9 @@ async function parentOf(sys: Sys, token: string, issue: Issue, nameOf = (number:
   const { status, json } = await sys.http(`${issue.url}/parent`, { token });
   if (status === 200) return { parent: json as Issue };
   const message = (json as { message?: string } | null)?.message;
-  // An issue with no parent reads as 404 "No parent issue found"; any other failure is a read that failed, not a missing parent.
-  if (status === 404 && message && /no parent/i.test(message)) return {};
+  // An issue with no parent reads as 404 "No parent issue found"; any other failure is a read that failed, not a
+  // missing parent. No message reads as "undefined", which names no parent.
+  if (status === 404 && /no parent/i.test(String(message))) return {};
   return { problem: `could not read ${nameOf(issue.number)}'s parent (HTTP ${status}${message ? `: ${message}` : ''})` };
 }
 
@@ -277,6 +291,26 @@ async function foreignIssue(sys: Sys, token: string, here: string, ref: IssueRef
   return issue.pull_request ? { problem: `${name} is a pull request, not an issue` } : { issue };
 }
 
+/** The Approvals issue repository `slug`'s settings name, read from GitHub, or undefined. */
+async function foreignApprovals(sys: Sys, token: string, slug: string): Promise<number | undefined> {
+  try {
+    return await approvalsOf(sys, token, slug);
+  } catch {
+    // fail-open: settings there that cannot be read name no Approvals issue, which only takes a way to pass away.
+  }
+  return undefined;
+}
+
+/** A slice read against the work rules' approvals, once nothing stops it outright. */
+interface SliceRead {
+  parent: number;
+  owed: Owed[];
+  closed: boolean;
+  states: Issue[];
+  /** The Approvals issue of the slice's repository, if its settings name one. */
+  approvals: number | undefined;
+}
+
 /**
  * Reads slice `ref` against the work rules' approvals: the problems that
  * stop it outright (not a Slice under a Work item an owner approved), else
@@ -285,13 +319,7 @@ async function foreignIssue(sys: Sys, token: string, here: string, ref: IssueRef
  * it is then read there, by the owners and agents `here`'s settings name,
  * and the Approvals issue is the one that repository's settings name.
  */
-async function readSlice(
-  sys: Sys,
-  token: string,
-  here: string,
-  ref: IssueRef,
-  settings: Settings,
-): Promise<{ problems: string[]; parent?: number; owed: Owed[]; closed?: boolean; states?: Issue[]; approvals?: number }> {
+async function readSlice(sys: Sys, token: string, here: string, ref: IssueRef, settings: Settings): Promise<string[] | SliceRead> {
   const { owners, agents } = settings;
   const { repo: slug, number: slice } = ref;
   const foreign = !sameRepo(slug, here);
@@ -301,33 +329,28 @@ async function readSlice(
   let issue: Issue | undefined;
   if (foreign) {
     const read = await foreignIssue(sys, token, here, ref);
-    if (read.problem) return { problems: [read.problem], owed: [] };
+    if (read.problem) return [read.problem];
     issue = read.issue;
   } else {
     issue = await readIssue(sys, token, slug, slice);
   }
-  if (!issue) return { problems: [`#${slice} is not an issue in ${slug}`], owed: [] };
-  if (issue.type?.name !== 'Slice') return { problems: [`${nameOf(slice)} is not a Slice (its type is ${issue.type?.name ?? 'none'})`], owed: [] };
+  if (!issue) return [`#${slice} is not an issue in ${slug}`];
+  if (issue.type?.name !== 'Slice') return [`${nameOf(slice)} is not a Slice (its type is ${issue.type?.name ?? 'none'})`];
   const { parent, problem } = await parentOf(sys, token, issue, nameOf);
-  if (problem) return { problems: [problem], owed: [] };
-  if (parent?.type?.name !== 'Work item') return { problems: [`${nameOf(slice)} is not a sub-issue of a Work item`], owed: [] };
+  if (problem) return [problem];
+  if (parent?.type?.name !== 'Work item') return [`${nameOf(slice)} is not a sub-issue of a Work item`];
   // Another repository's batch answers are on its own Approvals issue.
-  const approvals = foreign
-    ? await approvalsOf(sys, token, slug).catch(() => {
-        // fail-open: settings there that cannot be read name no Approvals issue, which only takes a way to pass away.
-        return undefined;
-      })
-    : settings.approvals;
+  const approvals = foreign ? await foreignApprovals(sys, token, slug) : settings.approvals;
 
   const events = await every<TimelineEvent>(sys, token, tag, `${parent.url}/timeline`);
   const approval = events
     .filter((event): event is Extract<TimelineEvent, { event: 'labeled' | 'unlabeled' }> => (event.event === 'labeled' || event.event === 'unlabeled') && event.label.name === 'approved')
     .at(-1);
   if (approval?.event !== 'labeled') {
-    return { problems: [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, is not approved: ${either(owners)} adds the approved label before any slice starts`], owed: [] };
+    return [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, is not approved: ${either(owners)} adds the approved label before any slice starts`];
   }
   if (!anyLogin(owners, approval.actor?.login)) {
-    return { problems: [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, was labeled approved by ${approval.actor?.login ?? 'someone unknown'}, not ${either(owners)}`], owed: [] };
+    return [`work item ${nameOf(parent.number)}, ${issueUrl(slug, parent.number)}, was labeled approved by ${approval.actor?.login ?? 'someone unknown'}, not ${either(owners)}`];
   }
   const approvedAt = approval.created_at;
   const parentComments = events.filter((event): event is { event: 'commented' } & Comment => event.event === 'commented');
@@ -338,11 +361,12 @@ async function readSlice(
   // The Approvals issue's comments, read once a check and only when a decision owed may need them; an
   // Approvals issue GitHub cannot find answers nothing. Only an owner's comment whose first line approves
   // `number`, made after `since`, counts there.
-  let batch: Comment[] | undefined;
+  let batch: Promise<Comment[] | undefined> | undefined;
   const batchFor = async (number: number, since: string): Promise<Comment[]> => {
     if (approvals === undefined) return [];
-    batch ??= await every<Comment>(sys, token, tag, `${API}/repos/${slug}/issues/${approvals}/comments`, true);
-    return batchAnswers(batch, owners, number, since);
+    batch ??= everyIfThere<Comment>(sys, token, tag, `${API}/repos/${slug}/issues/${approvals}/comments`);
+    const answers = await batch;
+    return answers ? batchAnswers(answers, owners, number, since) : [];
   };
 
   const owed: Owed[] = [];
@@ -373,14 +397,15 @@ async function readSlice(
   if (added && added > approvedAt) {
     const local = [...decisionsIn(parentComments, owners, added, `#${slice}`), ...decisionsIn(comments, owners, added)];
     // The Approvals issue is read only when no request and no unedited decision here settles it.
-    const decision = requested(issue.body ?? '', slug, parent.number, parentComments, owners, added)
+    // A body that is not there reads as "null" or "undefined", which links nothing and has no section.
+    const decision = requested(String(issue.body), slug, parent.number, parentComments, owners, added)
       ? { settled: true }
       : await decided(sys, token, local.some((one) => !editedAt(one)) ? local : [...local, ...(await batchFor(slice, added))], owners);
     owed.push({
       kind: 'added',
       number: slice,
       title: issue.title,
-      body: issue.body ?? '',
+      body: String(issue.body),
       since: added,
       proposals: proposalsFor(comments, agents, slice),
       ...decision,
@@ -398,19 +423,23 @@ async function readSlice(
       kind: 'dropped',
       number: state.number,
       title: state.title,
-      body: state.body ?? '',
+      body: String(state.body),
       proposals: proposalsFor(comments, agents, state.number),
       ...(await decided(sys, token, decisions, owners)),
     });
   }
 
   // Reactions are read only for the proposals that could still settle something; a deleted proposal has none.
-  const reactions = new Map<Comment['id'], Reaction[]>();
-  for (const proposal of owed.filter((one) => !one.settled).flatMap((one) => one.proposals)) {
-    reactions.set(proposal.id, await every<Reaction>(sys, token, tag, `${API}/repos/${slug}/issues/comments/${proposal.id}/reactions?content=%2B1`, true));
+  for (const one of owed) {
+    if (one.settled) continue;
+    const reacted: { proposal: Comment; reactions: Reaction[] }[] = [];
+    for (const proposal of one.proposals) {
+      const reactions = await everyIfThere<Reaction>(sys, token, tag, `${API}/repos/${slug}/issues/comments/${proposal.id}/reactions?content=%2B1`);
+      if (reactions) reacted.push({ proposal, reactions });
+    }
+    one.settled = thumbsUp(reacted, owners, one.since);
   }
-  for (const one of owed) one.settled ||= thumbsUp(one.proposals, reactions, owners, one.since);
-  return { problems: [], parent: parent.number, owed, closed: issue.state === 'closed', states, ...(approvals === undefined ? {} : { approvals }) };
+  return { parent: parent.number, owed, closed: issue.state === 'closed', states, approvals };
 }
 
 /**
@@ -451,11 +480,11 @@ function stateCommand(slice: IssueRef, here: string): string {
  * another repository than `here` is settled there, on its Approvals issue
  * `approvals`.
  */
-function owedProblem(one: Owed, slice: IssueRef, here: string, parent: number | undefined, approvals: number | undefined, { owners, agents }: Settings): string {
+function owedProblem(one: Owed, slice: IssueRef, here: string, parent: number, approvals: number | undefined, { owners, agents }: Settings): string {
   const owner = either(owners);
   // The agent proposes as itself; with several, any of them.
   const agent = either(agents);
-  const at = (number: number | undefined): string => (number === undefined ? '#undefined' : refName({ repo: slice.repo, number }, here));
+  const at = (number: number): string => refName({ repo: slice.repo, number }, here);
   const s = at(slice.number);
   const where = sameRepo(slice.repo, here) ? '' : ` in a clone of ${slice.repo}`;
   const ask = `${one.note ? ` (${one.note})` : ''}${one.proposals.length > 0 ? '' : `; ${agent} proposes it${where} with: ${proposeCommand(one.number)}`}`;
@@ -511,6 +540,15 @@ function secondPull(slug: string, slice: IssueRef, pull: OpenPull, here: boolean
   return `${refName(slice, slug)} already has pull request #${pull.number}, ${pullUrl(slug, pull.number, pull.html_url)}; one slice, one pull request. If #${pull.number} is superseded, ${remedy}`;
 }
 
+/** Every open pull request of `slug`, from page `page` on, recursing so a page that never ends the list fails at the next. */
+async function openPulls(sys: Sys, token: string, slug: string, page = 1): Promise<OpenPull[]> {
+  const pulls = await sys.http(`${API}/repos/${slug}/pulls?state=open&per_page=100&page=${page}`, { token });
+  if (pulls.status !== 200 || !Array.isArray(pulls.json)) throw new Error(`cannot list open pull requests (HTTP ${pulls.status})`);
+  const listed = pulls.json as OpenPull[];
+  // Only a full page reads on, so an answer that is no list ends here, whatever checks it.
+  return listed.length === 100 ? [...listed, ...(await openPulls(sys, token, slug, page + 1))] : listed;
+}
+
 /**
  * The work rules for building one slice, as problems; none means it may be
  * built: the slice is a Slice under a Work item the owner approved; a slice
@@ -533,24 +571,20 @@ export async function sliceProblems(
   // A slice in this repository may be given by its number alone.
   const slice = typeof which === 'number' ? { repo: slug, number: which } : which;
   const read = await readSlice(sys, token, slug, slice, accounts);
-  if (read.problems.length > 0) return read.problems;
+  if (Array.isArray(read)) return read;
   const problems = read.owed.filter((one) => !one.settled).map((one) => owedProblem(one, slice, slug, read.parent, read.approvals, accounts));
-  if (mine.states) problems.push(...stateProblems(slice, slug, read.closed ?? false, read.states ?? [], mine.states));
+  if (mine.states) problems.push(...stateProblems(slice, slug, read.closed, read.states, mine.states));
 
   // The pull request being checked: by number, or by its branch in this repository (not a fork's of the same name).
+  // A body that is not there reads as "null", which names no slice and no State.
   let own: OpenPull | undefined;
-  for (let page = 1; ; page++) {
-    const pulls = await sys.http(`${API}/repos/${slug}/pulls?state=open&per_page=100&page=${page}`, { token });
-    if (pulls.status !== 200 || !Array.isArray(pulls.json)) throw new Error(`cannot list open pull requests (HTTP ${pulls.status})`);
-    for (const pull of pulls.json as OpenPull[]) {
-      const here = pull.head.repo?.full_name.toLowerCase() === slug.toLowerCase();
-      if (pull.head.ref === mine.branch && here) own = pull;
-      if (pull.number === mine.pull || (pull.head.ref === mine.branch && here)) continue;
-      if (slicesNamed(pull.body ?? '', slug).some((one) => sameIssue(one, slice))) problems.push(secondPull(slug, slice, pull, here));
-    }
-    if (pulls.json.length < 100) break;
+  for (const pull of await openPulls(sys, token, slug)) {
+    const here = pull.head.repo?.full_name.toLowerCase() === slug.toLowerCase();
+    if (pull.head.ref === mine.branch && here) own = pull;
+    if (pull.number === mine.pull || (pull.head.ref === mine.branch && here)) continue;
+    if (slicesNamed(String(pull.body), slug).some((one) => sameIssue(one, slice))) problems.push(secondPull(slug, slice, pull, here));
   }
-  if (mine.warnings && !mine.states && read.closed && !namesOpenState(slice, read.states ?? [], statesNamed(own?.body ?? '', slug))) {
+  if (mine.warnings && !mine.states && read.closed && !namesOpenState(slice, read.states, statesNamed(String(own?.body), slug))) {
     mine.warnings.push(`${refName(slice, slug)} is closed, so its next pull request is a fix and needs a State: ${stateCommand(slice, slug)}`);
   }
   return problems;
@@ -582,12 +616,8 @@ async function notDependabots(
   const commits = await commitsOf(sys, token, slug, pull.number);
   if (commits.length >= MOST_COMMITS) return `#${pull.number} has ${MOST_COMMITS} or more commits, more than GitHub lists, so nothing shows that ${DEPENDABOT} pushed all of them`;
   const branch = { repo: head, ref: pull.head.ref, base: pull.base.sha, commits: commits.map((commit) => commit.sha) };
-  let pushers = new Map<string, string | null>();
-  for (let read = 1; ; read++) {
-    pushers = await whoPushed(sys, token, branch);
-    if (read === RECORD_READS || commits.every((commit) => pushers.has(commit.sha))) break;
-    await sys.sleep(RECORD_WAIT_MS);
-  }
+  // Read as PR identity reads it: again RECORD_WAIT_MS later, up to RECORD_READS times, until it credits every commit.
+  const pushers = await recordedPushers(sys, token, branch, commits, 1);
   const stray = commits.filter((commit) => !sameLogin(pushers.get(commit.sha) ?? undefined, DEPENDABOT));
   if (stray.length === 0) return undefined;
   const named = stray.map((commit) => `${commit.sha.slice(0, 7)} (${pushers.has(commit.sha) ? `pushed by ${pushers.get(commit.sha) ?? 'an account GitHub no longer names'}` : 'no push recorded yet'})`).join(', ');
@@ -673,10 +703,13 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
     const names = files.flatMap((file) => [file.filename, ...(file.previous_filename ? [file.previous_filename] : [])]);
     // onboard writes its files and deletes none but the cloud setup file under its name before P-56, only into its
     // new name, written here or already on the base: any other deleted workflow or settings file would switch the checks off.
-    const kept = (path: string): boolean => files.some((file) => file.filename === path && file.status !== 'removed') || sys.exists(`${sys.cwd}/${path}`);
+    // A file listed here is written here: were it deleted too, its own removal would fail this check.
+    const kept = (path: string): boolean => files.some((file) => file.filename === path) || sys.exists(`${sys.cwd}/${path}`);
     const moved = files.every((file) =>
       file.status === 'removed'
-        ? MOVED_FILES[file.filename] !== undefined && kept(MOVED_FILES[file.filename] as string)
+        ? Object.entries(MOVED_FILES)
+            .filter(([from]) => from === file.filename)
+            .some(([, to]) => kept(to))
         : // A copy deletes nothing, as GitHub may show the cloud setup file written under both names.
           file.status === 'copied' || file.previous_filename === undefined || file.previous_filename === file.filename || MOVED_FILES[file.previous_filename] === file.filename,
     );
@@ -685,7 +718,9 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
       return 0;
     }
   }
-  const slices = slicesNamed(pull.body ?? '', slug);
+  // A body that is not there reads as "null", which names no slice and no State.
+  const body = String(pull.body);
+  const slices = slicesNamed(body, slug);
   if (slices.length !== 1) {
     return report(io, 'pr-work-rules', [
       slices.length === 0
@@ -694,7 +729,7 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
     ]);
   }
   const [slice] = slices as [IssueRef];
-  const problems = await sliceProblems(sys, token, slug, slice, accounts, { pull: pull.number, states: statesNamed(pull.body ?? '', slug) });
+  const problems = await sliceProblems(sys, token, slug, slice, accounts, { pull: pull.number, states: statesNamed(body, slug) });
   if (problems.length === 0) io.out(`✓ pr-work-rules: #${pull.number} builds slice ${refName(slice, slug)}, which may be built`);
   return report(io, 'pr-work-rules', problems);
 }
@@ -1221,7 +1256,7 @@ async function proposeOne(
   const state = parent?.type?.name === 'Slice';
   const slice = state ? parent.number : number;
   const read = await readSlice(sys, token, slug, { repo: slug, number: slice }, accounts);
-  if (read.problems.length > 0) return { code: report(io, 'propose', read.problems), waiting: [] };
+  if (Array.isArray(read)) return { code: report(io, 'propose', read), waiting: [] };
   const owner = either(accounts.owners);
   const asked = read.owed.filter((one) => !state || one.number === number);
   if (asked.length === 0) {

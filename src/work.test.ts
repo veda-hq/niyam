@@ -9,7 +9,7 @@ import type { Settings } from './agent.ts';
 import { RestBoard } from './fake-board.test.ts';
 import { AGENT, FakeSys, ROOT, SETTINGS, capture } from './fake.test.ts';
 import { askProblem } from './asks.ts';
-import { fileState, prMerged, prStarted, prePush, prWorkRules, propose, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
+import { deleteBranchCommand, fileState, prMerged, prStarted, prePush, prWorkRules, propose, pullUrl, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
 
 const SLUG = 'example-org/example-app';
 /** Another repository, where a slice this one builds can be planned. */
@@ -81,7 +81,8 @@ function answer(issue: Node | null, url: string, issues = ISSUES): { status: num
   const page = (items: Node[] | undefined): { status: number; json: unknown } | undefined => {
     if (!items) return undefined;
     const from = (Number(list?.[2]) - 1) * 100;
-    return { status: 200, json: items.slice(from, from + 100) };
+    // GitHub answers the page after the last one, empty; a run that reads past it never stops, so it is not there.
+    return from > items.length ? undefined : { status: 200, json: items.slice(from, from + 100) };
   };
   if (!issue) return undefined;
   if (path === `/${APPROVALS}/comments`) return page(issue.approvals as Node[]);
@@ -212,6 +213,18 @@ describe('slicesNamed', () => {
   });
 });
 
+describe('pullUrl and deleteBranchCommand', () => {
+  it("takes GitHub's https address for a pull request, else builds it", () => {
+    assert.equal(pullUrl(SLUG, 3, `https://github.com/${SLUG}/pull/3`), `https://github.com/${SLUG}/pull/3`);
+    for (const given of ['http://example.com/pull/3', 7, undefined]) assert.equal(pullUrl(SLUG, 3, given), `https://github.com/${SLUG}/pull/3`, String(given));
+  });
+
+  it('names a branch in full only when it starts with - or +', () => {
+    assert.equal(deleteBranchCommand('fix-a+b'), 'git push origin --delete fix-a+b');
+    assert.equal(deleteBranchCommand('-x'), 'git push origin --delete refs/heads/-x');
+  });
+});
+
 describe('statesNamed', () => {
   it('reads each "State: #N" line, by number or link, without repeats, and not prose', () => {
     assert.deepEqual(statesNamed(`Builds State #30 of P-01.\nSlice: #12\nState: #31\nstate:  https://github.com/${SLUG}/issues/32 \nState: #31`, SLUG), [
@@ -246,6 +259,7 @@ describe('sliceProblems', () => {
     ['an issue that is not a Slice', (g: ReturnType<typeof graph>) => ({ ...g.issue, type: null }), '#12 is not a Slice (its type is none)'],
     ['a slice with no work item', (g: ReturnType<typeof graph>) => ({ ...g.issue, parent: null }), '#12 is not a sub-issue of a Work item'],
     ['a slice under an issue that is not a Work item', (g: ReturnType<typeof graph>) => ({ ...g.issue, parent: { number: 10, type: { name: 'Slice' } } }), '#12 is not a sub-issue of a Work item'],
+    ['a slice under an issue of no type', (g: ReturnType<typeof graph>) => ({ ...g.issue, parent: { number: 10, type: null } }), '#12 is not a sub-issue of a Work item'],
   ] as const) {
     it(`refuses ${name}`, async () => {
       assert.deepEqual(await problems(change(graph())), [problem]);
@@ -261,6 +275,41 @@ describe('sliceProblems', () => {
     assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), ["could not read #12's parent (HTTP 404: Not Found)"]);
     sys.route('GET', `/repos/${SLUG}/issues/12/parent`, { status: 502, json: null });
     assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), ["could not read #12's parent (HTTP 502)"]);
+    sys.route('GET', `/repos/${SLUG}/issues/12/parent`, { status: 500, json: { message: 'No parent issue found' } });
+    assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), ["could not read #12's parent (HTTP 500: No parent issue found)"], 'only a 404 says there is none');
+  });
+
+  it("throws on a list GitHub does not hold, naming the read, where only the Approvals issue's and reactions may be missing", async () => {
+    const COMMENTS = `/repos/${SLUG}/issues/12/comments?per_page=100&page=1`;
+    const sys = new FakeSys();
+    github(sys, graph().issue);
+    sys.route('GET', COMMENTS, { status: 404, json: { message: 'Not Found' } });
+    await assert.rejects(sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), { message: `cannot read #12: Not Found (${COMMENTS})` });
+  });
+
+  it('throws when GitHub will not list the open pull requests, or answers no list', async () => {
+    for (const [status, json] of [[500, []], [200, {}]] as const) {
+      const sys = new FakeSys();
+      github(sys, graph().issue);
+      sys.route('GET', `/repos/${SLUG}/pulls?state=open&per_page=100&page=1`, { status, json });
+      await assert.rejects(sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), { message: `cannot list open pull requests (HTTP ${status})` });
+    }
+  });
+
+  it('warns of a closed slice only where asked to, and by the open States of the branch\'s own pull request', async () => {
+    const g = graph();
+    g.issue.state = 'closed';
+    g.states.push({ number: 31, title: 'Fix', type: { name: 'State' }, state: 'open', state_reason: null, closed_at: null, comments: [] });
+    assert.deepEqual(await problems(g.issue), [], 'neither warnings nor States asked for');
+    const pulls = [
+      { number: 40, body: 'Slice: #12\nState: #31', head: { ref: 'work', repo: { full_name: SLUG } } },
+      { number: 41, body: null, head: { ref: 'other', repo: { full_name: SLUG } } },
+    ];
+    const sys = new FakeSys();
+    github(sys, g.issue, pulls);
+    const warnings: string[] = [];
+    assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, { branch: 'work', warnings }), []);
+    assert.deepEqual(warnings, []);
   });
 
   it('refuses an unapproved start', async () => {
@@ -521,6 +570,129 @@ describe('sliceProblems', () => {
       assert.deepEqual(await problems(g.issue), [refused], 'a sibling added at another moment does not account for it');
     });
 
+    /** The timelines a run read, by issue number, in order. */
+    const timelines = (sys: FakeSys): string[] => sys.requests.flatMap((r) => /\/issues\/(\d+)\/timeline\?/.exec(r.url)?.slice(1, 2) ?? []);
+
+    it("reads a sibling's timeline only while an unnamed addition is left to put down, never the slice's own again", async () => {
+      const g = graph();
+      g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+      g.siblings.push(
+        { number: 13, type: { name: 'Slice' }, own: [{ event: 'parent_issue_added', created_at: LATER, parent_issue: null }] },
+        { number: 14, type: { name: 'Slice' }, own: [] },
+      );
+      const sys = new FakeSys();
+      github(sys, g.issue);
+      assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), []);
+      assert.deepEqual(timelines(sys), ['10', '12', '13']);
+    });
+
+    it('reads no sibling when no unnamed addition comes after the approval, one made at its moment included', async () => {
+      for (const at of [T0, APPROVED]) {
+        const g = graph();
+        g.timeline.push({ event: 'sub_issue_added', created_at: at, sub_issue: null });
+        g.siblings.push({ number: 13, type: { name: 'Slice' }, own: [] });
+        const sys = new FakeSys();
+        github(sys, g.issue);
+        assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), [], at);
+        assert.ok(!sys.requests.some((r) => r.url.includes('/10/sub_issues')), at);
+      }
+    });
+
+    it("takes the latest addition, whichever record names it first, and none at the approval's own moment", async () => {
+      const g = graph();
+      g.own[0] = { event: 'parent_issue_added', created_at: LATER, parent_issue: null };
+      assert.deepEqual(await problems(g.issue), [refused], 'its own timeline later than the work item says');
+      const h = graph();
+      h.timeline[0] = { event: 'sub_issue_added', created_at: APPROVED, sub_issue: { number: 12 } };
+      assert.deepEqual(await problems(h.issue), [], 'added at the moment of approval');
+    });
+
+    it("counts only additions: neither another event on the slice's own timeline nor a removal from the work item", async () => {
+      const g = graph();
+      g.own.push({ event: 'labeled', created_at: LATEST, actor: { login: OWNER }, label: { name: 'mechanical' } });
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LATER, sub_issue: { number: 12 } });
+      assert.deepEqual(await problems(g.issue), []);
+    });
+
+    it("counts a Decision: or a request only after the addition, an owner's comment alone, opening its comment", async () => {
+      for (const [why, made, want] of [
+        ['a decision at the very moment of the addition', comment('Decision: keep it', LATER), [refused]],
+        ['a decision opened by spaces', comment('  Decision: keep it'), []],
+        ['a decision named in passing', comment('Not a Decision: yet'), [refused]],
+      ] as const) {
+        const g = added();
+        g.comments.push(made);
+        assert.deepEqual(await problems(g.issue), want, why);
+      }
+      const g = added();
+      g.issue.body = `Requested: https://github.com/${SLUG}/issues/10#issuecomment-4321`;
+      g.timeline.push({ ...comment('Please add it', LATER), id: 4321 });
+      assert.deepEqual(await problems(g.issue), [refused], 'a request at the very moment of the addition');
+      const h = added();
+      h.issue.body = null;
+      h.timeline.push({ event: 'reviewed', user: { login: OWNER }, body: 'Decision: add #12', created_at: LATEST, updated_at: LATEST });
+      assert.deepEqual(await problems(h.issue), [refused], 'another event that carries a body, and a slice with none');
+    });
+
+    it("reads a request in a repository whose name has a dot only by the dot", async () => {
+      const DOTTED = 'example-org/example.app';
+      const link = (slug: string): ReturnType<typeof graph> => {
+        const g = added();
+        g.issue.body = `Requested: https://github.com/${slug}/issues/10#issuecomment-4321`;
+        g.timeline.push({ ...comment('Please add it', APPROVED), id: 4321 });
+        return g;
+      };
+      for (const [slug, want] of [[DOTTED, 0], ['example-org/exampleXapp', 1]] as const) {
+        const sys = new FakeSys();
+        github(sys, link(slug).issue, [], DOTTED);
+        sys.route('GET', `/repos/${DOTTED}/pulls?state=open&per_page=100&page=1`, { status: 200, json: [] });
+        assert.equal((await sliceProblems(sys, 'tok', DOTTED, 12, ACCOUNTS, {})).length, want, slug);
+      }
+    });
+
+    it('finds a proposal opened by spaces, not one named in passing, nor one by no account', async () => {
+      const nobody: Node = { ...comment('Proposal: add #12', LATER, AGENT), user: null };
+      for (const [made, want] of [
+        [comment('  Proposal: add #12', LATER, AGENT), []],
+        [comment('Re Proposal: add #12', LATER, AGENT), [refused]],
+        [nobody, [refused]],
+      ] as const) {
+        const g = added();
+        g.comments.push(made);
+        g.thumbs.set(made.id as string, [thumb()]);
+        assert.deepEqual(await problems(g.issue), want, made.body as string);
+      }
+    });
+
+    it("counts a 👍 only after the addition and after the proposal's last edit, neither at their moment", async () => {
+      for (const [why, edited, at, want] of [
+        ['at the moment of the addition', null, LATER, 1],
+        ['before the proposal was edited', EDITED, LATEST, 1],
+        ['at the moment of the edit', EDITED, EDITED, 1],
+        ['after the edit', EDITED, '2026-10-06T00:00:00Z', 0],
+      ] as const) {
+        const g = added();
+        const made = comment('Proposal: add #12', LATER, AGENT, edited);
+        g.comments.push(made);
+        g.thumbs.set(made.id as string, [thumb(at)]);
+        assert.equal((await problems(g.issue)).length, want, why);
+      }
+    });
+
+    it("reads no Approvals issue when the settings name none, and reads no reactions to a proposal once a decision settles it", async () => {
+      const sys = new FakeSys();
+      const g = added();
+      const made = comment('Proposal: add #12', LATER, AGENT);
+      g.comments.push(made, comment('Decision: keep it'));
+      github(sys, g.issue);
+      assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, ACCOUNTS, {}), []);
+      assert.ok(!sys.requests.some((r) => r.url.includes('/reactions')));
+      const none = new FakeSys();
+      github(none, added().issue);
+      assert.deepEqual(await sliceProblems(none, 'tok', SLUG, 12, ACCOUNTS, {}), [refused]);
+      assert.ok(!none.requests.some((r) => r.url.includes('/issues/undefined/')));
+    });
+
     describe("the owner's 👍 on the agent's proposal", () => {
       /** Slice #12 added after approval, with the agent's proposal on it and these 👍s. */
       const withProposal = (thumbs: Node[], made: Node = comment('Proposal: add #12 (Add the thing) to work item #10', LATER, AGENT)): ReturnType<typeof graph> => {
@@ -707,6 +879,7 @@ describe('sliceProblems', () => {
       ['dropped before approval', { closed_at: T0 }],
       ['open', { closed_at: null }],
       ['not a State', { type: { name: 'Brief' } }],
+      ['of no type', { type: null }],
     ] as const) {
       it(`ignores a state ${name}`, async () => {
         const g = graph();
@@ -714,6 +887,26 @@ describe('sliceProblems', () => {
         assert.deepEqual(await problems(g.issue), []);
       });
     }
+
+    it('owes the owner a state dropped at the very moment of approval', async () => {
+      const g = graph();
+      g.states.push(state({ closed_at: APPROVED }));
+      assert.deepEqual(await problems(g.issue), [refused]);
+    });
+
+    it("counts a Decision: on the slice only for the state it names, and then reads nothing more for it", async () => {
+      const g = graph();
+      g.states.push(state());
+      g.comments.push(comment('Decision: add #12'));
+      assert.deepEqual(await problems(g.issue), [refused], 'a decision naming another issue');
+      const sys = new FakeSys();
+      const h = graph();
+      h.states.push(state());
+      h.comments.push(comment('Decision: drop #30'));
+      github(sys, h.issue);
+      assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, 12, WITH_APPROVALS, {}), []);
+      assert.ok(!sys.requests.some((r) => r.url.includes('/30/comments') || r.url.includes(`/${APPROVALS}/comments`)));
+    });
   });
 
   describe('a second pull request', () => {
@@ -835,6 +1028,47 @@ describe('sliceProblems', () => {
       const sys = new FakeSys();
       sys.route('GET', `${PLANS_ISSUES}/12`, { status: 200, json: { number: 12, pull_request: {} } });
       assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), [`${PLANS}#12 is a pull request, not an issue`]);
+    });
+
+    it('refuses one GitHub there answers 401, or 404 with no message, naming the status alone', async () => {
+      for (const [status, json, said] of [[401, { message: 'Bad credentials' }, `HTTP 401: Bad credentials`], [404, null, 'HTTP 404']] as const) {
+        const sys = new FakeSys();
+        sys.route('GET', `${PLANS_ISSUES}/12`, { status, json });
+        assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), [
+          `${PLANS}#12 cannot be read with this token (${said}): a slice in another repository counts only where the token reads that repository, and a workflow's GITHUB_TOKEN reads no private repository but ${SLUG}`,
+        ]);
+      }
+    });
+
+    it('names it in full when a read there fails, saying the token cannot read the repository where GitHub says so', async () => {
+      const TIMELINE = `/repos/${PLANS}/issues/10/timeline?per_page=100&page=1`;
+      for (const [message, hint] of [
+        ['Resource not accessible by integration', `; this token cannot read ${PLANS}`],
+        ['Server Error', ''],
+      ] as const) {
+        const sys = new FakeSys();
+        github(sys, graph().issue, [], PLANS);
+        sys.route('GET', TIMELINE, { status: 500, json: { message } });
+        await assert.rejects(sliceProblems(sys, 'tok', SLUG, theirs, ACCOUNTS, {}), { message: `cannot read ${PLANS}#12: ${message} (${TIMELINE})${hint}` });
+      }
+    });
+
+    it('asks with the token, here and there', async () => {
+      for (const [slug, which] of [[SLUG, 12], [PLANS, theirs]] as const) {
+        const sys = new FakeSys();
+        github(sys, graph().issue, [], slug);
+        assert.deepEqual(await sliceProblems(sys, 'tok', SLUG, which, ACCOUNTS, {}), []);
+        assert.deepEqual(sys.requests.filter((r) => r.token !== 'tok').map((r) => r.url), [], slug);
+      }
+    });
+
+    it("tells another repository's closed slice to file its State in a clone there, named owner/name#N", async () => {
+      const g = graph();
+      g.issue.state = 'closed';
+      const { problems: found } = await foreign(g.issue, [], ACCOUNTS, { pull: 40, states: [] });
+      assert.deepEqual(found, [
+        `${PLANS}#12 is closed, so this pull request is a fix: file it as a State under ${PLANS}#12 with (in a clone of ${PLANS}) niyam state 12 --title "…" and name it with a line "State: ${PLANS}#N"`,
+      ]);
     });
 
     it('refuses one that is not a Slice, or not under a Work item, naming it in full', async () => {
@@ -1061,7 +1295,7 @@ describe('prWorkRules', () => {
     ['Slice: #12\nSlice: #13', '#40 names 2 slices (#12, #13); an agent pull request builds exactly one'],
   ] as const) {
     it(`refuses an agent pull request with body ${JSON.stringify(body)}`, async () => {
-      assert.deepEqual((await check(actions(agentPull(body)))).err[0], `✗ ${problem}`);
+      assert.deepEqual((await check(actions(agentPull(body)))).err, [`✗ ${problem}`, 'pr-work-rules: refused by the work rules']);
     });
   }
 
@@ -1109,6 +1343,7 @@ describe('prWorkRules', () => {
       ['moves the hooks into the settings file', [{ filename: '.github/niyam.json', previous_filename: '.claude/settings.json', status: 'renamed' }]],
       ['moves the workflow before P-56 into the new one', [{ filename: '.github/workflows/niyam.yml', previous_filename: '.github/workflows/process-rules.yml', status: 'renamed' }]],
       ['copies a file of its own into one onboard writes', [{ filename: '.github/niyam.json', previous_filename: 'src/settings.json', status: 'copied' }]],
+      ['deletes one onboard writes beside the new cloud setup file', [{ filename: '.github/workflows/niyam.yml', status: 'removed' }, { filename: '.github/niyam/cloud-setup.sh', status: 'modified' }]],
     ] as const) {
       it(`holds one that ${name} to the work rules`, async () => {
         const sys = actions(onboardPull());
@@ -1123,6 +1358,8 @@ describe('prWorkRules', () => {
         { filename: '.github/process-rules/cloud-setup.sh', status: 'removed' },
       ]],
       ['moves it, as GitHub shows a file renamed', [{ filename: '.github/niyam/cloud-setup.sh', previous_filename: '.github/process-rules/cloud-setup.sh', status: 'renamed' }]],
+      ['copies the new one under the name before P-56, as GitHub may show it written under both', [{ filename: '.github/process-rules/cloud-setup.sh', previous_filename: '.github/niyam/cloud-setup.sh', status: 'copied' }]],
+      ['lists a file as coming from itself', [{ filename: '.github/niyam.json', previous_filename: '.github/niyam.json', status: 'modified' }]],
     ] as const) {
       it(`passes one that ${name} (P-57)`, async () => {
         const sys = actions(onboardPull());
@@ -1148,6 +1385,8 @@ describe('prWorkRules', () => {
       const sys = actions(onboardPull('someone/example-app'));
       assert.deepEqual((await check(sys)).err[0], '✗ #42 names no slice; add a line "Slice: #N" to its description');
       assert.ok(!sys.requests.some((r) => r.url.includes('/files')));
+      const gone = actions({ ...onboardPull(), head: { ref: 'niyam/onboard', repo: null } });
+      assert.deepEqual((await check(gone)).err[0], '✗ #42 names no slice; add a line "Slice: #N" to its description', 'a branch whose repository is gone');
     });
   });
 
@@ -1217,6 +1456,17 @@ describe('prWorkRules', () => {
       const page = Array.from({ length: 100 }, (_, i) => ({ sha: `c${i}` }));
       for (const n of [1, 2, 3]) sys.route('GET', `${REPO}/pulls/43/commits?per_page=100&page=${n}`, { status: 200, json: page });
       assert.match((await check(sys)).err[0] ?? '', /has 250 or more commits/);
+      const exactly = dependabots('dependabot[bot]', [], []);
+      for (const [n, length] of [[1, 100], [2, 100], [3, 50]] as const) {
+        exactly.route('GET', `${REPO}/pulls/43/commits?per_page=100&page=${n}`, { status: 200, json: Array.from({ length }, (_, i) => ({ sha: `c${n}-${i}` })) });
+      }
+      assert.match((await check(exactly)).err[0] ?? '', /has 250 or more commits/, '250 exactly');
+    });
+
+    it('names a stray commit by its short id', async () => {
+      const sha = 'f'.repeat(40);
+      const sys = dependabots('dependabot[bot]', ['d1', sha], [created, { type: 'push', actor: AGENT, before: 'd1', after: sha, brings: [sha] }]);
+      assert.match((await check(sys)).err[0] ?? '', new RegExp(`carries ${'f'.repeat(7)} \\(pushed by ${AGENT}\\);`));
     });
 
     it("refuses an agent's, though it names a slice that may be built, without reading the slice", async () => {
@@ -1237,6 +1487,62 @@ describe('prWorkRules', () => {
       const sys = actions({ number: 41, body: null, user: { login: OWNER }, head: { ref: 'fix-dependabot/x' } });
       assert.equal((await check(sys)).code, 0);
     });
+  });
+
+  it('checks nothing in a repository not adopted on its base, with work-rules off, or owned by a personal account', async () => {
+    const unadopted = actions(agentPull('Slice: #12'));
+    unadopted.files.delete(`${ROOT}/.github/niyam.json`);
+    const off = actions(agentPull('Slice: #12'));
+    off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: OWNER, agent: AGENT, features: ['identity'] }));
+    const personal = actions(agentPull('Slice: #12'));
+    personal.route('GET', `/repos/${SLUG}`, { status: 200, json: { owner: { type: 'User' } } });
+    for (const [sys, said] of [
+      [unadopted, 'pr-work-rules: the base branch has no .github/niyam.json, so the repo is not adopted on its base yet; nothing to check'],
+      [off, 'pr-work-rules: work-rules is off in .github/niyam.json; nothing to check'],
+      [personal, 'pr-work-rules: work-rules is off on a repository owned by a personal account, since GitHub has issue types for organisations only; nothing to check'],
+    ] as const) {
+      assert.deepEqual(await check(sys), { code: 0, out: [said], err: [] });
+      assert.ok(!sys.requests.some((r) => r.url.includes('/issues/')), said);
+    }
+  });
+
+  it('needs each of the Actions variables', async () => {
+    for (const name of ['GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GH_TOKEN']) {
+      const sys = actions(agentPull('Slice: #12'));
+      delete sys.env[name];
+      await assert.rejects(check(sys), /pr-work-rules runs in GitHub Actions/, name);
+    }
+  });
+
+  it('refuses a State line naming an issue the slice does not hold, or a sub-issue of no type, though the slice has a State', async () => {
+    const g = graph();
+    g.states.push(
+      { number: 31, title: 'The thing', type: { name: 'State' }, state: 'open', state_reason: null, closed_at: null, comments: [] },
+      { number: 34, title: 'Untyped', type: null, state: 'open', state_reason: null, closed_at: null, comments: [] },
+    );
+    const sys = actions(agentPull('Slice: #12\nState: #99\nState: #34'));
+    github(sys, g.issue);
+    assert.deepEqual((await check(sys)).err, [
+      '✗ #99 is not a State under slice #12; a "State: #N" line names a State sub-issue of the slice the pull request builds',
+      '✗ #34 is not a State under slice #12; a "State: #N" line names a State sub-issue of the slice the pull request builds',
+      'pr-work-rules: refused by the work rules',
+    ]);
+  });
+
+  it('takes no open sub-issue but a State as the State a fix names', async () => {
+    const g = fixed();
+    g.states.push(
+      { number: 33, title: 'A note', type: { name: 'Task' }, state: 'open', state_reason: null, closed_at: null, comments: [] },
+      { number: 34, title: 'Untyped', type: null, state: 'open', state_reason: null, closed_at: null, comments: [] },
+    );
+    const sys = actions(agentPull('Slice: #12\nState: #33\nState: #34'));
+    github(sys, g.issue);
+    assert.deepEqual((await check(sys)).err, [
+      '✗ #33 is not a State under slice #12; a "State: #N" line names a State sub-issue of the slice the pull request builds',
+      '✗ #34 is not a State under slice #12; a "State: #N" line names a State sub-issue of the slice the pull request builds',
+      '✗ #12 is closed, so this pull request is a fix: file it as a State under #12 with niyam state 12 --title "…" and name it with a line "State: #N"',
+      'pr-work-rules: refused by the work rules',
+    ]);
   });
 
   it("leaves the owner's pull requests alone", async () => {
@@ -1282,6 +1588,14 @@ describe('prePush', () => {
     assert.deepEqual(await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [] });
     assert.deepEqual(sys.calls.find((c) => c.args[0] === 'log')?.args, ['log', '--format=%B', LOCAL, '--not', REMOTE, '--remotes']);
     assert.equal(sys.requests[0]?.token, 'ghp_good');
+  });
+
+  it('reads only a commit id of zeros alone as none, not one that starts or ends with zeros', async () => {
+    for (const [local, remote] of [[`0${'a'.repeat(39)}`, `${'b'.repeat(39)}0`], [`${'a'.repeat(39)}0`, `0${'b'.repeat(39)}`]]) {
+      const sys = session('Add the thing\n\nSlice: #12\n');
+      assert.deepEqual(await push(sys, `refs/heads/work ${local} refs/heads/work ${remote}\n`), { code: 0, err: [] });
+      assert.deepEqual(sys.calls.find((c) => c.args[0] === 'log')?.args, ['log', '--format=%B', local, '--not', remote, '--remotes']);
+    }
   });
 
   describe('a push to a branch whose pull request merged', () => {
