@@ -102,8 +102,8 @@ describe('callerUpdate, callerDetail and callerWhat', () => {
   it('writes a missing caller, and leaves one as it is', () => {
     const write = callerUpdate(undefined, undefined, 'main', '1.2.3');
     assert.deepEqual(write, { kind: 'write', text: CALLER_123 });
-    assert.equal(write.kind !== 'same' && callerDetail(write, '1.2.3'), 'new, the shared Guard at v1.2.3');
-    assert.equal(write.kind !== 'same' && callerWhat(write, '1.2.3', 'main'), `write ${GUARD_CALLER_PATH}, the shared Guard's caller: ${holds('main')}`);
+    assert.equal(callerDetail(write, '1.2.3'), 'new, the shared Guard at v1.2.3');
+    assert.equal(callerWhat(write, '1.2.3', 'main'), `write ${GUARD_CALLER_PATH}, the shared Guard's caller: ${holds('main')}`);
     assert.deepEqual(callerUpdate(CALLER_123, { version: '1.2.3', branch: 'main' }, 'main', '1.2.3'), { kind: 'same' });
   });
 
@@ -114,8 +114,8 @@ describe('callerUpdate, callerDetail and callerWhat', () => {
     ] as const) {
       const update = callerUpdate(before, at, 'trunk', '1.2.3');
       assert.deepEqual(update, { kind: 'rewrite', text: guardCaller('trunk', '1.2.3') });
-      assert.equal(update.kind !== 'same' && callerDetail(update, '1.2.3'), 'written again');
-      assert.equal(update.kind !== 'same' && callerWhat(update, '1.2.3', 'trunk'), `write ${GUARD_CALLER_PATH}, the shared Guard's caller, again as onboard writes it: ${holds('trunk')}`);
+      assert.equal(callerDetail(update, '1.2.3'), 'written again');
+      assert.equal(callerWhat(update, '1.2.3', 'trunk'), `write ${GUARD_CALLER_PATH}, the shared Guard's caller, again as onboard writes it: ${holds('trunk')}`);
     }
   });
 
