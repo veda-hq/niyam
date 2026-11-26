@@ -205,8 +205,12 @@ function clocked(): FakeSys {
   return sys;
 }
 
-// In-process cases first: the lane bails at the first failure, so a mutant they kill never waits on the real-git
-// suites below.
+/** The real-git suites, which this file runs after every in-process one: see its end. */
+const later: [string, () => void][] = [];
+function describeLater(name: string, body: () => void): void {
+  later.push([name, body]);
+}
+
 describe('pr-autocreate, in-process', () => {
   it('keeps its records, opt-out and marker where the desktop app reads them', () => {
     assert.deepEqual([OPT_OUT_VAR, REMOTE, STATE_DIR, MARKER], ['NIYAM_PR_AUTOCREATE', 'origin', '.tmp/pr-autocreate', '<!-- pr-autocreate: placeholder body -->']);
@@ -615,6 +619,690 @@ describe('pr-autocreate, in-process', () => {
   });
 });
 
+describeLater('pr-autocreate claude-hook (real git, GitHub faked)', () => {
+  before(reported);
+  afterEach(reported);
+
+  let w: ReturnType<typeof world>;
+  let github: FakeGitHub;
+  let sys: ReturnType<typeof machine>;
+  beforeEach(() => {
+    w = world();
+    github = new FakeGitHub();
+    sys = machine(github, w.dir);
+  });
+
+  it('(1) leaves a Bash call that pushes nothing alone', async () => {
+    assert.deepEqual(await hook(sys, bash(w.work, 'git status')), { code: 0, out: [], err: [] });
+    assert.deepEqual(await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Read' })), { code: 0, out: [], err: [] });
+    assert.deepEqual(await hook(sys, input('SessionStart', { cwd: w.work })), { code: 0, out: [], err: [] });
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('(2) does nothing at Stop on a branch never pushed', async () => {
+    w.git('checkout', '-q', '-b', 'local-only');
+    w.commit('local');
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('(3) leaves a background push to the Stop half', async () => {
+    assert.equal((await hook(sys, bash(w.work, 'git push', { run_in_background: true }))).code, 0);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('(4) opens a ready pull request for a foreground push that landed, and tells the session to switch Autofix on', async () => {
+    const got = await hook(sys, bash(w.work, 'git push origin feature'));
+    assert.equal(got.code, 0);
+    const [create] = github.calls.filter((call) => call.method === 'POST');
+    const body = create?.body as { head: string; base: string; title: string; body: string; draft: boolean };
+    assert.deepEqual([body.head, body.base, body.title, body.draft], ['feature', 'main', '✨ feat: the first change', false]);
+    assert.ok(body.body.startsWith(`${MARKER}\nOpened automatically when \`feature\` was pushed.`));
+    assert.match(body.body, /## Commits\n\n- ✨ feat: the first change \(`[0-9a-f]+`\)\n$/);
+    const said = context(got.out);
+    assert.match(said, /^PR #100 \(https:\/\/github\.com\/example-org\/example-app\/pull\/100\) was opened automatically for branch feature after the push landed\. Its body is still the automatic placeholder: replace it with the real description \(`gh pr edit --body-file`\)/);
+    assert.match(said, /2\. Write this line in your reply text, exactly: <pr-created>https:\/\/github\.com\/example-org\/example-app\/pull\/100<\/pr-created>/);
+    // The record the desktop app's mods read.
+    const kept = record(w.work, 'feature');
+    assert.deepEqual([kept.branch, kept.remoteSha, kept.created, kept.notes], ['feature', w.git('rev-parse', 'HEAD'), true, []]);
+    assert.deepEqual(kept.pr, { number: 100, url: 'https://github.com/example-org/example-app/pull/100', state: 'OPEN' });
+  });
+
+  it('(5) asks GitHub once per pushed commit and tells a session once, looking up no token when the record answers', async () => {
+    await hook(sys, bash(w.work, 'git push'));
+    const asked = github.calls.length;
+    let looked = 0;
+    const counted: PullsOf = (each) => new Pulls(each, SLUG, () => {
+      looked++;
+      return { problem: 'niyam could not act as the agent (x); run `niyam doctor`' };
+    }, false);
+    assert.deepEqual(await hook(sys, bash(w.work, 'git push'), counted), { code: 0, out: [], err: [] });
+    assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work }), counted), { code: 0, out: [], err: [] });
+    assert.equal(github.calls.length, asked);
+    assert.equal(looked, 0);
+  });
+
+  it('(18) keeps branch names that differ only by / and _ apart', async () => {
+    assert.notEqual(statePath(w.work, 'claude/a'), statePath(w.work, 'claude_a'));
+    assert.match(statePath(w.work, 'claude/a'), /\/\.tmp\/pr-autocreate\/claude_a-[0-9a-f]{12}\.json$/);
+    w.git('checkout', '-q', '-b', 'claude/a');
+    w.git('push', '-q', '-u', 'origin', 'claude/a');
+    w.git('checkout', '-q', '-b', 'claude_a');
+    w.git('push', '-q', '-u', 'origin', 'claude_a');
+    await hook(sys, input('Stop', { cwd: w.work }));
+    w.git('checkout', '-q', 'claude/a');
+    await hook(sys, input('Stop', { cwd: w.work }));
+    assert.deepEqual([record(w.work, 'claude/a').branch, record(w.work, 'claude_a').branch], ['claude/a', 'claude_a']);
+    assert.equal(github.count('POST', 'pulls'), 2);
+  });
+
+  it('(6) tells another session once, at Stop, by holding it (exit 2)', async () => {
+    await hook(sys, bash(w.work, 'git push'));
+    const got = await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
+    assert.equal(got.code, 2);
+    assert.match(got.err.join('\n'), /^PR #100 .*Its body is still the automatic placeholder/);
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }))).code, 0);
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work, stop_hook_active: true, session_id: 's3' }))).code, 0);
+  });
+
+  it("(6b) words the placeholder by the pull request's body now", async () => {
+    await hook(sys, bash(w.work, 'git push'));
+    (github.pulls[0] as { body: string | null }).body = 'The real description.';
+    const replaced = await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
+    assert.doesNotMatch(replaced.err.join('\n'), /placeholder/);
+    github.bodyStatus = 500;
+    const unknown = await hook(sys, input('Stop', { cwd: w.work, session_id: 's3' }));
+    assert.match(unknown.err.join('\n'), /If its body is still the automatic placeholder, replace it/);
+    (github.pulls[0] as { body: string | null }).body = null;
+    github.bodyStatus = 200;
+    const empty = await hook(sys, input('Stop', { cwd: w.work, session_id: 's4' }));
+    assert.doesNotMatch(empty.err.join('\n'), /placeholder/);
+  });
+
+  it('(7) names an open pull request it did not open, and opens none', async () => {
+    github.pulls.push({ number: 7, head: 'feature', state: 'open', merged_at: null, body: 'x' });
+    const got = await hook(sys, input('Stop', { cwd: w.work }));
+    assert.equal(got.code, 2);
+    assert.match(got.err.join('\n'), /^PR #7 \(\S+\) is open for branch feature\.\n/);
+    assert.match(got.err.join('\n'), /2\. Only if this session itself ran the `gh pr create`/);
+    assert.equal(github.count('POST', 'pulls'), 0);
+  });
+
+  it('(8) opens none for a branch with a merged pull request, and says why once', async () => {
+    sys = machine(github, w.dir);
+    github.pulls.push({ number: 5, head: 'feature', state: 'closed', merged_at: '2026-11-01T00:00:00Z', body: '' });
+    const settings = join(w.work, '.github');
+    mkdirSync(settings);
+    writeFileSync(join(settings, 'niyam.json'), JSON.stringify({ prAutocreate: { retired: 'https://example.invalid/retire' } }));
+    const got = await hook(sys, bash(w.work, 'git push'));
+    assert.equal(context(got.out), 'Branch feature already has MERGED PR #5, so no new PR was opened: a merged PR retires its branch (https://example.invalid/retire).');
+    assert.equal(github.count('POST', 'pulls'), 0);
+    assert.deepEqual(record(w.work, 'feature').notes, []);
+    assert.deepEqual((await hook(sys, bash(w.work, 'git push'))).out, []);
+    assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work })), { code: 0, out: [], err: [] });
+  });
+
+  it('(9) opens none for a branch whose pull request was closed unmerged', async () => {
+    github.pulls.push({ number: 6, head: 'feature', state: 'closed', merged_at: null, body: '' });
+    const got = await hook(sys, bash(w.work, 'git push'));
+    assert.equal(context(got.out), "Branch feature's PR #6 was closed without merging, so no new PR was opened; reopening it is the user's call.");
+    assert.equal(github.count('POST', 'pulls'), 0);
+  });
+
+  it('(10) fails open when GitHub fails, keeps nothing, and tries again next time', async () => {
+    github.queued.push({ status: 502, json: null });
+    const got = await hook(sys, bash(w.work, 'git push'));
+    assert.deepEqual(got, { code: 0, out: [], err: ['pr-autocreate: could not list PRs for feature (GitHub answered 502 listing pull requests); will retry'] });
+    assert.deepEqual(readdirSync(join(w.work, '.tmp/pr-autocreate')).filter((name) => name.endsWith('.json')), []);
+    github.queued.push(new Error('fetch failed'));
+    assert.match((await hook(sys, bash(w.work, 'git push'))).err.join(''), /\(fetch failed\); will retry/);
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 2);
+  });
+
+  it('(11) leaves subagents, protected branches and malformed input alone', async () => {
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work, agent_id: 'sub' }))).code, 0);
+    w.git('checkout', '-q', 'main');
+    assert.equal((await hook(sys, bash(w.work, 'git push'))).code, 0);
+    assert.equal((await hook(sys, bash(w.work, 'git push origin main'))).code, 0);
+    assert.equal(github.calls.length, 0);
+    assert.deepEqual(await hook(sys, '{not json'), { code: 0, out: [], err: ['pr-autocreate: hook input is not valid JSON; nothing done'] });
+    assert.deepEqual(await hook(sys, '[1]'), { code: 0, out: [], err: ['pr-autocreate: hook input is not a JSON object; nothing done'] });
+    assert.equal((await hook(sys, '')).code, 0);
+    assert.equal((await hook(sys, input('Stop', { cwd: join(w.dir, 'nowhere') }))).code, 0);
+    assert.equal((await hook(sys, input('Stop', { cwd: w.dir }))).code, 0);
+    assert.equal((await hook({ ...sys, env: {} }, input('Stop', { cwd: '' }))).code, 0);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('finds the repository from CLAUDE_PROJECT_DIR when the input names no folder', async () => {
+    const got = await hook({ ...sys, env: { ...sys.env, CLAUDE_PROJECT_DIR: w.work } }, input('Stop'));
+    assert.equal(got.code, 2);
+  });
+
+  it('leaves a merge-queue branch and one whose upstream is another remote alone', async () => {
+    w.git('push', '-q', 'origin', 'feature:mergify/merge-queue/x');
+    assert.equal((await hook(sys, bash(w.work, 'git push origin HEAD:mergify/merge-queue/x'))).code, 0);
+    w.git('remote', 'add', 'fork', w.bare);
+    w.git('push', '-q', '-u', 'fork', 'feature');
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it("does nothing when the remote's branch is not in HEAD, or adds nothing to main", async () => {
+    w.git('checkout', '-q', '-b', 'elsewhere', 'main');
+    w.git('branch', '-q', '--set-upstream-to', 'origin/feature');
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
+    w.git('push', '-q', '-u', 'origin', 'elsewhere');
+    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('(15) honours an explicit destination refspec', async () => {
+    w.git('push', '-q', 'origin', 'HEAD:other');
+    await hook(sys, bash(w.work, 'git push origin HEAD:refs/heads/other'));
+    assert.equal((github.calls.find((call) => call.method === 'POST')?.body as { head: string }).head, 'other');
+  });
+
+  it('(16) reads `git -C` as the repository, not the hook folder', async () => {
+    const got = await hook(sys, bash(w.dir, 'git -C work push'));
+    assert.equal(got.code, 0);
+    assert.equal(github.count('POST', 'pulls'), 1);
+  });
+
+  it('(17) leaves a push it cannot name exactly to the watcher', async () => {
+    github.pulls.push({ number: 9, head: 'feature', state: 'open', merged_at: null, body: '' });
+    for (const command of ['git push --all', 'git push origin a b', 'git push fork feature', 'git push origin "$TARGET"', 'git --git-dir=.git push', 'git -C "$DIR" push', 'git push origin refs/tags/v1', "git push 'unclosed"]) {
+      assert.deepEqual(await hook(sys, bash(w.work, command)), { code: 0, out: [], err: [] }, command);
+    }
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('(20) in a cloud session names the pull request and never holds Stop', async () => {
+    const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
+    const got = await hook(cloud, input('Stop', { cwd: w.work }), viaToken(true));
+    assert.equal(got.code, 0);
+    const said = (JSON.parse(got.out[0] as string) as { systemMessage: string }).systemMessage;
+    assert.match(said, /^PR #100 .*\(gh api -X PATCH repos\/example-org\/example-app\/pulls\/100 -F body=@FILE\)/);
+    assert.match(said, /This cloud session has no Autofix/);
+  });
+
+  it('opens a draft when the settings say so, and names the footer', async () => {
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { draft: true, footer: '🤖 Generated', describe: '`/ship` step 9' } }));
+    const got = await hook(sys, bash(w.work, 'git push'));
+    const body = github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean; body: string };
+    assert.equal(body.draft, true);
+    assert.match(body.body, /full description \(`\/ship` step 9\)\./);
+    assert.match(body.body, /\n\n🤖 Generated\n$/);
+    assert.match(context(got.out), /real description \(`\/ship` step 9\)/);
+    // A draft the settings ask for, with one slice named: nothing is held.
+    assert.doesNotMatch(body.body, /Opened as a draft/);
+    assert.doesNotMatch(context(got.out), /was opened as a draft/);
+  });
+
+  describe("a branch carrying another slice's work (pr-watcher-hold-peer-work)", () => {
+    const opened = (): { draft: boolean; body: string } => github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean; body: string };
+
+    it('opens a draft when its own commits name two slices, says which in the body and the note, and says the note once', async () => {
+      w.commit("✨ feat: a peer's change", 'Slice: #8');
+      w.git('push', '-q');
+      const got = await hook(sys, bash(w.work, 'git push'));
+      assert.equal(opened().draft, true);
+      assert.match(opened().body, /\n\nOpened as a draft: its own commits name 2 slices \(#7, #8\), so it may carry another slice's work\. The session marks it ready with `gh pr ready` and this pull request's number once its description is written\.\n\n## Commits\n/);
+      // The placeholder still names no slice, so Work rules still fails it.
+      assert.doesNotMatch(opened().body, /^Slice:/m);
+      const said = context(got.out);
+      assert.match(said, /^PR #100 \(.*\) was opened automatically/);
+      assert.match(said, /\nPR #100 was opened as a draft: its own commits name 2 slices \(#7, #8\), so it may carry another slice's work\. Once its description is written, mark it ready with `gh pr ready 100`\.$/);
+      assert.deepEqual(record(w.work, 'feature').notes, []);
+    });
+
+    it('opens a draft when they name none', async () => {
+      w.git('checkout', '-q', '-b', 'loose', 'main');
+      w.commit('🐛 fix: no trailer');
+      w.git('push', '-q', '-u', 'origin', 'loose');
+      const got = await hook(sys, bash(w.work, 'git push'));
+      assert.equal(opened().draft, true);
+      assert.match(opened().body, /Opened as a draft: its own commits name no slice in a `Slice:` trailer, so it may carry another slice's work\./);
+      assert.match(context(got.out), /PR #100 was opened as a draft: its own commits name no slice/);
+    });
+
+    it('opens ready by the commits ahead of the base alone: a slice the base already has is not the branch\'s', async () => {
+      w.git('checkout', '-q', 'main');
+      w.commit('🔧 chore: earlier work', 'Slice: #3');
+      w.git('push', '-q', 'origin', 'main');
+      w.git('checkout', '-q', '-b', 'next');
+      w.commit('✨ feat: the next change', 'Slice: #9');
+      w.git('push', '-q', '-u', 'origin', 'next');
+      const got = await hook(sys, bash(w.work, 'git push'));
+      assert.equal(opened().draft, false);
+      assert.doesNotMatch(opened().body, /Opened as a draft/);
+      assert.doesNotMatch(context(got.out), /was opened as a draft/);
+    });
+
+    it('says the note with the instruction when Stop tells it', async () => {
+      w.commit("✨ feat: a peer's change", 'Slice: #8');
+      w.git('push', '-q');
+      const got = await hook(sys, input('Stop', { cwd: w.work }));
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), /\nPR #100 was opened as a draft: .*`gh pr ready 100`\.$/);
+    });
+
+    it('in a cloud session asks the user to mark it ready, since gh pr ready needs GraphQL', async () => {
+      const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
+      w.commit("✨ feat: a peer's change", 'Slice: #8');
+      w.git('push', '-q');
+      const said = context((await hook(cloud, bash(w.work, 'git push'), viaToken(true))).out);
+      assert.match(said, /Once its description is written, ask the user to mark it ready: `gh pr ready 100` needs GraphQL, which this cloud session's GitHub proxy refuses\.$/);
+    });
+
+    it('fails toward a draft when git cannot read the commits', async () => {
+      const { sys: fakeSys, github: fakeHub } = (() => {
+        const each = new FakeSys();
+        const hub = new FakeGitHub();
+        each.http = hub.http as FakeSys['http'];
+        each.execOverride = (call) => (call.command === 'git' ? { code: 1, stdout: '', stderr: '' } : undefined);
+        return { sys: each, github: hub };
+      })();
+      const state = await ensurePr(fakeSys, ROOT, autocreateSettings({}), 'feature', SHA, new Pulls(fakeSys, SLUG, 't', false));
+      assert.equal((fakeHub.calls.find((call) => call.method === 'POST')?.body as { draft: boolean }).draft, true);
+      assert.match(JSON.stringify(state), /PR #100 was opened as a draft: its own commits name no slice/);
+    });
+  });
+
+  it('says nothing done when the settings cannot be read', async () => {
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), '{');
+    const got = await hook(sys, bash(w.work, 'git push'));
+    assert.equal(got.code, 0);
+    assert.match(got.err.join(''), /^pr-autocreate: \.github\/niyam\.json cannot be read: .*; nothing done$/);
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { draft: 'yes' } }));
+    assert.match((await hook(sys, bash(w.work, 'git push'))).err.join(''), /prAutocreate"\.draft must be true or false; nothing done/);
+  });
+
+  it('says why when GitHub cannot be asked, and when the decision throws', async () => {
+    const refused: PullsOf = (each) => new Pulls(each, SLUG, () => ({ problem: 'niyam could not act as the agent (x); run `niyam doctor`' }), false);
+    assert.deepEqual(await hook(sys, bash(w.work, 'git push'), refused), { code: 0, out: [], err: ['pr-autocreate: could not list PRs for feature (niyam could not act as the agent (x); run `niyam doctor`); will retry'] });
+    assert.deepEqual((await hook(sys, bash(w.work, 'git push'), () => ({ problem: 'origin is not a github.com repository' }))).err, ['pr-autocreate: origin is not a github.com repository']);
+    const throwing: PullsOf = (each) => Object.assign(new Pulls(each, SLUG, 't', false), { list: () => Promise.reject(new Error('boom')) });
+    assert.deepEqual((await hook(sys, bash(w.work, 'git push'), throwing)).err, ['pr-autocreate: PR check failed for feature (boom)']);
+  });
+
+  it('does not instruct when the ack cannot be written, so a session never loops', async () => {
+    mkdirSync(join(w.work, '.tmp/pr-autocreate'), { recursive: true });
+    writeFileSync(join(w.work, '.tmp/pr-autocreate/acks'), 'a file where the folder goes');
+    const got = await hook(sys, input('Stop', { cwd: w.work }));
+    assert.equal(got.code, 0);
+    assert.match(got.err.join(''), /^pr-autocreate: could not record the Autofix ack \(.*\); not instructing, to avoid a loop$/);
+  });
+});
+
+describeLater("pr-autocreate claude-hook and sarathi's Auto-fix list", () => {
+  afterEach(reported);
+  let w: ReturnType<typeof world>;
+  let github: FakeGitHub;
+  let sys: ReturnType<typeof machine>;
+  const PR = 'https://github.com/example-org/example-app/pull/100';
+  const STEP4 = /\n4\. If auto_fix is not true, call mcp__ccd_pr__set_monitor with \{"auto_fix": true, "address_comments": true, "url": "https:\/\/github\.com\/example-org\/example-app\/pull\/100"\}\./;
+  beforeEach(() => {
+    w = world();
+    github = new FakeGitHub();
+    sys = machine(github, w.dir);
+  });
+  const list = (dir = join(w.dir, '.local/state/sarathi/autofix'), session = 's1'): Record<string, unknown>[] => {
+    const file = join(dir, `${session}.jsonl`);
+    if (!existsSync(file)) return [];
+    return readFileSync(file, 'utf8').split('\n').filter((text) => text.startsWith('{')).map((text) => JSON.parse(text) as Record<string, unknown>);
+  };
+  const listOn = (): void => {
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { autofixList: true } }));
+  };
+
+  it('puts the pull request on the list, and with the setting off says the whole instruction as before', async () => {
+    const got = await hook(sys, bash(w.work, 'git push'));
+    assert.deepEqual(list(), [{ at: '2026-11-15T10:00:00.000Z', pr: 'example-org/example-app#100', url: PR, event: 'opened', source: AUTOFIX_SOURCE }]);
+    const said = context(got.out);
+    assert.match(said, STEP4);
+    assert.match(said, /or get_status\/bind_pr\/set_monitor still fails, tell the user/);
+    const opened = (said.split('\n')[0] as string).slice(`PR #100 (${PR}) `.length);
+    assert.equal(said, reminder({ number: 100, url: PR, state: 'OPEN' }, opened, true, false));
+  });
+
+  it('with "autofixList" leaves out only the set_monitor step', async () => {
+    listOn();
+    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
+    assert.equal(list().length, 1);
+    assert.doesNotMatch(said, /\n4\./);
+    assert.doesNotMatch(said, /retry set_monitor/);
+    assert.match(said, /^PR #100 .*Its body is still the automatic placeholder: replace it/);
+    assert.match(said, /This PR is on this session's sarathi Auto-fix list, and sarathi's warning gives the mcp__ccd_pr__set_monitor call/);
+    assert.match(said, /\n1\. .*ToolSearch with query "select:mcp__ccd_pr__get_status,mcp__ccd_pr__bind_pr,mcp__ccd_pr__set_monitor"/);
+    assert.match(said, /\n2\. Write this line in your reply text, exactly: <pr-created>https:\/\/github\.com\/example-org\/example-app\/pull\/100<\/pr-created>\n/);
+    assert.match(said, /\n3\. Call mcp__ccd_pr__get_status\. If it reports no bound PR, call mcp__ccd_pr__bind_pr with url https:\/\/github\.com\/example-org\/example-app\/pull\/100\.\n/);
+    assert.match(said, /or get_status\/bind_pr still fails, tell the user in one line that Autofix could not be enabled/);
+  });
+
+  it('says the whole instruction when the row cannot be written, or the session names no list', async () => {
+    listOn();
+    const blocked = join(w.dir, 'not-a-folder');
+    writeFileSync(blocked, 'a file where the folder goes');
+    const unwritable = machine(github, w.dir, { SARATHI_AUTOFIX_DIR: join(blocked, 'autofix') });
+    assert.match(context((await hook(unwritable, bash(w.work, 'git push'))).out), STEP4);
+    // An id sarathi refuses (a slash, too long), or none.
+    for (const session of ['a/b', 'x'.repeat(129), '']) {
+      const said = context((await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: session }))).out);
+      assert.match(said, STEP4);
+    }
+    assert.deepEqual(list(), []);
+  });
+
+  it('adds no second row for a pull request the list names already, whoever put it there', async () => {
+    const dir = join(w.dir, '.local/state/sarathi/autofix');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 's1.jsonl'), `not json\n${JSON.stringify({ at: 'x', pr: 'Example-Org/Example-App#100', url: PR, event: 'refused', source: 'mcp__ccd_pr__set_monitor' })}\n`);
+    listOn();
+    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
+    assert.doesNotMatch(said, /\n4\./);
+    await hook(sys, input('Stop', { cwd: w.work }));
+    assert.deepEqual(list().map((row) => row.event), ['refused']);
+  });
+
+  describe('once the list shows Auto-fix on', () => {
+    const dir = (): string => join(w.dir, '.local/state/sarathi/autofix');
+    const row = (event: string, pr = 'example-org/example-app#100'): string => `${JSON.stringify({ at: 'x', pr, url: PR, event, source: 'sarathi' })}\n`;
+    const rows = (...lines: string[]): void => {
+      mkdirSync(dir(), { recursive: true });
+      writeFileSync(join(dir(), 's2.jsonl'), lines.join(''));
+    };
+    const ack = (): string => join(w.work, STATE_DIR, 'acks', 's2-100');
+    const stop = (): Promise<{ code: number; out: string[]; err: string[] }> => hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
+    // Another session's push opens #100; s2 then stops on its branch.
+    const opened = async (): Promise<void> => {
+      await hook(sys, bash(w.work, 'git push'));
+    };
+
+    it('says nothing at Stop and writes no ack; an `off` later gets the instruction once', async () => {
+      listOn();
+      await opened();
+      // A partial line, another pull request, the PR in other letters, then rows that leave its state alone.
+      rows('{"pr": "example-org/exam', '\n', row('on', 'example-org/example-app#10'), '[1]\n', row('on', 'Example-Org/Example-App#100'), row('warned'), row('opened'));
+      assert.deepEqual(await stop(), { code: 0, out: [], err: [] });
+      assert.equal(existsSync(ack()), false);
+      assert.equal(readFileSync(join(dir(), 's2.jsonl'), 'utf8').split('\n').filter(Boolean).length, 6, 'no row added');
+      writeFileSync(join(dir(), 's2.jsonl'), row('off'), { flag: 'a' });
+      const told = await stop();
+      assert.equal(told.code, 2);
+      assert.match(told.err.join('\n'), /This PR is on this session's sarathi Auto-fix list/);
+      assert.doesNotMatch(told.err.join('\n'), /\n4\./);
+      assert.equal(existsSync(ack()), true);
+      assert.equal((await stop()).code, 0);
+    });
+
+    it('is quiet after a push too', async () => {
+      listOn();
+      rows(row('on'));
+      const got = await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: 's2' }));
+      assert.deepEqual(got, { code: 0, out: [], err: [] });
+      assert.equal(existsSync(ack()), false);
+    });
+
+    it('still tells a session whose list shows the pull request refused', async () => {
+      listOn();
+      await opened();
+      rows(row('on'), row('refused'));
+      const got = await stop();
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), /Autofix must be ON/);
+    });
+
+    it('still tells a session with no list, which the hook starts with an `opened` row', async () => {
+      listOn();
+      await opened();
+      const got = await stop();
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), /Autofix must be ON/);
+      assert.deepEqual(list(undefined, 's2').map((one) => one.event), ['opened']);
+    });
+
+    it('with "autofixList" off, tells the whole instruction as before', async () => {
+      await opened();
+      rows(row('on'));
+      const got = await stop();
+      assert.equal(got.code, 2);
+      assert.match(got.err.join('\n'), STEP4);
+    });
+
+    it("reads the state as sarathi's fold does, and none from a list it cannot read", () => {
+      rows(row('opened'), row('on'), row('opened'), row('warned'));
+      assert.equal(autofixState(sys, 's2', PR), 'on');
+      rows(row('opened'), row('refused'), 'null\n', '"text"\n', `${JSON.stringify({ pr: 'example-org/example-app#100', event: 7 })}\n`);
+      assert.equal(autofixState(sys, 's2', PR), 'refused');
+      rows(row('warned'));
+      assert.equal(autofixState(sys, 's2', PR), undefined);
+      assert.equal(autofixState(sys, 's3', PR), undefined, 'no list');
+      mkdirSync(join(dir(), 's4.jsonl'));
+      assert.equal(autofixState(sys, 's4', PR), undefined, 'a folder where the list goes');
+      for (const [session, url] of [[undefined, PR], ['a/b', PR], ['s2', 'not a url']] as const) assert.equal(autofixState(sys, session, url), undefined);
+    });
+  });
+
+  it('adds one row for a session told before, and none in a cloud session', async () => {
+    await hook(sys, bash(w.work, 'git push'));
+    await hook(sys, input('Stop', { cwd: w.work }));
+    await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
+    assert.equal(list().length, 1);
+    assert.equal(list(undefined, 's2').length, 1);
+    const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
+    await hook(cloud, input('Stop', { cwd: w.work, session_id: 's3' }), viaToken(true));
+    assert.deepEqual(list(undefined, 's3'), []);
+  });
+
+  it('lists a pull request it found on the branch, and still asks for the tag only if the session opened it', async () => {
+    github.pulls.push({ number: 7, head: 'feature', state: 'open', merged_at: null, body: 'Real.' });
+    listOn();
+    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
+    assert.deepEqual(list().map((row) => row.pr), ['example-org/example-app#7']);
+    assert.match(said, /\n2\. Only if this session itself ran the `gh pr create` that opened this PR/);
+    assert.doesNotMatch(said, /\n4\./);
+  });
+
+  it('finds the list where sarathi does: SARATHI_AUTOFIX_DIR, then XDG_STATE_HOME, then ~/.local/state', () => {
+    const at = (env: Record<string, string>): string => autofixDir(machine(github, '/home/u', env));
+    assert.equal(at({ SARATHI_AUTOFIX_DIR: '/x/list', XDG_STATE_HOME: '/state' }), '/x/list');
+    assert.equal(at({ SARATHI_AUTOFIX_DIR: '', XDG_STATE_HOME: '/state' }), '/state/sarathi/autofix');
+    assert.equal(at({ XDG_STATE_HOME: '' }), '/home/u/.local/state/sarathi/autofix');
+    for (const url of ['not a url', 'http://github.com/a/b/pull/1', 'https://github.com/a/b/issues/1', 'https://github.com/a/b/pull/x', 'https://github.com/a/b%20c/pull/1']) {
+      assert.equal(listForAutofix(sys, 's1', url), false, url);
+    }
+    assert.equal(listForAutofix(sys, 's1', 'https://github.com/a/b/pull/12/files'), true);
+    assert.deepEqual(list().map((row) => [row.pr, row.url]), [['a/b#12', 'https://github.com/a/b/pull/12']]);
+  });
+});
+
+describeLater('pr-autocreate spawn-watchers and watch (real git, GitHub faked)', () => {
+  afterEach(reported);
+  let w: ReturnType<typeof world>;
+  let github: FakeGitHub;
+  let sys: ReturnType<typeof machine>;
+  beforeEach(() => {
+    w = world();
+    github = new FakeGitHub();
+    sys = machine(github, w.dir);
+  });
+
+  const zero = '0'.repeat(40);
+  async function spawn(lines: string, args = ['--root', w.work, '--remote', 'origin'], on: Sys = sys): Promise<{ code: number; out: string[]; err: string[] }> {
+    const seen = capture();
+    const code = await spawnWatchers(on, seen.io, args, lines);
+    return { code, out: seen.out, err: seen.err };
+  }
+
+  it("(13) starts one detached watcher per pushed branch from git's ref lines", async () => {
+    const got = await spawn([
+      `refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`,
+      `refs/heads/x ${SHA} refs/heads/main ${OTHER}`,
+      `(delete) ${zero} refs/heads/gone ${OTHER}`,
+      `refs/tags/v1 ${SHA} refs/tags/v1 ${zero}`,
+      'not a ref line',
+      '',
+    ].join('\n'));
+    assert.deepEqual(got, { code: 0, out: ['→ PR watcher started for feature: a ready PR opens, or a draft where its own commits name no slice or more than one, once the push lands.'], err: [] });
+    assert.deepEqual(sys.detached, [[sys.runtime.node, sys.runtime.cli, 'pr-autocreate', 'watch', '--root', w.work, '--branch', 'feature', '--sha', SHA, join(w.work, '.tmp/pr-autocreate/watch.log')]]);
+    assert.equal(readFileSync(optoutPath(w.work, 'feature'), 'utf8'), `${SHA} 0\n`);
+  });
+
+  it('starts none in CI, for another remote, or without --root', async () => {
+    const line = `refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`;
+    assert.equal((await spawn(line, ['--root', w.work, '--remote', 'origin'], { ...sys, env: { CI: 'true' } })).code, 0);
+    assert.equal((await spawn(line, ['--root', w.work, '--remote', 'fork'])).code, 0);
+    assert.equal((await spawn(line, ['--root', w.work])).code, 0);
+    assert.deepEqual(await spawn(line, ['--remote', 'origin']), { code: 0, out: [], err: ['pr-autocreate: spawn-watchers needs --root <repository>; no PR watcher started'] });
+    assert.deepEqual((await spawn(line, ['--root'])).err, ['pr-autocreate: --root needs a value; no PR watcher started']);
+    assert.deepEqual((await spawn(line, ['--nope', 'x'])).err, ['pr-autocreate: unexpected argument "--nope"; no PR watcher started']);
+    assert.deepEqual((await spawn(line, ['--root=a', '--root=b'])).err, ['pr-autocreate: --root is given twice; no PR watcher started']);
+    assert.deepEqual(sys.detached, []);
+  });
+
+  it('starts none when the settings cannot be read, and says a draft when they ask for one', async () => {
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: [] }));
+    const line = `refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`;
+    assert.match((await spawn(line)).err.join(''), /"prAutocreate" must be an object; no PR watcher started/);
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { draft: true } }));
+    assert.deepEqual((await spawn(line)).out, ['→ PR watcher started for feature: a draft PR opens once the push lands.']);
+  });
+
+  it('says so when a watcher cannot start, and goes on', async () => {
+    const failing = { ...sys, detach: () => { throw new Error('spawn EACCES'); } };
+    assert.deepEqual(await spawn(`refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`, undefined, failing), { code: 0, out: ['⚠️  Could not start the PR watcher for feature (spawn EACCES); open its PR yourself.'], err: [] });
+  });
+
+  async function watching(args: string[], pullsOf: PullsOf = viaToken()): Promise<string[]> {
+    const seen = capture();
+    assert.equal(await watch(sys, seen.io, args, pullsOf), 0);
+    return seen.out;
+  }
+
+  it('(12) opens the pull request once the push lands', async () => {
+    const sha = w.git('rev-parse', 'HEAD');
+    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', sha]);
+    assert.deepEqual(out, ['2026-11-15T10:00:00 feature: PR #100 created (https://github.com/example-org/example-app/pull/100)']);
+    // A second watcher for the same commit reads the record and asks GitHub nothing.
+    const asked = github.calls.length;
+    assert.deepEqual(await watching(['--root', w.work, '--branch', 'feature', '--sha', sha]), out);
+    assert.equal(github.calls.length, asked);
+    github.pulls.push({ number: 4, head: 'other', state: 'open', merged_at: null, body: '' });
+    w.git('push', '-q', 'origin', 'HEAD:other');
+    assert.deepEqual(await watching(['--root', w.work, '--branch', 'other', '--sha', sha]), ['2026-11-15T10:00:00 other: PR #4 exists (https://github.com/example-org/example-app/pull/4)']);
+  });
+
+  it("opens a draft for a branch carrying another slice's work, and its log line says why", async () => {
+    w.commit("✨ feat: a peer's change", 'Slice: #8');
+    w.git('push', '-q');
+    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', w.git('rev-parse', 'HEAD')]);
+    assert.equal((github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean }).draft, true);
+    assert.deepEqual(out, ["2026-11-15T10:00:00 feature: PR #100 created (https://github.com/example-org/example-app/pull/100) PR #100 was opened as a draft: its own commits name 2 slices (#7, #8), so it may carry another slice's work. Once its description is written, mark it ready with `gh pr ready 100`."]);
+  });
+
+  it('gives up when the push never lands, in the line push instructions look for', async () => {
+    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', OTHER, '--timeout', '10', '--interval', '5']);
+    assert.deepEqual(out, [`2026-11-15T10:00:10 feature: gave up: ${OTHER.slice(0, 8)} never reached refs/heads/feature within 10s; no PR opened`]);
+    assert.equal(github.calls.length, 0);
+  });
+
+  it('(19) retries a transient GitHub failure after the push landed, then gives up after its window', async () => {
+    const sha = w.git('rev-parse', 'HEAD');
+    github.queued.push({ status: 503, json: null });
+    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', sha, '--retry-interval', '30']);
+    assert.deepEqual(out, ['2026-11-15T10:00:00 feature: could not list PRs for feature (GitHub answered 503 listing pull requests); will retry; retrying', '2026-11-15T10:00:30 feature: PR #100 created (https://github.com/example-org/example-app/pull/100)']);
+    const fresh = world();
+    sys = machine(github, fresh.dir, { NIYAM_PR_RETRY_WINDOW: '60', NIYAM_PR_RETRY_INTERVAL: '30' });
+    const failing: PullsOf = () => ({ problem: 'no GitHub token' });
+    const gaveUp = await watching(['--root', fresh.work, '--branch', 'feature', '--sha', fresh.git('rev-parse', 'HEAD')], failing);
+    assert.equal(gaveUp.at(-1), '2026-11-15T10:01:00 feature: gave up: no GitHub token, after 60s of retries');
+    const throwing: PullsOf = (each) => Object.assign(new Pulls(each, SLUG, 't', false), { list: () => Promise.reject(new Error('boom')) });
+    assert.match((await watching(['--root', fresh.work, '--branch', 'feature', '--sha', fresh.git('rev-parse', 'HEAD'), '--retry-window', '0'], throwing)).at(-1) ?? '', /feature: gave up: boom, after 0s/);
+  });
+
+  it('gives up on a branch with no commits ahead of the base', async () => {
+    w.git('checkout', '-q', '-b', 'empty', 'main');
+    w.git('push', '-q', 'origin', 'empty');
+    const out = await watching(['--root', w.work, '--branch', 'empty', '--sha', w.git('rev-parse', 'HEAD')]);
+    assert.deepEqual(out, ['2026-11-15T10:00:00 empty: Branch empty has no commits ahead of main, so no PR was opened.']);
+    assert.equal(github.count('POST', 'pulls'), 0);
+  });
+
+  it('says what it could not read, and opens nothing', async () => {
+    assert.deepEqual(await watching(['--root', w.work]), ['2026-11-15T10:00:00 watch: watch needs --branch; no PR opened']);
+    assert.deepEqual(await watching(['--root', w.work, '--branch', 'b', '--sha', SHA, '--timeout', 'soon']), ['2026-11-15T10:00:00 watch: --timeout must be a number of seconds; no PR opened']);
+    mkdirSync(join(w.work, '.github'));
+    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { nope: 1 } }));
+    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', w.git('rev-parse', 'HEAD')]);
+    assert.match(out[0] as string, /feature: gave up: .*unknown key "nope".*; no PR opened$/);
+  });
+
+  it('reads its timings from flags first, then NIYAM_PR_WATCH_* variables', () => {
+    const on = new FakeSys();
+    on.env = { NIYAM_PR_WATCH_TIMEOUT: '30', NIYAM_PR_WATCH_INTERVAL: ' ' };
+    assert.deepEqual(watchArgs(on, ['--root', 'r', '--branch', 'b', '--sha', 's', '--interval=1']), { root: 'r', branch: 'b', sha: 's', timeout: 30, interval: 1, retryWindow: 600, retryInterval: 30 });
+    assert.throws(() => watchArgs(on, ['--root', 'r', '--branch', 'b', '--sha', 's', '--retry-window', '-1']), /--retry-window must be a number of seconds/);
+  });
+
+  describe('(21) the opt-out', () => {
+    const optedOutLine = (): string => `refs/heads/feature ${w.git('rev-parse', 'HEAD')} refs/heads/feature ${OTHER}`;
+
+    it('records the choice before the refs are sent, and starts no watcher', async () => {
+      const got = await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
+      assert.deepEqual(got, { code: 0, out: [], err: [] });
+      assert.deepEqual(sys.detached, []);
+      assert.equal(readFileSync(optoutPath(w.work, 'feature'), 'utf8'), `${w.git('rev-parse', 'HEAD')} 1\n`);
+    });
+
+    it("keeps an older client's name working beside NIYAM_PR_AUTOCREATE", async () => {
+      mkdirSync(join(w.work, '.github'));
+      writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { optOut: ['LEGACY_PR_AUTOCREATE'] } }));
+      await spawn(optedOutLine(), undefined, { ...sys, env: { LEGACY_PR_AUTOCREATE: '0' } });
+      assert.match(readFileSync(optoutPath(w.work, 'feature'), 'utf8'), / 1\n$/);
+    });
+
+    it('gives an opted-out push no pull request at Stop, and finds the one the session opens itself', async () => {
+      await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
+      assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work })), { code: 0, out: [], err: [] });
+      assert.equal(github.count('POST', 'pulls'), 0);
+      assert.equal(typeof record(w.work, 'feature').optedOutAt, 'number');
+      // Within the recheck window GitHub is not asked again.
+      const asked = github.calls.length;
+      github.pulls.push({ number: 8, head: 'feature', state: 'open', merged_at: null, body: 'mine' });
+      assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
+      assert.equal(github.calls.length, asked);
+      sys.clock += 61_000;
+      const found = await hook(sys, input('Stop', { cwd: w.work }));
+      assert.equal(found.code, 2);
+      assert.match(found.err.join(''), /^PR #8 \(\S+\) is open for branch feature\./);
+    });
+
+    it('takes the opt-out back when the same commit is pushed without it', async () => {
+      await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
+      await hook(sys, input('Stop', { cwd: w.work }));
+      await spawn(optedOutLine());
+      assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 2);
+      assert.equal(github.count('POST', 'pulls'), 1);
+    });
+
+    it('refuses the push (3) when an opt-out cannot be written, and only warns for a push without one', async () => {
+      mkdirSync(optoutPath(w.work, 'feature'), { recursive: true });
+      const refused = await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
+      assert.equal(refused.code, 3);
+      assert.match(refused.out.join(''), /^❌ Could not record NIYAM_PR_AUTOCREATE=0 for feature \(.*\), so a PR could open for it at turn end; push refused\./);
+      const warned = await spawn(optedOutLine());
+      assert.equal(warned.code, 0);
+      assert.match(warned.out[0] as string, /^⚠️ {2}Could not record feature's push for the PR opt-out/);
+      assert.equal(sys.detached.length, 1);
+    });
+  });
+});
+
 describe('the opt-out record', () => {
   const root = ROOT;
   const path = optoutPath(root, 'feature');
@@ -959,710 +1647,7 @@ describe('niyam pr-autocreate', () => {
   });
 });
 
-describe('retiredBy and pushedRefs', () => {
-  const pull = (number: number, state: 'OPEN' | 'MERGED' | 'CLOSED') => ({ number, url: `https://github.com/${SLUG}/pull/${number}`, state });
-  it('a merged PR retires a branch only while none is open', () => {
-    assert.equal(retiredBy([]), undefined);
-    assert.equal(retiredBy([pull(1, 'CLOSED')]), undefined);
-    assert.equal(retiredBy([pull(2, 'OPEN'), pull(1, 'MERGED')]), undefined);
-    assert.deepEqual(retiredBy([pull(3, 'CLOSED'), pull(1, 'MERGED')]), pull(1, 'MERGED'));
-  });
-
-  it("reads git's pre-push ref lines: the remote branch of each real commit", () => {
-    assert.deepEqual(pushedRefs([`refs/heads/a ${SHA} refs/heads/b ${OTHER}`, `x ${'0'.repeat(40)} refs/heads/gone ${OTHER}`, `refs/tags/t ${SHA} refs/tags/t ${OTHER}`, '  ', 'a b c'].join('\n')), [
-      { localSha: SHA, branch: 'b', remoteSha: OTHER },
-    ]);
-  });
-});
-
-// The real-git suites below block the event loop in git, so on macOS, where stdout to a pipe is written
-// asynchronously, the in-process results above would reach the lane's reader only once the file ends. One turn of
-// the loop first lets them out, so a mutant they kill ends here.
-describe('pr-autocreate claude-hook (real git, GitHub faked)', () => {
-  before(reported);
-  afterEach(reported);
-
-  let w: ReturnType<typeof world>;
-  let github: FakeGitHub;
-  let sys: ReturnType<typeof machine>;
-  beforeEach(() => {
-    w = world();
-    github = new FakeGitHub();
-    sys = machine(github, w.dir);
-  });
-
-  it('(1) leaves a Bash call that pushes nothing alone', async () => {
-    assert.deepEqual(await hook(sys, bash(w.work, 'git status')), { code: 0, out: [], err: [] });
-    assert.deepEqual(await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Read' })), { code: 0, out: [], err: [] });
-    assert.deepEqual(await hook(sys, input('SessionStart', { cwd: w.work })), { code: 0, out: [], err: [] });
-    assert.equal(github.calls.length, 0);
-  });
-
-  it('(2) does nothing at Stop on a branch never pushed', async () => {
-    w.git('checkout', '-q', '-b', 'local-only');
-    w.commit('local');
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
-    assert.equal(github.calls.length, 0);
-  });
-
-  it('(3) leaves a background push to the Stop half', async () => {
-    assert.equal((await hook(sys, bash(w.work, 'git push', { run_in_background: true }))).code, 0);
-    assert.equal(github.calls.length, 0);
-  });
-
-  it('(4) opens a ready pull request for a foreground push that landed, and tells the session to switch Autofix on', async () => {
-    const got = await hook(sys, bash(w.work, 'git push origin feature'));
-    assert.equal(got.code, 0);
-    const [create] = github.calls.filter((call) => call.method === 'POST');
-    const body = create?.body as { head: string; base: string; title: string; body: string; draft: boolean };
-    assert.deepEqual([body.head, body.base, body.title, body.draft], ['feature', 'main', '✨ feat: the first change', false]);
-    assert.ok(body.body.startsWith(`${MARKER}\nOpened automatically when \`feature\` was pushed.`));
-    assert.match(body.body, /## Commits\n\n- ✨ feat: the first change \(`[0-9a-f]+`\)\n$/);
-    const said = context(got.out);
-    assert.match(said, /^PR #100 \(https:\/\/github\.com\/example-org\/example-app\/pull\/100\) was opened automatically for branch feature after the push landed\. Its body is still the automatic placeholder: replace it with the real description \(`gh pr edit --body-file`\)/);
-    assert.match(said, /2\. Write this line in your reply text, exactly: <pr-created>https:\/\/github\.com\/example-org\/example-app\/pull\/100<\/pr-created>/);
-    // The record the desktop app's mods read.
-    const kept = record(w.work, 'feature');
-    assert.deepEqual([kept.branch, kept.remoteSha, kept.created, kept.notes], ['feature', w.git('rev-parse', 'HEAD'), true, []]);
-    assert.deepEqual(kept.pr, { number: 100, url: 'https://github.com/example-org/example-app/pull/100', state: 'OPEN' });
-  });
-
-  it('(5) asks GitHub once per pushed commit and tells a session once, looking up no token when the record answers', async () => {
-    await hook(sys, bash(w.work, 'git push'));
-    const asked = github.calls.length;
-    let looked = 0;
-    const counted: PullsOf = (each) => new Pulls(each, SLUG, () => {
-      looked++;
-      return { problem: 'niyam could not act as the agent (x); run `niyam doctor`' };
-    }, false);
-    assert.deepEqual(await hook(sys, bash(w.work, 'git push'), counted), { code: 0, out: [], err: [] });
-    assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work }), counted), { code: 0, out: [], err: [] });
-    assert.equal(github.calls.length, asked);
-    assert.equal(looked, 0);
-  });
-
-  it('(18) keeps branch names that differ only by / and _ apart', async () => {
-    assert.notEqual(statePath(w.work, 'claude/a'), statePath(w.work, 'claude_a'));
-    assert.match(statePath(w.work, 'claude/a'), /\/\.tmp\/pr-autocreate\/claude_a-[0-9a-f]{12}\.json$/);
-    w.git('checkout', '-q', '-b', 'claude/a');
-    w.git('push', '-q', '-u', 'origin', 'claude/a');
-    w.git('checkout', '-q', '-b', 'claude_a');
-    w.git('push', '-q', '-u', 'origin', 'claude_a');
-    await hook(sys, input('Stop', { cwd: w.work }));
-    w.git('checkout', '-q', 'claude/a');
-    await hook(sys, input('Stop', { cwd: w.work }));
-    assert.deepEqual([record(w.work, 'claude/a').branch, record(w.work, 'claude_a').branch], ['claude/a', 'claude_a']);
-    assert.equal(github.count('POST', 'pulls'), 2);
-  });
-
-  it('(6) tells another session once, at Stop, by holding it (exit 2)', async () => {
-    await hook(sys, bash(w.work, 'git push'));
-    const got = await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
-    assert.equal(got.code, 2);
-    assert.match(got.err.join('\n'), /^PR #100 .*Its body is still the automatic placeholder/);
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }))).code, 0);
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work, stop_hook_active: true, session_id: 's3' }))).code, 0);
-  });
-
-  it("(6b) words the placeholder by the pull request's body now", async () => {
-    await hook(sys, bash(w.work, 'git push'));
-    (github.pulls[0] as { body: string | null }).body = 'The real description.';
-    const replaced = await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
-    assert.doesNotMatch(replaced.err.join('\n'), /placeholder/);
-    github.bodyStatus = 500;
-    const unknown = await hook(sys, input('Stop', { cwd: w.work, session_id: 's3' }));
-    assert.match(unknown.err.join('\n'), /If its body is still the automatic placeholder, replace it/);
-    (github.pulls[0] as { body: string | null }).body = null;
-    github.bodyStatus = 200;
-    const empty = await hook(sys, input('Stop', { cwd: w.work, session_id: 's4' }));
-    assert.doesNotMatch(empty.err.join('\n'), /placeholder/);
-  });
-
-  it('(7) names an open pull request it did not open, and opens none', async () => {
-    github.pulls.push({ number: 7, head: 'feature', state: 'open', merged_at: null, body: 'x' });
-    const got = await hook(sys, input('Stop', { cwd: w.work }));
-    assert.equal(got.code, 2);
-    assert.match(got.err.join('\n'), /^PR #7 \(\S+\) is open for branch feature\.\n/);
-    assert.match(got.err.join('\n'), /2\. Only if this session itself ran the `gh pr create`/);
-    assert.equal(github.count('POST', 'pulls'), 0);
-  });
-
-  it('(8) opens none for a branch with a merged pull request, and says why once', async () => {
-    sys = machine(github, w.dir);
-    github.pulls.push({ number: 5, head: 'feature', state: 'closed', merged_at: '2026-11-01T00:00:00Z', body: '' });
-    const settings = join(w.work, '.github');
-    mkdirSync(settings);
-    writeFileSync(join(settings, 'niyam.json'), JSON.stringify({ prAutocreate: { retired: 'https://example.invalid/retire' } }));
-    const got = await hook(sys, bash(w.work, 'git push'));
-    assert.equal(context(got.out), 'Branch feature already has MERGED PR #5, so no new PR was opened: a merged PR retires its branch (https://example.invalid/retire).');
-    assert.equal(github.count('POST', 'pulls'), 0);
-    assert.deepEqual(record(w.work, 'feature').notes, []);
-    assert.deepEqual((await hook(sys, bash(w.work, 'git push'))).out, []);
-    assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work })), { code: 0, out: [], err: [] });
-  });
-
-  it('(9) opens none for a branch whose pull request was closed unmerged', async () => {
-    github.pulls.push({ number: 6, head: 'feature', state: 'closed', merged_at: null, body: '' });
-    const got = await hook(sys, bash(w.work, 'git push'));
-    assert.equal(context(got.out), "Branch feature's PR #6 was closed without merging, so no new PR was opened; reopening it is the user's call.");
-    assert.equal(github.count('POST', 'pulls'), 0);
-  });
-
-  it('(10) fails open when GitHub fails, keeps nothing, and tries again next time', async () => {
-    github.queued.push({ status: 502, json: null });
-    const got = await hook(sys, bash(w.work, 'git push'));
-    assert.deepEqual(got, { code: 0, out: [], err: ['pr-autocreate: could not list PRs for feature (GitHub answered 502 listing pull requests); will retry'] });
-    assert.deepEqual(readdirSync(join(w.work, '.tmp/pr-autocreate')).filter((name) => name.endsWith('.json')), []);
-    github.queued.push(new Error('fetch failed'));
-    assert.match((await hook(sys, bash(w.work, 'git push'))).err.join(''), /\(fetch failed\); will retry/);
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 2);
-  });
-
-  it('(11) leaves subagents, protected branches and malformed input alone', async () => {
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work, agent_id: 'sub' }))).code, 0);
-    w.git('checkout', '-q', 'main');
-    assert.equal((await hook(sys, bash(w.work, 'git push'))).code, 0);
-    assert.equal((await hook(sys, bash(w.work, 'git push origin main'))).code, 0);
-    assert.equal(github.calls.length, 0);
-    assert.deepEqual(await hook(sys, '{not json'), { code: 0, out: [], err: ['pr-autocreate: hook input is not valid JSON; nothing done'] });
-    assert.deepEqual(await hook(sys, '[1]'), { code: 0, out: [], err: ['pr-autocreate: hook input is not a JSON object; nothing done'] });
-    assert.equal((await hook(sys, '')).code, 0);
-    assert.equal((await hook(sys, input('Stop', { cwd: join(w.dir, 'nowhere') }))).code, 0);
-    assert.equal((await hook(sys, input('Stop', { cwd: w.dir }))).code, 0);
-    assert.equal((await hook({ ...sys, env: {} }, input('Stop', { cwd: '' }))).code, 0);
-    assert.equal(github.calls.length, 0);
-  });
-
-  it('finds the repository from CLAUDE_PROJECT_DIR when the input names no folder', async () => {
-    const got = await hook({ ...sys, env: { ...sys.env, CLAUDE_PROJECT_DIR: w.work } }, input('Stop'));
-    assert.equal(got.code, 2);
-  });
-
-  it('leaves a merge-queue branch and one whose upstream is another remote alone', async () => {
-    w.git('push', '-q', 'origin', 'feature:mergify/merge-queue/x');
-    assert.equal((await hook(sys, bash(w.work, 'git push origin HEAD:mergify/merge-queue/x'))).code, 0);
-    w.git('remote', 'add', 'fork', w.bare);
-    w.git('push', '-q', '-u', 'fork', 'feature');
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
-    assert.equal(github.calls.length, 0);
-  });
-
-  it("does nothing when the remote's branch is not in HEAD, or adds nothing to main", async () => {
-    w.git('checkout', '-q', '-b', 'elsewhere', 'main');
-    w.git('branch', '-q', '--set-upstream-to', 'origin/feature');
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
-    w.git('push', '-q', '-u', 'origin', 'elsewhere');
-    assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
-    assert.equal(github.calls.length, 0);
-  });
-
-  it('(15) honours an explicit destination refspec', async () => {
-    w.git('push', '-q', 'origin', 'HEAD:other');
-    await hook(sys, bash(w.work, 'git push origin HEAD:refs/heads/other'));
-    assert.equal((github.calls.find((call) => call.method === 'POST')?.body as { head: string }).head, 'other');
-  });
-
-  it('(16) reads `git -C` as the repository, not the hook folder', async () => {
-    const got = await hook(sys, bash(w.dir, 'git -C work push'));
-    assert.equal(got.code, 0);
-    assert.equal(github.count('POST', 'pulls'), 1);
-  });
-
-  it('(17) leaves a push it cannot name exactly to the watcher', async () => {
-    github.pulls.push({ number: 9, head: 'feature', state: 'open', merged_at: null, body: '' });
-    for (const command of ['git push --all', 'git push origin a b', 'git push fork feature', 'git push origin "$TARGET"', 'git --git-dir=.git push', 'git -C "$DIR" push', 'git push origin refs/tags/v1', "git push 'unclosed"]) {
-      assert.deepEqual(await hook(sys, bash(w.work, command)), { code: 0, out: [], err: [] }, command);
-    }
-    assert.equal(github.calls.length, 0);
-  });
-
-  it('(20) in a cloud session names the pull request and never holds Stop', async () => {
-    const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
-    const got = await hook(cloud, input('Stop', { cwd: w.work }), viaToken(true));
-    assert.equal(got.code, 0);
-    const said = (JSON.parse(got.out[0] as string) as { systemMessage: string }).systemMessage;
-    assert.match(said, /^PR #100 .*\(gh api -X PATCH repos\/example-org\/example-app\/pulls\/100 -F body=@FILE\)/);
-    assert.match(said, /This cloud session has no Autofix/);
-  });
-
-  it('opens a draft when the settings say so, and names the footer', async () => {
-    mkdirSync(join(w.work, '.github'));
-    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { draft: true, footer: '🤖 Generated', describe: '`/ship` step 9' } }));
-    const got = await hook(sys, bash(w.work, 'git push'));
-    const body = github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean; body: string };
-    assert.equal(body.draft, true);
-    assert.match(body.body, /full description \(`\/ship` step 9\)\./);
-    assert.match(body.body, /\n\n🤖 Generated\n$/);
-    assert.match(context(got.out), /real description \(`\/ship` step 9\)/);
-    // A draft the settings ask for, with one slice named: nothing is held.
-    assert.doesNotMatch(body.body, /Opened as a draft/);
-    assert.doesNotMatch(context(got.out), /was opened as a draft/);
-  });
-
-  describe("a branch carrying another slice's work (pr-watcher-hold-peer-work)", () => {
-    const opened = (): { draft: boolean; body: string } => github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean; body: string };
-
-    it('opens a draft when its own commits name two slices, says which in the body and the note, and says the note once', async () => {
-      w.commit("✨ feat: a peer's change", 'Slice: #8');
-      w.git('push', '-q');
-      const got = await hook(sys, bash(w.work, 'git push'));
-      assert.equal(opened().draft, true);
-      assert.match(opened().body, /\n\nOpened as a draft: its own commits name 2 slices \(#7, #8\), so it may carry another slice's work\. The session marks it ready with `gh pr ready` and this pull request's number once its description is written\.\n\n## Commits\n/);
-      // The placeholder still names no slice, so Work rules still fails it.
-      assert.doesNotMatch(opened().body, /^Slice:/m);
-      const said = context(got.out);
-      assert.match(said, /^PR #100 \(.*\) was opened automatically/);
-      assert.match(said, /\nPR #100 was opened as a draft: its own commits name 2 slices \(#7, #8\), so it may carry another slice's work\. Once its description is written, mark it ready with `gh pr ready 100`\.$/);
-      assert.deepEqual(record(w.work, 'feature').notes, []);
-    });
-
-    it('opens a draft when they name none', async () => {
-      w.git('checkout', '-q', '-b', 'loose', 'main');
-      w.commit('🐛 fix: no trailer');
-      w.git('push', '-q', '-u', 'origin', 'loose');
-      const got = await hook(sys, bash(w.work, 'git push'));
-      assert.equal(opened().draft, true);
-      assert.match(opened().body, /Opened as a draft: its own commits name no slice in a `Slice:` trailer, so it may carry another slice's work\./);
-      assert.match(context(got.out), /PR #100 was opened as a draft: its own commits name no slice/);
-    });
-
-    it('opens ready by the commits ahead of the base alone: a slice the base already has is not the branch\'s', async () => {
-      w.git('checkout', '-q', 'main');
-      w.commit('🔧 chore: earlier work', 'Slice: #3');
-      w.git('push', '-q', 'origin', 'main');
-      w.git('checkout', '-q', '-b', 'next');
-      w.commit('✨ feat: the next change', 'Slice: #9');
-      w.git('push', '-q', '-u', 'origin', 'next');
-      const got = await hook(sys, bash(w.work, 'git push'));
-      assert.equal(opened().draft, false);
-      assert.doesNotMatch(opened().body, /Opened as a draft/);
-      assert.doesNotMatch(context(got.out), /was opened as a draft/);
-    });
-
-    it('says the note with the instruction when Stop tells it', async () => {
-      w.commit("✨ feat: a peer's change", 'Slice: #8');
-      w.git('push', '-q');
-      const got = await hook(sys, input('Stop', { cwd: w.work }));
-      assert.equal(got.code, 2);
-      assert.match(got.err.join('\n'), /\nPR #100 was opened as a draft: .*`gh pr ready 100`\.$/);
-    });
-
-    it('in a cloud session asks the user to mark it ready, since gh pr ready needs GraphQL', async () => {
-      const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
-      w.commit("✨ feat: a peer's change", 'Slice: #8');
-      w.git('push', '-q');
-      const said = context((await hook(cloud, bash(w.work, 'git push'), viaToken(true))).out);
-      assert.match(said, /Once its description is written, ask the user to mark it ready: `gh pr ready 100` needs GraphQL, which this cloud session's GitHub proxy refuses\.$/);
-    });
-
-    it('fails toward a draft when git cannot read the commits', async () => {
-      const { sys: fakeSys, github: fakeHub } = (() => {
-        const each = new FakeSys();
-        const hub = new FakeGitHub();
-        each.http = hub.http as FakeSys['http'];
-        each.execOverride = (call) => (call.command === 'git' ? { code: 1, stdout: '', stderr: '' } : undefined);
-        return { sys: each, github: hub };
-      })();
-      const state = await ensurePr(fakeSys, ROOT, autocreateSettings({}), 'feature', SHA, new Pulls(fakeSys, SLUG, 't', false));
-      assert.equal((fakeHub.calls.find((call) => call.method === 'POST')?.body as { draft: boolean }).draft, true);
-      assert.match(JSON.stringify(state), /PR #100 was opened as a draft: its own commits name no slice/);
-    });
-  });
-
-  it('says nothing done when the settings cannot be read', async () => {
-    mkdirSync(join(w.work, '.github'));
-    writeFileSync(join(w.work, '.github/niyam.json'), '{');
-    const got = await hook(sys, bash(w.work, 'git push'));
-    assert.equal(got.code, 0);
-    assert.match(got.err.join(''), /^pr-autocreate: \.github\/niyam\.json cannot be read: .*; nothing done$/);
-    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { draft: 'yes' } }));
-    assert.match((await hook(sys, bash(w.work, 'git push'))).err.join(''), /prAutocreate"\.draft must be true or false; nothing done/);
-  });
-
-  it('says why when GitHub cannot be asked, and when the decision throws', async () => {
-    const refused: PullsOf = (each) => new Pulls(each, SLUG, () => ({ problem: 'niyam could not act as the agent (x); run `niyam doctor`' }), false);
-    assert.deepEqual(await hook(sys, bash(w.work, 'git push'), refused), { code: 0, out: [], err: ['pr-autocreate: could not list PRs for feature (niyam could not act as the agent (x); run `niyam doctor`); will retry'] });
-    assert.deepEqual((await hook(sys, bash(w.work, 'git push'), () => ({ problem: 'origin is not a github.com repository' }))).err, ['pr-autocreate: origin is not a github.com repository']);
-    const throwing: PullsOf = (each) => Object.assign(new Pulls(each, SLUG, 't', false), { list: () => Promise.reject(new Error('boom')) });
-    assert.deepEqual((await hook(sys, bash(w.work, 'git push'), throwing)).err, ['pr-autocreate: PR check failed for feature (boom)']);
-  });
-
-  it('does not instruct when the ack cannot be written, so a session never loops', async () => {
-    mkdirSync(join(w.work, '.tmp/pr-autocreate'), { recursive: true });
-    writeFileSync(join(w.work, '.tmp/pr-autocreate/acks'), 'a file where the folder goes');
-    const got = await hook(sys, input('Stop', { cwd: w.work }));
-    assert.equal(got.code, 0);
-    assert.match(got.err.join(''), /^pr-autocreate: could not record the Autofix ack \(.*\); not instructing, to avoid a loop$/);
-  });
-});
-
-describe("pr-autocreate claude-hook and sarathi's Auto-fix list", () => {
-  afterEach(reported);
-  let w: ReturnType<typeof world>;
-  let github: FakeGitHub;
-  let sys: ReturnType<typeof machine>;
-  const PR = 'https://github.com/example-org/example-app/pull/100';
-  const STEP4 = /\n4\. If auto_fix is not true, call mcp__ccd_pr__set_monitor with \{"auto_fix": true, "address_comments": true, "url": "https:\/\/github\.com\/example-org\/example-app\/pull\/100"\}\./;
-  beforeEach(() => {
-    w = world();
-    github = new FakeGitHub();
-    sys = machine(github, w.dir);
-  });
-  const list = (dir = join(w.dir, '.local/state/sarathi/autofix'), session = 's1'): Record<string, unknown>[] => {
-    const file = join(dir, `${session}.jsonl`);
-    if (!existsSync(file)) return [];
-    return readFileSync(file, 'utf8').split('\n').filter((text) => text.startsWith('{')).map((text) => JSON.parse(text) as Record<string, unknown>);
-  };
-  const listOn = (): void => {
-    mkdirSync(join(w.work, '.github'));
-    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { autofixList: true } }));
-  };
-
-  it('puts the pull request on the list, and with the setting off says the whole instruction as before', async () => {
-    const got = await hook(sys, bash(w.work, 'git push'));
-    assert.deepEqual(list(), [{ at: '2026-11-15T10:00:00.000Z', pr: 'example-org/example-app#100', url: PR, event: 'opened', source: AUTOFIX_SOURCE }]);
-    const said = context(got.out);
-    assert.match(said, STEP4);
-    assert.match(said, /or get_status\/bind_pr\/set_monitor still fails, tell the user/);
-    const opened = (said.split('\n')[0] as string).slice(`PR #100 (${PR}) `.length);
-    assert.equal(said, reminder({ number: 100, url: PR, state: 'OPEN' }, opened, true, false));
-  });
-
-  it('with "autofixList" leaves out only the set_monitor step', async () => {
-    listOn();
-    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
-    assert.equal(list().length, 1);
-    assert.doesNotMatch(said, /\n4\./);
-    assert.doesNotMatch(said, /retry set_monitor/);
-    assert.match(said, /^PR #100 .*Its body is still the automatic placeholder: replace it/);
-    assert.match(said, /This PR is on this session's sarathi Auto-fix list, and sarathi's warning gives the mcp__ccd_pr__set_monitor call/);
-    assert.match(said, /\n1\. .*ToolSearch with query "select:mcp__ccd_pr__get_status,mcp__ccd_pr__bind_pr,mcp__ccd_pr__set_monitor"/);
-    assert.match(said, /\n2\. Write this line in your reply text, exactly: <pr-created>https:\/\/github\.com\/example-org\/example-app\/pull\/100<\/pr-created>\n/);
-    assert.match(said, /\n3\. Call mcp__ccd_pr__get_status\. If it reports no bound PR, call mcp__ccd_pr__bind_pr with url https:\/\/github\.com\/example-org\/example-app\/pull\/100\.\n/);
-    assert.match(said, /or get_status\/bind_pr still fails, tell the user in one line that Autofix could not be enabled/);
-  });
-
-  it('says the whole instruction when the row cannot be written, or the session names no list', async () => {
-    listOn();
-    const blocked = join(w.dir, 'not-a-folder');
-    writeFileSync(blocked, 'a file where the folder goes');
-    const unwritable = machine(github, w.dir, { SARATHI_AUTOFIX_DIR: join(blocked, 'autofix') });
-    assert.match(context((await hook(unwritable, bash(w.work, 'git push'))).out), STEP4);
-    // An id sarathi refuses (a slash, too long), or none.
-    for (const session of ['a/b', 'x'.repeat(129), '']) {
-      const said = context((await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: session }))).out);
-      assert.match(said, STEP4);
-    }
-    assert.deepEqual(list(), []);
-  });
-
-  it('adds no second row for a pull request the list names already, whoever put it there', async () => {
-    const dir = join(w.dir, '.local/state/sarathi/autofix');
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 's1.jsonl'), `not json\n${JSON.stringify({ at: 'x', pr: 'Example-Org/Example-App#100', url: PR, event: 'refused', source: 'mcp__ccd_pr__set_monitor' })}\n`);
-    listOn();
-    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
-    assert.doesNotMatch(said, /\n4\./);
-    await hook(sys, input('Stop', { cwd: w.work }));
-    assert.deepEqual(list().map((row) => row.event), ['refused']);
-  });
-
-  describe('once the list shows Auto-fix on', () => {
-    const dir = (): string => join(w.dir, '.local/state/sarathi/autofix');
-    const row = (event: string, pr = 'example-org/example-app#100'): string => `${JSON.stringify({ at: 'x', pr, url: PR, event, source: 'sarathi' })}\n`;
-    const rows = (...lines: string[]): void => {
-      mkdirSync(dir(), { recursive: true });
-      writeFileSync(join(dir(), 's2.jsonl'), lines.join(''));
-    };
-    const ack = (): string => join(w.work, STATE_DIR, 'acks', 's2-100');
-    const stop = (): Promise<{ code: number; out: string[]; err: string[] }> => hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
-    // Another session's push opens #100; s2 then stops on its branch.
-    const opened = async (): Promise<void> => {
-      await hook(sys, bash(w.work, 'git push'));
-    };
-
-    it('says nothing at Stop and writes no ack; an `off` later gets the instruction once', async () => {
-      listOn();
-      await opened();
-      // A partial line, another pull request, the PR in other letters, then rows that leave its state alone.
-      rows('{"pr": "example-org/exam', '\n', row('on', 'example-org/example-app#10'), '[1]\n', row('on', 'Example-Org/Example-App#100'), row('warned'), row('opened'));
-      assert.deepEqual(await stop(), { code: 0, out: [], err: [] });
-      assert.equal(existsSync(ack()), false);
-      assert.equal(readFileSync(join(dir(), 's2.jsonl'), 'utf8').split('\n').filter(Boolean).length, 6, 'no row added');
-      writeFileSync(join(dir(), 's2.jsonl'), row('off'), { flag: 'a' });
-      const told = await stop();
-      assert.equal(told.code, 2);
-      assert.match(told.err.join('\n'), /This PR is on this session's sarathi Auto-fix list/);
-      assert.doesNotMatch(told.err.join('\n'), /\n4\./);
-      assert.equal(existsSync(ack()), true);
-      assert.equal((await stop()).code, 0);
-    });
-
-    it('is quiet after a push too', async () => {
-      listOn();
-      rows(row('on'));
-      const got = await hook(sys, input('PostToolUse', { cwd: w.work, tool_name: 'Bash', tool_input: { command: 'git push' }, session_id: 's2' }));
-      assert.deepEqual(got, { code: 0, out: [], err: [] });
-      assert.equal(existsSync(ack()), false);
-    });
-
-    it('still tells a session whose list shows the pull request refused', async () => {
-      listOn();
-      await opened();
-      rows(row('on'), row('refused'));
-      const got = await stop();
-      assert.equal(got.code, 2);
-      assert.match(got.err.join('\n'), /Autofix must be ON/);
-    });
-
-    it('still tells a session with no list, which the hook starts with an `opened` row', async () => {
-      listOn();
-      await opened();
-      const got = await stop();
-      assert.equal(got.code, 2);
-      assert.match(got.err.join('\n'), /Autofix must be ON/);
-      assert.deepEqual(list(undefined, 's2').map((one) => one.event), ['opened']);
-    });
-
-    it('with "autofixList" off, tells the whole instruction as before', async () => {
-      await opened();
-      rows(row('on'));
-      const got = await stop();
-      assert.equal(got.code, 2);
-      assert.match(got.err.join('\n'), STEP4);
-    });
-
-    it("reads the state as sarathi's fold does, and none from a list it cannot read", () => {
-      rows(row('opened'), row('on'), row('opened'), row('warned'));
-      assert.equal(autofixState(sys, 's2', PR), 'on');
-      rows(row('opened'), row('refused'), 'null\n', '"text"\n', `${JSON.stringify({ pr: 'example-org/example-app#100', event: 7 })}\n`);
-      assert.equal(autofixState(sys, 's2', PR), 'refused');
-      rows(row('warned'));
-      assert.equal(autofixState(sys, 's2', PR), undefined);
-      assert.equal(autofixState(sys, 's3', PR), undefined, 'no list');
-      mkdirSync(join(dir(), 's4.jsonl'));
-      assert.equal(autofixState(sys, 's4', PR), undefined, 'a folder where the list goes');
-      for (const [session, url] of [[undefined, PR], ['a/b', PR], ['s2', 'not a url']] as const) assert.equal(autofixState(sys, session, url), undefined);
-    });
-  });
-
-  it('adds one row for a session told before, and none in a cloud session', async () => {
-    await hook(sys, bash(w.work, 'git push'));
-    await hook(sys, input('Stop', { cwd: w.work }));
-    await hook(sys, input('Stop', { cwd: w.work, session_id: 's2' }));
-    assert.equal(list().length, 1);
-    assert.equal(list(undefined, 's2').length, 1);
-    const cloud = machine(github, w.dir, { CLAUDE_CODE_REMOTE: 'true' });
-    await hook(cloud, input('Stop', { cwd: w.work, session_id: 's3' }), viaToken(true));
-    assert.deepEqual(list(undefined, 's3'), []);
-  });
-
-  it('lists a pull request it found on the branch, and still asks for the tag only if the session opened it', async () => {
-    github.pulls.push({ number: 7, head: 'feature', state: 'open', merged_at: null, body: 'Real.' });
-    listOn();
-    const said = context((await hook(sys, bash(w.work, 'git push'))).out);
-    assert.deepEqual(list().map((row) => row.pr), ['example-org/example-app#7']);
-    assert.match(said, /\n2\. Only if this session itself ran the `gh pr create` that opened this PR/);
-    assert.doesNotMatch(said, /\n4\./);
-  });
-
-  it('finds the list where sarathi does: SARATHI_AUTOFIX_DIR, then XDG_STATE_HOME, then ~/.local/state', () => {
-    const at = (env: Record<string, string>): string => autofixDir(machine(github, '/home/u', env));
-    assert.equal(at({ SARATHI_AUTOFIX_DIR: '/x/list', XDG_STATE_HOME: '/state' }), '/x/list');
-    assert.equal(at({ SARATHI_AUTOFIX_DIR: '', XDG_STATE_HOME: '/state' }), '/state/sarathi/autofix');
-    assert.equal(at({ XDG_STATE_HOME: '' }), '/home/u/.local/state/sarathi/autofix');
-    for (const url of ['not a url', 'http://github.com/a/b/pull/1', 'https://github.com/a/b/issues/1', 'https://github.com/a/b/pull/x', 'https://github.com/a/b%20c/pull/1']) {
-      assert.equal(listForAutofix(sys, 's1', url), false, url);
-    }
-    assert.equal(listForAutofix(sys, 's1', 'https://github.com/a/b/pull/12/files'), true);
-    assert.deepEqual(list().map((row) => [row.pr, row.url]), [['a/b#12', 'https://github.com/a/b/pull/12']]);
-  });
-});
-
-describe('pr-autocreate spawn-watchers and watch (real git, GitHub faked)', () => {
-  afterEach(reported);
-  let w: ReturnType<typeof world>;
-  let github: FakeGitHub;
-  let sys: ReturnType<typeof machine>;
-  beforeEach(() => {
-    w = world();
-    github = new FakeGitHub();
-    sys = machine(github, w.dir);
-  });
-
-  const zero = '0'.repeat(40);
-  async function spawn(lines: string, args = ['--root', w.work, '--remote', 'origin'], on: Sys = sys): Promise<{ code: number; out: string[]; err: string[] }> {
-    const seen = capture();
-    const code = await spawnWatchers(on, seen.io, args, lines);
-    return { code, out: seen.out, err: seen.err };
-  }
-
-  it("(13) starts one detached watcher per pushed branch from git's ref lines", async () => {
-    const got = await spawn([
-      `refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`,
-      `refs/heads/x ${SHA} refs/heads/main ${OTHER}`,
-      `(delete) ${zero} refs/heads/gone ${OTHER}`,
-      `refs/tags/v1 ${SHA} refs/tags/v1 ${zero}`,
-      'not a ref line',
-      '',
-    ].join('\n'));
-    assert.deepEqual(got, { code: 0, out: ['→ PR watcher started for feature: a ready PR opens, or a draft where its own commits name no slice or more than one, once the push lands.'], err: [] });
-    assert.deepEqual(sys.detached, [[sys.runtime.node, sys.runtime.cli, 'pr-autocreate', 'watch', '--root', w.work, '--branch', 'feature', '--sha', SHA, join(w.work, '.tmp/pr-autocreate/watch.log')]]);
-    assert.equal(readFileSync(optoutPath(w.work, 'feature'), 'utf8'), `${SHA} 0\n`);
-  });
-
-  it('starts none in CI, for another remote, or without --root', async () => {
-    const line = `refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`;
-    assert.equal((await spawn(line, ['--root', w.work, '--remote', 'origin'], { ...sys, env: { CI: 'true' } })).code, 0);
-    assert.equal((await spawn(line, ['--root', w.work, '--remote', 'fork'])).code, 0);
-    assert.equal((await spawn(line, ['--root', w.work])).code, 0);
-    assert.deepEqual(await spawn(line, ['--remote', 'origin']), { code: 0, out: [], err: ['pr-autocreate: spawn-watchers needs --root <repository>; no PR watcher started'] });
-    assert.deepEqual((await spawn(line, ['--root'])).err, ['pr-autocreate: --root needs a value; no PR watcher started']);
-    assert.deepEqual((await spawn(line, ['--nope', 'x'])).err, ['pr-autocreate: unexpected argument "--nope"; no PR watcher started']);
-    assert.deepEqual((await spawn(line, ['--root=a', '--root=b'])).err, ['pr-autocreate: --root is given twice; no PR watcher started']);
-    assert.deepEqual(sys.detached, []);
-  });
-
-  it('starts none when the settings cannot be read, and says a draft when they ask for one', async () => {
-    mkdirSync(join(w.work, '.github'));
-    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: [] }));
-    const line = `refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`;
-    assert.match((await spawn(line)).err.join(''), /"prAutocreate" must be an object; no PR watcher started/);
-    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { draft: true } }));
-    assert.deepEqual((await spawn(line)).out, ['→ PR watcher started for feature: a draft PR opens once the push lands.']);
-  });
-
-  it('says so when a watcher cannot start, and goes on', async () => {
-    const failing = { ...sys, detach: () => { throw new Error('spawn EACCES'); } };
-    assert.deepEqual(await spawn(`refs/heads/feature ${SHA} refs/heads/feature ${OTHER}`, undefined, failing), { code: 0, out: ['⚠️  Could not start the PR watcher for feature (spawn EACCES); open its PR yourself.'], err: [] });
-  });
-
-  async function watching(args: string[], pullsOf: PullsOf = viaToken()): Promise<string[]> {
-    const seen = capture();
-    assert.equal(await watch(sys, seen.io, args, pullsOf), 0);
-    return seen.out;
-  }
-
-  it('(12) opens the pull request once the push lands', async () => {
-    const sha = w.git('rev-parse', 'HEAD');
-    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', sha]);
-    assert.deepEqual(out, ['2026-11-15T10:00:00 feature: PR #100 created (https://github.com/example-org/example-app/pull/100)']);
-    // A second watcher for the same commit reads the record and asks GitHub nothing.
-    const asked = github.calls.length;
-    assert.deepEqual(await watching(['--root', w.work, '--branch', 'feature', '--sha', sha]), out);
-    assert.equal(github.calls.length, asked);
-    github.pulls.push({ number: 4, head: 'other', state: 'open', merged_at: null, body: '' });
-    w.git('push', '-q', 'origin', 'HEAD:other');
-    assert.deepEqual(await watching(['--root', w.work, '--branch', 'other', '--sha', sha]), ['2026-11-15T10:00:00 other: PR #4 exists (https://github.com/example-org/example-app/pull/4)']);
-  });
-
-  it("opens a draft for a branch carrying another slice's work, and its log line says why", async () => {
-    w.commit("✨ feat: a peer's change", 'Slice: #8');
-    w.git('push', '-q');
-    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', w.git('rev-parse', 'HEAD')]);
-    assert.equal((github.calls.find((call) => call.method === 'POST')?.body as { draft: boolean }).draft, true);
-    assert.deepEqual(out, ["2026-11-15T10:00:00 feature: PR #100 created (https://github.com/example-org/example-app/pull/100) PR #100 was opened as a draft: its own commits name 2 slices (#7, #8), so it may carry another slice's work. Once its description is written, mark it ready with `gh pr ready 100`."]);
-  });
-
-  it('gives up when the push never lands, in the line push instructions look for', async () => {
-    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', OTHER, '--timeout', '10', '--interval', '5']);
-    assert.deepEqual(out, [`2026-11-15T10:00:10 feature: gave up: ${OTHER.slice(0, 8)} never reached refs/heads/feature within 10s; no PR opened`]);
-    assert.equal(github.calls.length, 0);
-  });
-
-  it('(19) retries a transient GitHub failure after the push landed, then gives up after its window', async () => {
-    const sha = w.git('rev-parse', 'HEAD');
-    github.queued.push({ status: 503, json: null });
-    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', sha, '--retry-interval', '30']);
-    assert.deepEqual(out, ['2026-11-15T10:00:00 feature: could not list PRs for feature (GitHub answered 503 listing pull requests); will retry; retrying', '2026-11-15T10:00:30 feature: PR #100 created (https://github.com/example-org/example-app/pull/100)']);
-    const fresh = world();
-    sys = machine(github, fresh.dir, { NIYAM_PR_RETRY_WINDOW: '60', NIYAM_PR_RETRY_INTERVAL: '30' });
-    const failing: PullsOf = () => ({ problem: 'no GitHub token' });
-    const gaveUp = await watching(['--root', fresh.work, '--branch', 'feature', '--sha', fresh.git('rev-parse', 'HEAD')], failing);
-    assert.equal(gaveUp.at(-1), '2026-11-15T10:01:00 feature: gave up: no GitHub token, after 60s of retries');
-    const throwing: PullsOf = (each) => Object.assign(new Pulls(each, SLUG, 't', false), { list: () => Promise.reject(new Error('boom')) });
-    assert.match((await watching(['--root', fresh.work, '--branch', 'feature', '--sha', fresh.git('rev-parse', 'HEAD'), '--retry-window', '0'], throwing)).at(-1) ?? '', /feature: gave up: boom, after 0s/);
-  });
-
-  it('gives up on a branch with no commits ahead of the base', async () => {
-    w.git('checkout', '-q', '-b', 'empty', 'main');
-    w.git('push', '-q', 'origin', 'empty');
-    const out = await watching(['--root', w.work, '--branch', 'empty', '--sha', w.git('rev-parse', 'HEAD')]);
-    assert.deepEqual(out, ['2026-11-15T10:00:00 empty: Branch empty has no commits ahead of main, so no PR was opened.']);
-    assert.equal(github.count('POST', 'pulls'), 0);
-  });
-
-  it('says what it could not read, and opens nothing', async () => {
-    assert.deepEqual(await watching(['--root', w.work]), ['2026-11-15T10:00:00 watch: watch needs --branch; no PR opened']);
-    assert.deepEqual(await watching(['--root', w.work, '--branch', 'b', '--sha', SHA, '--timeout', 'soon']), ['2026-11-15T10:00:00 watch: --timeout must be a number of seconds; no PR opened']);
-    mkdirSync(join(w.work, '.github'));
-    writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { nope: 1 } }));
-    const out = await watching(['--root', w.work, '--branch', 'feature', '--sha', w.git('rev-parse', 'HEAD')]);
-    assert.match(out[0] as string, /feature: gave up: .*unknown key "nope".*; no PR opened$/);
-  });
-
-  it('reads its timings from flags first, then NIYAM_PR_WATCH_* variables', () => {
-    const on = new FakeSys();
-    on.env = { NIYAM_PR_WATCH_TIMEOUT: '30', NIYAM_PR_WATCH_INTERVAL: ' ' };
-    assert.deepEqual(watchArgs(on, ['--root', 'r', '--branch', 'b', '--sha', 's', '--interval=1']), { root: 'r', branch: 'b', sha: 's', timeout: 30, interval: 1, retryWindow: 600, retryInterval: 30 });
-    assert.throws(() => watchArgs(on, ['--root', 'r', '--branch', 'b', '--sha', 's', '--retry-window', '-1']), /--retry-window must be a number of seconds/);
-  });
-
-  describe('(21) the opt-out', () => {
-    const optedOutLine = (): string => `refs/heads/feature ${w.git('rev-parse', 'HEAD')} refs/heads/feature ${OTHER}`;
-
-    it('records the choice before the refs are sent, and starts no watcher', async () => {
-      const got = await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
-      assert.deepEqual(got, { code: 0, out: [], err: [] });
-      assert.deepEqual(sys.detached, []);
-      assert.equal(readFileSync(optoutPath(w.work, 'feature'), 'utf8'), `${w.git('rev-parse', 'HEAD')} 1\n`);
-    });
-
-    it("keeps an older client's name working beside NIYAM_PR_AUTOCREATE", async () => {
-      mkdirSync(join(w.work, '.github'));
-      writeFileSync(join(w.work, '.github/niyam.json'), JSON.stringify({ prAutocreate: { optOut: ['LEGACY_PR_AUTOCREATE'] } }));
-      await spawn(optedOutLine(), undefined, { ...sys, env: { LEGACY_PR_AUTOCREATE: '0' } });
-      assert.match(readFileSync(optoutPath(w.work, 'feature'), 'utf8'), / 1\n$/);
-    });
-
-    it('gives an opted-out push no pull request at Stop, and finds the one the session opens itself', async () => {
-      await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
-      assert.deepEqual(await hook(sys, input('Stop', { cwd: w.work })), { code: 0, out: [], err: [] });
-      assert.equal(github.count('POST', 'pulls'), 0);
-      assert.equal(typeof record(w.work, 'feature').optedOutAt, 'number');
-      // Within the recheck window GitHub is not asked again.
-      const asked = github.calls.length;
-      github.pulls.push({ number: 8, head: 'feature', state: 'open', merged_at: null, body: 'mine' });
-      assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 0);
-      assert.equal(github.calls.length, asked);
-      sys.clock += 61_000;
-      const found = await hook(sys, input('Stop', { cwd: w.work }));
-      assert.equal(found.code, 2);
-      assert.match(found.err.join(''), /^PR #8 \(\S+\) is open for branch feature\./);
-    });
-
-    it('takes the opt-out back when the same commit is pushed without it', async () => {
-      await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
-      await hook(sys, input('Stop', { cwd: w.work }));
-      await spawn(optedOutLine());
-      assert.equal((await hook(sys, input('Stop', { cwd: w.work }))).code, 2);
-      assert.equal(github.count('POST', 'pulls'), 1);
-    });
-
-    it('refuses the push (3) when an opt-out cannot be written, and only warns for a push without one', async () => {
-      mkdirSync(optoutPath(w.work, 'feature'), { recursive: true });
-      const refused = await spawn(optedOutLine(), undefined, { ...sys, env: { NIYAM_PR_AUTOCREATE: '0' } });
-      assert.equal(refused.code, 3);
-      assert.match(refused.out.join(''), /^❌ Could not record NIYAM_PR_AUTOCREATE=0 for feature \(.*\), so a PR could open for it at turn end; push refused\./);
-      const warned = await spawn(optedOutLine());
-      assert.equal(warned.code, 0);
-      assert.match(warned.out[0] as string, /^⚠️ {2}Could not record feature's push for the PR opt-out/);
-      assert.equal(sys.detached.length, 1);
-    });
-  });
-});
-
-describe('pr-autocreate refuse-retired (real git, GitHub faked)', () => {
+describeLater('pr-autocreate refuse-retired (real git, GitHub faked)', () => {
   afterEach(reported);
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
@@ -1757,7 +1742,23 @@ describe('pr-autocreate refuse-retired (real git, GitHub faked)', () => {
   });
 });
 
-describe('pr-autocreate behind a link out of the toplevel (real git, GitHub faked)', () => {
+describe('retiredBy and pushedRefs', () => {
+  const pull = (number: number, state: 'OPEN' | 'MERGED' | 'CLOSED') => ({ number, url: `https://github.com/${SLUG}/pull/${number}`, state });
+  it('a merged PR retires a branch only while none is open', () => {
+    assert.equal(retiredBy([]), undefined);
+    assert.equal(retiredBy([pull(1, 'CLOSED')]), undefined);
+    assert.equal(retiredBy([pull(2, 'OPEN'), pull(1, 'MERGED')]), undefined);
+    assert.deepEqual(retiredBy([pull(3, 'CLOSED'), pull(1, 'MERGED')]), pull(1, 'MERGED'));
+  });
+
+  it("reads git's pre-push ref lines: the remote branch of each real commit", () => {
+    assert.deepEqual(pushedRefs([`refs/heads/a ${SHA} refs/heads/b ${OTHER}`, `x ${'0'.repeat(40)} refs/heads/gone ${OTHER}`, `refs/tags/t ${SHA} refs/tags/t ${OTHER}`, '  ', 'a b c'].join('\n')), [
+      { localSha: SHA, branch: 'b', remoteSha: OTHER },
+    ]);
+  });
+});
+
+describeLater('pr-autocreate behind a link out of the toplevel (real git, GitHub faked)', () => {
   afterEach(reported);
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
@@ -1831,3 +1832,9 @@ describe('pr-autocreate behind a link out of the toplevel (real git, GitHub fake
     assert.equal(existsSync(join(w.work, STATE_DIR, 'watch.log')), false);
   });
 });
+
+// The real-git suites run last. The lane bails at the first failure, so a mutant an in-process case kills never
+// waits on them. They block the event loop in git, so on macOS, where stdout to a pipe is written asynchronously,
+// the in-process results would reach the lane's reader only once the file ends: each yields one turn of the loop
+// first, so a mutant they kill ends there.
+for (const [name, body] of later) describe(name, body);
