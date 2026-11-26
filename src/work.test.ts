@@ -9,7 +9,8 @@ import type { Settings } from './agent.ts';
 import { RestBoard } from './fake-board.test.ts';
 import { AGENT, FakeSys, ROOT, SETTINGS, capture } from './fake.test.ts';
 import { askProblem } from './asks.ts';
-import { deleteBranchCommand, fileState, prMerged, prStarted, prePush, prWorkRules, propose, pullUrl, section, sliceProblems, slicesNamed, statesNamed } from './work.ts';
+import { PROXY_TOKEN } from './cloud.ts';
+import { deleteBranchCommand, fileState, prMerged, prStarted, prePush, prWorkRules, propose, pullUrl, section, sessionToken, sliceProblems, slicesNamed, statesNamed } from './work.ts';
 
 const SLUG = 'example-org/example-app';
 /** Another repository, where a slice this one builds can be planned. */
@@ -249,6 +250,11 @@ describe('section', () => {
     assert.equal(section(body, 'Empty'), undefined);
     assert.equal(section(body, 'Cost'), undefined);
     assert.equal(section(body, 'You will see'), undefined);
+  });
+
+  it('reads a section on the first line, to the end, ended only by a line that starts a section, indented or not', () => {
+    assert.equal(section('**Why:** a\nb', 'Why'), 'a\nb');
+    assert.equal(section('**Why:** a\nsee **Note:** b\n  **Cost:** c', 'Why'), 'a\nsee **Note:** b');
   });
 });
 
@@ -1569,6 +1575,23 @@ describe('prWorkRules', () => {
   });
 });
 
+describe('sessionToken', () => {
+  it("is the session's own token, or in a Claude cloud session the proxy's, and never a lock's placeholder", () => {
+    const sys = new FakeSys();
+    for (const [env, token] of [
+      [{ GH_TOKEN: 'ghp_good' }, 'ghp_good'],
+      [{ GH_TOKEN: 'niyam-no-agent-token' }, undefined],
+      [{}, undefined],
+      [{ CLAUDE_CODE_REMOTE: 'false' }, undefined],
+      [{ CLAUDE_CODE_REMOTE: 'true' }, PROXY_TOKEN],
+      [{ CLAUDE_CODE_REMOTE: 'true', GH_TOKEN: 'niyam-no-agent-token' }, PROXY_TOKEN],
+    ] as const) {
+      sys.env = { ...env };
+      assert.equal(sessionToken(sys), token, JSON.stringify(env));
+    }
+  });
+});
+
 describe('prePush', () => {
   const LOCAL = 'a'.repeat(40);
   const REMOTE = 'b'.repeat(40);
@@ -1895,17 +1918,180 @@ describe('prePush', () => {
 
   it('refuses one slice pushed to two branches at once', async () => {
     const lines = `refs/heads/a ${LOCAL} refs/heads/a ${REMOTE}\nrefs/heads/b ${LOCAL} refs/heads/b ${REMOTE}\n`;
-    assert.equal((await push(session('Slice: #12'), lines)).err[0], '✗ one push builds one slice on one branch; this one pushes a, b');
+    assert.deepEqual((await push(session('Slice: #12'), lines)).err, ['✗ one push builds one slice on one branch; this one pushes a, b', 'pre-push: refused by the work rules']);
   });
 
-  it('skips a ref line it cannot read', async () => {
+  it('skips a ref line it cannot read, or one that names no remote ref', async () => {
     assert.equal((await push(session('Tidy up'), 'garbage\n')).code, 0);
+    assert.deepEqual(await push(session('Tidy up'), `refs/heads/work ${LOCAL}\n`), { code: 0, err: [] });
   });
 
-  it('throws when git log fails', async () => {
+  it('passes a push whose log holds only blank lines', async () => {
+    assert.deepEqual(await push(session('\n \n'), `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: [] });
+  });
+
+  it('names a ref outside refs/heads/ as it is', async () => {
+    assert.equal((await push(session('Tidy up'), `refs/tags/v1 ${LOCAL} refs/tags/refs/heads/v1 ${REMOTE}\n`)).err[0], '✗ the commits for refs/tags/refs/heads/v1 name no slice; add a trailer "Slice: #N" to a commit message');
+  });
+
+  it('passes with the work rules off, or in a repository a personal account owns, saying so', async () => {
+    const off = session('Tidy up');
+    off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: OWNER, agent: AGENT, features: ['identity'] }));
+    assert.deepEqual(await push(off, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), { code: 0, err: ['pre-push: work-rules is off in .github/niyam.json; nothing to check'] });
+    const personal = session('Tidy up');
+    personal.ownerType = 'User';
+    assert.deepEqual(await push(personal, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`), {
+      code: 0,
+      err: ['pre-push: work-rules is off on a repository owned by a personal account, since GitHub has issue types for organisations only; nothing to check'],
+    });
+  });
+
+  it('reads the log with git, in the repository', async () => {
+    const sys = session('Slice: #12');
+    await push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`);
+    const log = sys.calls.find((c) => c.args[0] === 'log');
+    assert.deepEqual([log?.command, log?.cwd], ['git', ROOT]);
+  });
+
+  it('throws when git log fails, saying what git said', async () => {
     const sys = session('');
     sys.execOverride = (call) => (call.args[0] === 'log' ? { code: 128, stdout: '', stderr: 'bad revision\n' } : undefined);
-    await assert.rejects(push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}`), /git log failed: bad revision/);
+    await assert.rejects(push(sys, `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}`), { message: 'git log failed: bad revision' });
+  });
+
+  describe('with the default branch GitHub names', () => {
+    const TIP = 'c'.repeat(40);
+    const ORIGIN = 'refs/remotes/origin/main^{commit}';
+    const LINE = `refs/heads/work ${LOCAL} refs/heads/work ${REMOTE}\n`;
+    /** GitHub's answer for the repository, naming its default branch `branch`. */
+    const named = (sys: FakeSys, branch: unknown): void => {
+      sys.route('GET', `/repos/${SLUG}`, { status: 200, json: { owner: { type: 'Organization' }, default_branch: branch } });
+    };
+    /**
+     * An agent session pushing commits that name slice #12, where GitHub names
+     * the default branch `branch` and answers for its tip, at `path`, with `ref`;
+     * `git rev-parse --verify` answers `parsed` for each name, and fails for any other.
+     */
+    function where(branch: unknown, ref?: { status: number; json: unknown }, parsed: Record<string, { code: number; stdout: string }> = {}, path = 'main'): FakeSys {
+      const sys = session('Slice: #12');
+      named(sys, branch);
+      if (ref) sys.route('GET', `/repos/${SLUG}/git/ref/heads/${path}`, ref);
+      const log = sys.execOverride;
+      sys.execOverride = (call) => (call.args[0] === 'rev-parse' && call.args[1] === '--verify' ? { stderr: '', ...(parsed[call.args[3] as string] ?? { code: 1, stdout: '' }) } : log(call));
+      return sys;
+    }
+    const verified = (sys: FakeSys): FakeSys['calls'] => sys.calls.filter((c) => c.args[0] === 'rev-parse' && c.args[1] === '--verify');
+    const parsedAt = (sys: FakeSys): string[] => verified(sys).map((c) => c.args[3] as string);
+    /** The commits the push's log reads past as the default branch's, after the remote and --remotes. */
+    const tipsOf = (sys: FakeSys): string[] => (sys.calls.find((c) => c.args[0] === 'log')?.args ?? []).slice(6);
+
+    it("reads past GitHub's tip and origin's ref, each as git names its commit in the repository, asking nothing more of a push that names its slice", async () => {
+      const ahead = 'd'.repeat(40);
+      const sys = where('main', { status: 200, json: { object: { sha: TIP } } }, { [`${TIP}^{commit}`]: { code: 0, stdout: `${TIP}\n` }, [ORIGIN]: { code: 0, stdout: `${ahead}\n` } });
+      assert.deepEqual(await push(sys, LINE), { code: 0, err: [] });
+      assert.deepEqual(parsedAt(sys), [`${TIP}^{commit}`, ORIGIN]);
+      assert.deepEqual(tipsOf(sys), [TIP, ahead]);
+      assert.ok(verified(sys).every((c) => c.command === 'git' && c.cwd === ROOT));
+      assert.equal(sys.requests.find((r) => r.url.endsWith('/git/ref/heads/main'))?.token, 'ghp_good');
+      assert.ok(!sys.calls.some((c) => c.args.includes('--merges')), 'no merges were read');
+    });
+
+    it('takes a SHA-256 tip, on a default branch whose name has a slash', async () => {
+      const tip = 'e'.repeat(64);
+      const sys = where('release/v1', { status: 200, json: { object: { sha: tip } } }, { [`${tip}^{commit}`]: { code: 0, stdout: `${tip}\n` } }, 'release/v1');
+      assert.deepEqual(await push(sys, LINE), { code: 0, err: [] });
+      assert.deepEqual(parsedAt(sys), [`${tip}^{commit}`, 'refs/remotes/origin/release/v1^{commit}']);
+      assert.deepEqual(tipsOf(sys), [tip]);
+    });
+
+    it('reads no tip from an answer that gives no commit id', async () => {
+      for (const ref of [
+        { status: 404, json: { object: { sha: TIP } } },
+        { status: 200, json: null },
+        { status: 200, json: {} },
+        { status: 200, json: { object: { sha: 5 } } },
+        // Not text, though it reads as a commit id once made one.
+        { status: 200, json: { object: { sha: [TIP] } } },
+        { status: 200, json: { object: { sha: `x${TIP}` } } },
+        { status: 200, json: { object: { sha: `${TIP}0` } } },
+      ]) {
+        const sys = where('main', ref);
+        assert.deepEqual(await push(sys, LINE), { code: 0, err: [] }, JSON.stringify(ref));
+        assert.deepEqual(parsedAt(sys), [ORIGIN], JSON.stringify(ref));
+      }
+    });
+
+    it('counts only what git names as a commit, and each once', async () => {
+      const failed = where('main', { status: 200, json: { object: { sha: TIP } } }, { [`${TIP}^{commit}`]: { code: 1, stdout: `${TIP}\n` }, [ORIGIN]: { code: 0, stdout: 'HEAD\n' } });
+      assert.deepEqual(await push(failed, LINE), { code: 0, err: [] });
+      assert.deepEqual(tipsOf(failed), []);
+      const same = where('main', { status: 200, json: { object: { sha: TIP } } }, { [`${TIP}^{commit}`]: { code: 0, stdout: `${TIP}\n` }, [ORIGIN]: { code: 0, stdout: `${TIP}\n` } });
+      await push(same, LINE);
+      assert.deepEqual(tipsOf(same), [TIP]);
+    });
+
+    it('reads nothing of a default branch GitHub names as no text', async () => {
+      for (const branch of ['', 7]) {
+        const sys = where(branch);
+        assert.deepEqual(await push(sys, LINE), { code: 0, err: [] }, String(branch));
+        assert.ok(!sys.requests.some((r) => r.url.includes('/git/ref/')), String(branch));
+        assert.deepEqual(parsedAt(sys), [], String(branch));
+      }
+    });
+
+    describe('and a merge that brought it', () => {
+      const MAIN = 'f'.repeat(40);
+      /**
+       * A push whose merges' parents are `parents`, where GitHub names the
+       * default branch `branch` and compares it with MAIN as `compared` says.
+       * Read past MAIN, the push's commits name slice #12 alone; read past the
+       * clone's tips alone, which are none, they name main's #20 too.
+       */
+      function merging(compared?: { status: number; json: unknown }, parents = `${REMOTE} ${MAIN}\n`, branch = 'main'): FakeSys {
+        const sys = session('');
+        named(sys, branch);
+        if (compared) sys.route('GET', `/repos/${SLUG}/compare/${branch}...${MAIN}?per_page=1`, compared);
+        sys.execOverride = (call) => {
+          if (call.args[0] === 'rev-parse' && call.args[1] === '--verify') return { code: 1, stdout: '', stderr: '' };
+          if (call.args[0] !== 'log') return undefined;
+          if (call.args.includes('--merges')) return { code: 0, stdout: parents, stderr: '' };
+          return { code: 0, stdout: call.args.includes(MAIN) ? 'Slice: #12\n' : 'Slice: #12\nSlice: #20\n', stderr: '' };
+        };
+        return sys;
+      }
+      const logs = (sys: FakeSys): string[] => sys.calls.filter((c) => c.args[0] === 'log').map((c) => c.args.join(' '));
+      const compares = (sys: FakeSys): string[] => sys.requests.filter((r) => r.url.includes('/compare/')).map((r) => r.url.replace(`https://api.github.com/repos/${SLUG}`, ''));
+      const RANGE = `${LOCAL} --not ${REMOTE} --remotes`;
+
+      it("reads past the commit it brought that GitHub says is on the default branch, or is its tip", async () => {
+        for (const status of ['behind', 'identical']) {
+          const sys = merging({ status: 200, json: { status } });
+          assert.deepEqual(await push(sys, LINE), { code: 0, err: [] }, status);
+          assert.deepEqual(logs(sys), [`log --format=%B ${RANGE}`, `log --merges --format=%P ${RANGE}`, `log --format=%B ${RANGE} ${MAIN}`], status);
+          assert.equal(sys.requests.find((r) => r.url.includes('/compare/'))?.token, 'ghp_good', status);
+        }
+      });
+
+      it('reads no further where GitHub does not say the commit is on it', async () => {
+        for (const compared of [{ status: 404, json: { status: 'behind' } }, { status: 200, json: null }, { status: 200, json: { status: 'ahead' } }, undefined]) {
+          const sys = merging(compared);
+          assert.deepEqual((await push(sys, LINE)).err[0], '✗ the commits for work name 2 slices (#12, #20); one push builds one slice', JSON.stringify(compared));
+          assert.deepEqual(logs(sys), [`log --format=%B ${RANGE}`, `log --merges --format=%P ${RANGE}`], JSON.stringify(compared));
+        }
+      });
+
+      it('asks only of the commit ids the merges brought past their first parent', async () => {
+        const sys = merging({ status: 200, json: { status: 'behind' } }, `${REMOTE} ${MAIN} not-a-commit\n\n${REMOTE}\n`);
+        assert.deepEqual(await push(sys, LINE), { code: 0, err: [] });
+        assert.deepEqual(compares(sys), [`/compare/main...${MAIN}?per_page=1`]);
+      });
+
+      it('asks of a default branch whose name has a slash', async () => {
+        const sys = merging({ status: 200, json: { status: 'behind' } }, undefined, 'release/v1');
+        assert.deepEqual(await push(sys, LINE), { code: 0, err: [] });
+        assert.deepEqual(compares(sys), [`/compare/release/v1...${MAIN}?per_page=1`]);
+      });
+    });
   });
 
   describe('on a real git history, where the default branch carries other slices', () => {
@@ -2286,6 +2472,29 @@ describe('prMerged', () => {
     await assert.rejects(run(new FakeSys()), /pr-merged runs in GitHub Actions/);
   });
 
+  it('needs each of GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN', async () => {
+    for (const name of ['GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GH_TOKEN']) {
+      const sys = actions(merged('Slice: #12'));
+      delete sys.env[name];
+      await assert.rejects(run(sys), { message: 'pr-merged runs in GitHub Actions: GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set' }, name);
+      assert.deepEqual(writes(sys), [], name);
+    }
+  });
+
+  it('closes the slice of an event that names no repository', async () => {
+    const sys = actions(merged('Slice: #12'));
+    sys.files.set(EVENT, JSON.stringify({ pull_request: merged('Slice: #12') }));
+    assert.deepEqual(await run(sys), { code: 0, out: ['✓ #12: closed, built in #40', STAYS] });
+  });
+
+  it('leaves an issue with no type as it is, named as a slice or as a State', async () => {
+    const sys = actions(merged('Slice: #12\nState: #31'));
+    sys.route('GET', ISSUE, { status: 200, json: { number: 12, type: null, state: 'open', url: `https://api.github.com${ISSUE}` } });
+    sys.route('GET', `/repos/${SLUG}/issues/31`, { status: 200, json: { number: 31, type: null, state: 'open', url: `https://api.github.com/repos/${SLUG}/issues/31` } });
+    assert.deepEqual(await run(sys), { code: 0, out: ['- #12 is not a Slice in example-org/example-app; left as it is', '- #31 is not a State in example-org/example-app; left as it is'] });
+    assert.deepEqual(writes(sys), []);
+  });
+
   describe('the States it names', () => {
     const STATE = `/repos/${SLUG}/issues/31`;
     /** Slice #12, closed, and State #31 under it as `state` says, its writes routed. */
@@ -2422,6 +2631,13 @@ describe('prMerged', () => {
       orphan.route('GET', `${ISSUE}/parent`, { status: 404, json: { message: 'No parent issue found' } });
       assert.deepEqual((await run(orphan)).out, ['✓ #12: closed, built in #40']);
       assert.deepEqual([...onItem(foreign), ...onItem(orphan)], []);
+    });
+
+    it('leaves a slice whose parent has no type alone', async () => {
+      const sys = finishing('Slice: #12');
+      sys.route('GET', `${ISSUE}/parent`, { status: 200, json: { number: 10, type: null, url: `https://api.github.com${ITEM}` } });
+      assert.deepEqual((await run(sys)).out, ['✓ #12: closed, built in #40']);
+      assert.deepEqual(onItem(sys), []);
     });
 
     it("fails when it cannot read a slice's Work item", async () => {
@@ -2577,6 +2793,30 @@ describe('prStarted', () => {
     const sys = actions('Slice: #12');
     sys.files.set(EVENT, '{}');
     assert.deepEqual(await run(sys), { code: 0, out: ['pr-started: not a pull request; nothing to move'], err: [] });
+  });
+
+  it('moves nothing before the repo adopts niyam, or in a repository a personal account owns', async () => {
+    const before = actions('Slice: #12');
+    before.files.delete(`${ROOT}/.github/niyam.json`);
+    const personal = actions('Slice: #12');
+    personal.ownerType = 'User';
+    for (const [sys, line] of [
+      [before, 'pr-started: the base branch has no .github/niyam.json, so the repo is not adopted on its base yet; nothing to check'],
+      [personal, 'pr-started: work-rules is off on a repository owned by a personal account, since GitHub has issue types for organisations only; nothing to check'],
+    ] as const) {
+      const board = new RestBoard(sys);
+      assert.deepEqual(await run(sys), { code: 0, out: [line], err: [] });
+      assert.deepEqual(writes(board), []);
+      assert.equal(boardReads(sys), false);
+    }
+  });
+
+  it('needs each of GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN', async () => {
+    for (const name of ['GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GH_TOKEN']) {
+      const sys = actions('Slice: #12');
+      delete sys.env[name];
+      await assert.rejects(run(sys), { message: 'pr-started runs in GitHub Actions: GITHUB_EVENT_PATH, GITHUB_REPOSITORY and GH_TOKEN must be set' }, name);
+    }
   });
 });
 
@@ -2872,7 +3112,7 @@ describe('propose', () => {
   it('refuses a session with no token, or not working as the agent', async () => {
     const { sys } = session();
     sys.env = {};
-    assert.equal((await run(sys)).err[0], '✗ this session has no token; run niyam doctor');
+    assert.deepEqual((await run(sys)).err, ['✗ this session has no token; run niyam doctor', 'propose: refused by the work rules']);
     sys.env = { GH_TOKEN: 'niyam-no-agent-token' };
     assert.equal((await run(sys)).err[0], '✗ this session has no token; run niyam doctor', "the lock's placeholder");
     sys.env = { GH_TOKEN: 'process-rules-no-agent-token' };
@@ -2899,6 +3139,71 @@ describe('propose', () => {
     const { code, out } = await run(sys);
     assert.equal(code, 0);
     assert.match(out[0] ?? '', /^propose: .*work-rules/);
+  });
+
+  it('passes in a repository a personal account owns, posting nothing', async () => {
+    const { sys } = session(owing());
+    sys.ownerType = 'User';
+    assert.deepEqual(await run(sys), {
+      code: 0,
+      out: ['propose: work-rules is off on a repository owned by a personal account, since GitHub has issue types for organisations only; nothing to check'],
+      err: [],
+    });
+    assert.deepEqual(posted(sys), []);
+  });
+
+  it('refuses a token GitHub names as the agent but does not answer for', async () => {
+    const { sys } = session(owing());
+    sys.route('GET', '/user', { status: 500, json: { login: AGENT } });
+    assert.deepEqual(await run(sys), { code: 1, out: [], err: ["✗ propose posts as ExampleBot, but this session's token is ExampleBot", 'propose: refused by the work rules'] });
+    assert.deepEqual(posted(sys), []);
+  });
+
+  it('names, given a state, each other decision its slice waits on that has no proposal', async () => {
+    const g = owing();
+    g.states.push({ number: 31, title: 'Old filter', body: '**Why:** nobody filters.', type: { name: 'State' }, state_reason: 'not_planned', closed_at: LATER, comments: [] });
+    const { sys } = session(g);
+    assert.deepEqual((await run(sys, 30)).out.at(-1), [
+      "#12 is labeled needs-owner, waiting on example-owner's 👍 on https://github.com/example-org/example-app/issues/12#issuecomment-1",
+      '; ExampleBot proposes #12 with: niyam propose 12 --page <page url>',
+      '; ExampleBot proposes #31 with: niyam propose 31 --page <page url>',
+    ].join(''));
+  });
+
+  it("refuses a State whose parent GitHub gives no type, as no slice's", async () => {
+    const { sys } = session(owing());
+    sys.route('GET', `/repos/${SLUG}/issues/30/parent`, { status: 200, json: { number: 12, type: null, url: `https://api.github.com${ISSUE}` } });
+    assert.equal((await run(sys, 30)).code, 1);
+    assert.deepEqual(posted(sys), []);
+  });
+
+  describe('with an Approvals issue, and a number it cannot propose', () => {
+    it('hands over only what waits, past a number that is no issue or has no type', async () => {
+      const { sys } = session(owing());
+      withApprovals(sys);
+      sys.route('GET', `/repos/${SLUG}/issues/13`, { status: 200, json: { number: 13, type: null, state: 'open', url: `https://api.github.com/repos/${SLUG}/issues/13` } });
+      const { code, out } = await run(sys, 99, 13, 12);
+      assert.equal(code, 1);
+      assert.deepEqual(out.filter((line) => line.startsWith('Decision:')), ['Decision: approve #12 #30']);
+    });
+
+    it('hands over nothing for a run that proposes nothing', async () => {
+      const gaps = owing();
+      gaps.issue.body = 'Slice P-01 of #10.';
+      const long = owing();
+      long.issue.title = 'x'.repeat(450);
+      for (const [name, sys, page] of [
+        ['nothing owed', session().sys, PAGE],
+        ['a body with no Why', session(gaps).sys, PAGE],
+        ['no page', session(owing()).sys, undefined],
+        ['a title too long', session(long).sys, PAGE],
+      ] as const) {
+        withApprovals(sys);
+        const { out, err } = await withPage(sys, page);
+        assert.deepEqual(out.filter((line) => line.startsWith('Decision:') || line.includes('Approvals issue')), [], name);
+        assert.deepEqual(err.slice(1), name === 'nothing owed' ? [] : ['propose: refused by the work rules'], name);
+      }
+    });
   });
 });
 
@@ -2980,6 +3285,55 @@ describe('fileState', () => {
     sys.env = { NIYAM_AGENT: AGENT };
     assert.deepEqual(await run(sys), { code: 1, out: [], err: ['✗ this session has no token; run niyam doctor'] });
     assert.deepEqual(writes(sys), []);
+  });
+
+  it('files nothing with the work rules off, or in a repository a personal account owns, saying so', async () => {
+    const off = session();
+    off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ ...JSON.parse(SETTINGS), features: ['identity'] }));
+    const personal = session();
+    personal.ownerType = 'User';
+    for (const [sys, line] of [
+      [off, 'state: work-rules is off in .github/niyam.json; nothing to check'],
+      [personal, 'state: work-rules is off on a repository owned by a personal account, since GitHub has issue types for organisations only; nothing to check'],
+    ] as const) {
+      assert.deepEqual(await run(sys), { code: 0, out: [line], err: [] });
+      assert.deepEqual(writes(sys), []);
+    }
+  });
+
+  it('refuses an issue with no type, saying it has none', async () => {
+    const sys = session();
+    sys.route('GET', `${ISSUES}/12`, { status: 200, json: { number: 12, url: `${ISSUES}/12`, state: 'open', type: null } });
+    assert.deepEqual(await run(sys), { code: 1, out: [], err: ['✗ #12 is not a Slice (its type is none); a State is filed under the slice it is part of'] });
+  });
+
+  it("refuses an answer that files no State with an id and a number, saying what GitHub said", async () => {
+    for (const [filed, why] of [
+      [{ status: 200, json: { id: 9031, number: 31 } }, 'HTTP 200'],
+      [{ status: 201, json: null }, 'HTTP 201'],
+      [{ status: 201, json: { id: '9031', number: 31 } }, 'HTTP 201'],
+      [{ status: 201, json: { id: 9031 } }, 'HTTP 201'],
+      [{ status: 422, json: {} }, 'HTTP 422'],
+      [{ status: 422, json: { message: '' } }, 'HTTP 422'],
+      [{ status: 422, json: { message: 5 } }, 'HTTP 422'],
+    ] as const) {
+      const sys = session();
+      sys.route('POST', FILE, filed);
+      assert.deepEqual(await run(sys), { code: 1, out: [], err: [`✗ GitHub did not file the State (${why})`] }, JSON.stringify(filed));
+    }
+  });
+
+  it("names the State by GitHub's https address for it, or else by its own", async () => {
+    for (const [html_url, url] of [
+      [`${W}/31#state`, `${W}/31#state`],
+      ['http://example.com/31', `${W}/31`],
+      [5, `${W}/31`],
+      [undefined, `${W}/31`],
+    ] as const) {
+      const sys = session();
+      sys.route('POST', FILE, { status: 201, json: { id: 9031, number: 31, html_url } });
+      assert.equal((await run(sys)).out[0], `✓ #31, ${url}: a State under #12`, String(html_url));
+    }
   });
 });
 

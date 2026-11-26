@@ -737,9 +737,14 @@ export async function prWorkRules(sys: Sys, io: Output): Promise<number> {
 
 const ZERO = /^0+$/;
 
+/** Whether this is a Claude cloud session. */
+function inCloud(sys: Sys): boolean {
+  return sys.env.CLAUDE_CODE_REMOTE === 'true';
+}
+
 /** The token an agent session reaches GitHub with: in a Claude cloud session, through its proxy. */
 export function sessionToken(sys: Sys): string | undefined {
-  if (sys.env.CLAUDE_CODE_REMOTE === 'true') return cloudToken(sys);
+  if (inCloud(sys)) return cloudToken(sys);
   const token = sys.env.GH_TOKEN;
   // A lock's placeholder, this release's or one an older release wrote, is no token.
   return token && !isNoToken(token) ? token : undefined;
@@ -774,7 +779,8 @@ const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
  * the default branch into FETCH_HEAD alone. No branch when GitHub names none.
  */
 async function defaultBranch(sys: Sys, root: string, slug: string, token: string): Promise<{ branch?: string; tips: string[] }> {
-  const branch = ((await readRepo(sys, slug, token)).json as { default_branch?: unknown } | null)?.default_branch;
+  // isPersonal has read this answer already and found an owner in it, so it is an object.
+  const branch = ((await readRepo(sys, slug, token)).json as { default_branch?: unknown }).default_branch;
   if (typeof branch !== 'string' || !branch) return { tips: [] };
   const ref = await sys.http(`${API}/repos/${slug}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, { token });
   const sha = ref.status === 200 ? (ref.json as { object?: { sha?: unknown } } | null)?.object?.sha : undefined;
@@ -794,7 +800,8 @@ async function defaultBranch(sys: Sys, root: string, slug: string, token: string
  * do not reach what it brought.
  */
 async function mergedFromDefault(sys: Sys, root: string, slug: string, token: string, branch: string, range: string[]): Promise<string[]> {
-  const merges = gitLog(sys, root, ['--merges', '--format=%P', ...range]).split('\n').filter(Boolean);
+  // An empty line names no parent past its first, so it brings nothing.
+  const merges = gitLog(sys, root, ['--merges', '--format=%P', ...range]).split('\n');
   const brought = new Set(merges.flatMap((line) => line.split(' ').slice(1)).filter((commit) => COMMIT_ID.test(commit)));
   const found: string[] = [];
   for (const parent of brought) {
@@ -837,10 +844,10 @@ export async function prePush(sys: Sys, io: Output, refLines: string, url: strin
     return 1;
   }
   // refuse-retired's own check, on the hook's stderr. Whatever else it exits, a warning said so and the push goes on.
-  const hook: Output = { out: (line) => io.err(line), err: (line) => io.err(line) };
+  const hook: Output = { ...io, out: (line) => io.err(line) };
   // Asked with the session's own token alone: never gh's signed-in account, which on this Mac is the owner's.
   const session = sessionToken(sys);
-  const pullsOf: PullsOf = () => (session ? new Pulls(sys, slug, session, sys.env.CLAUDE_CODE_REMOTE === 'true') : { problem: 'this agent session has no token; run niyam doctor' });
+  const pullsOf: PullsOf = () => (session ? new Pulls(sys, slug, session, inCloud(sys)) : { problem: 'this agent session has no token; run niyam doctor' });
   const retired = await refuseRetired(sys, hook, ['--root', root, '--remote', remote], refLines, pullsOf).catch((error: unknown) => {
     // fail-open: as refuse-retired's own crash does, this warns "not checked" and the work rules still run.
     io.err(`⚠️  Could not check whether a pushed branch's PR already merged (${errorDetail(error)}); not checked.`);
@@ -867,7 +874,8 @@ export async function prePush(sys: Sys, io: Output, refLines: string, url: strin
   const { branch, tips } = await defaultBranch(sys, root, slug, token);
   let messages = '';
   const branches: string[] = [];
-  for (const line of refLines.split('\n').filter(Boolean)) {
+  // An empty line names no local commit, so it is skipped with any other line that names none.
+  for (const line of refLines.split('\n')) {
     const [, local, remoteRef, remote] = line.split(' ');
     if (!local || !remoteRef || ZERO.test(local)) continue;
     let base = tips;
@@ -950,7 +958,8 @@ function refused(result: { status: number; json: unknown }, what: string): never
 async function closeBuilt(sys: Sys, io: Output, token: string, issue: Issue, pull: { number: number; base: { ref: string } }): Promise<void> {
   const built = new RegExp(`\\bBuilt in #${pull.number}\\b`);
   const comments = await every<Comment>(sys, token, issue.number, `${issue.url}/comments`);
-  const commented = comments.some((one) => built.test(one.body ?? ''));
+  // A comment with no body reads as "null", which says nothing was built.
+  const commented = comments.some((one) => built.test(String(one.body)));
   if (!commented) {
     const posted = await sys.http(`${issue.url}/comments`, { method: 'POST', token, body: { body: `Built in #${pull.number}, merged into ${pull.base.ref}.` } });
     if (posted.status !== 201) refused(posted, `${issue.state === 'closed' ? 'comment on' : 'close'} #${issue.number}`);
@@ -1011,7 +1020,9 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
     io.out(`pr-merged: #${pull.number} merged into ${pull.base.ref}, not ${branch}; its slices stay open until their work reaches ${branch}`);
     return 0;
   }
-  const slices = slicesNamed(pull.body ?? '', slug);
+  // A pull request with no body reads as "null", which names nothing.
+  const body = String(pull.body);
+  const slices = slicesNamed(body, slug);
   if (slices.length === 0) io.out(`pr-merged: #${pull.number} names no slice; nothing to close`);
   // A slice or State in another repository is closed there, by whoever builds the rest of it: this workflow's
   // GITHUB_TOKEN writes only here, and never touches this repository's issue of the same number.
@@ -1021,7 +1032,6 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
     return true;
   };
   // The slices named that are Slices: a State is closed only under one of them.
-  const built: number[] = [];
   const builtSlices: Issue[] = [];
   for (const ref of slices) {
     if (elsewhere(ref)) continue;
@@ -1031,12 +1041,11 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
       io.out(`- #${slice} is not a Slice in ${slug}; left as it is`);
       continue;
     }
-    built.push(slice);
     builtSlices.push(issue);
     // GitHub closes a slice itself when the pull request also says "Closes #N"; the slice still gets its comment, once.
     await closeBuilt(sys, io, token, issue, pull);
   }
-  for (const ref of statesNamed(pull.body ?? '', slug)) {
+  for (const ref of statesNamed(body, slug)) {
     if (elsewhere(ref)) continue;
     const { number } = ref;
     const issue = await readIssue(sys, token, slug, number);
@@ -1046,7 +1055,7 @@ export async function prMerged(sys: Sys, io: Output): Promise<number> {
     }
     const { parent, problem } = await parentOf(sys, token, issue);
     if (problem) throw new Error(`cannot close #${number}: ${problem}`);
-    if (!parent || !built.includes(parent.number)) {
+    if (!parent || !builtSlices.some((slice) => slice.number === parent.number)) {
       io.out(`- #${number} is not a State under a slice #${pull.number} names; left as it is`);
       continue;
     }
@@ -1121,7 +1130,9 @@ export async function prStarted(sys: Sys, io: Output): Promise<number> {
     io.out(offLine('pr-started', 'work-rules', PERSONAL_REPO));
     return 0;
   }
-  const slices = slicesNamed(pull.body ?? '', slug);
+  // A pull request with no body reads as "null", which names nothing.
+  const body = String(pull.body);
+  const slices = slicesNamed(body, slug);
   if (slices.length !== 1) {
     io.out(`pr-started: #${pull.number} names ${slices.length === 0 ? 'no slice' : `${slices.length} slices`}; nothing moves on the board`);
     return 0;
@@ -1135,7 +1146,7 @@ export async function prStarted(sys: Sys, io: Output): Promise<number> {
     return 0;
   }
   try {
-    const problems = await sliceProblems(sys, token, slug, ref, loadSettings(sys, sys.cwd), { pull: pull.number, states: statesNamed(pull.body ?? '', slug) });
+    const problems = await sliceProblems(sys, token, slug, ref, loadSettings(sys, sys.cwd), { pull: pull.number, states: statesNamed(body, slug) });
     if (problems.length > 0) {
       io.out(`pr-started: ${slice} may not be built yet (Work rules says why), so nothing moves on the board`);
       return 0;
@@ -1307,7 +1318,8 @@ async function proposeOne(
     };
   }
   // Each comment meets the guard's rule for asks (a page link, ASK_LIMIT characters) before any is posted.
-  const bodies = new Map(page === undefined ? [] : fresh.map((one) => [one, proposalBody(slug, one, read.parent, page, accounts)] as const));
+  // A fresh proposal reaches here only with a page, as the refusal above says, so no body reads "undefined".
+  const bodies = new Map(fresh.map((one) => [one, proposalBody(slug, one, read.parent, String(page), accounts)] as const));
   const unfit = [...bodies].flatMap(([one, body]) => {
     const problem = askProblem({ text: body, known: true, opensUnknown: false }, accounts.owners);
     return problem ? [`${named(one)}'s proposal is not posted: ${problem}; shorten ${named(one)}'s title`] : [];
