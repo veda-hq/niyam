@@ -757,7 +757,19 @@ close it. Each State under that slice the pull request names with a line
 named only in prose stays open, a State closed as not planned is left as it
 is, and so is one under a slice the pull request does not name. A slice or
 State GitHub closed already, through a closing keyword such as "Closes #N"
-beside it, still gets the comment; one that has it gets no second one. That job alone of a pull request's runs writes to issues. It runs only for
+beside it, still gets the comment; one that has it gets no second one.
+Then the same job judges the Work item above each slice the pull request
+names, and closes it as completed, after a comment naming its sub-issues
+and the pull request, once all of these hold: it is open with an owner's
+`approved` label on it; its body has a line `**Slices:** all filed`, which
+whoever files its last slice adds, since until then it may have slices still
+to file; every sub-issue is closed, and so is every State under each Slice;
+at least one Slice closed as completed, since one whose slices were all
+dropped built nothing and is the owner's to close; no ask waits on it
+(`needs-owner`); and it was not reopened after the last of its sub-issues
+closed. Otherwise the job says in one line why it stays open. A Work item in
+another repository is left to that repository's own jobs, and one with
+sub-issues GitHub does not list to the token stays open. That job alone of a pull request's runs writes to issues. It runs only for
 pull requests from the repository itself: a fork's run gets a read-only token, so
 a slice a fork's pull request builds is closed by hand.
 
