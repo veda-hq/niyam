@@ -43,12 +43,24 @@ describe('repoPath and isCommitSha', () => {
     assert.equal(repoPath('/etc/passwd'), null);
     assert.equal(repoPath('../x'), null);
     assert.equal(repoPath('.'), null);
+    assert.equal(repoPath('a\\b\\c'), 'a/b/c');
   });
 
   it('tells a commit id from a ref', () => {
     assert.equal(isCommitSha('abc1234'), true);
     assert.equal(isCommitSha('main'), false);
     assert.equal(isCommitSha('abc12'), false);
+    assert.equal(isCommitSha(' ABC1234\n'), true);
+    assert.equal(isCommitSha('a'.repeat(40)), true);
+    assert.equal(isCommitSha('a'.repeat(41)), false);
+    assert.equal(isCommitSha('zabc1234'), false);
+    assert.equal(isCommitSha('abc1234z'), false);
+  });
+});
+
+describe('loadYaml', () => {
+  it('reads YAML 1.2 core even under a YAML 1.1 directive', () => {
+    assert.deepEqual(yaml('%YAML 1.1\n---\nblocking: no\nwhen: 2026-11-14\n'), { blocking: 'no', when: '2026-11-14' });
   });
 });
 
@@ -82,6 +94,23 @@ describe('splitFrontmatter and splitSections', () => {
   }
 
   it('keeps the last body of a repeated heading', () => assert.equal(splitSections('## A\none\n## A\ntwo').get('## A'), 'two'));
+
+  for (const [name, body, keys] of [
+    ['a fence indented four spaces, which is no fence', '## A\n    ```\n## B', ['## A', '## B']],
+    ['two backticks, which open no fence', '## A\n``\n## B', ['## A', '## B']],
+    ['two tildes, which open no fence', '## A\n~~\n## B', ['## A', '## B']],
+    ['a tilde fence whose info holds a backtick', '## A\n~~~ a`b\n## no\n~~~\n## B', ['## A', '## B']],
+    ['a closer with trailing spaces, which closes', '## A\n```\n## no\n```   \n## B', ['## A', '## B']],
+    ['a backtick fence with an info string', '## A\n```sh\n## no\n```\n## B', ['## A', '## B']],
+    ['a heading that is not at the line start', 'x ## A\n## B', ['## B']],
+  ] as const) {
+    it(`reads ${name}`, () => assert.deepEqual([...splitSections(body).keys()], keys));
+  }
+
+  it('trims a heading and its body', () => {
+    const sections = splitSections('intro\n##  Two  words  \n\n  body  \n\n## Next');
+    assert.deepEqual([...sections], [['## Two words', 'body'], ['## Next', '']]);
+  });
 });
 
 describe('readFrontmatter', () => {
@@ -97,6 +126,11 @@ describe('readFrontmatter', () => {
     assert.deepEqual(readFrontmatter('a:\n  b: 1\nc: [{d: 1}]', yaml)?.nonScalar, ['a', 'c']);
     assert.equal(readFrontmatter('- a', yaml), null);
     assert.equal(readFrontmatter('a: [', yaml), null);
+    assert.equal(readFrontmatter('just text', yaml), null);
+  });
+
+  it('trims each value, and takes a null in a list as nothing', () => {
+    assert.deepEqual(readFrontmatter('a: " x "\nb: [" y ", null, 3]\nc: ~', yaml), { fields: { a: 'x', b: ['y', '3'], c: '' }, nonScalar: [] });
   });
 });
 
@@ -155,6 +189,53 @@ describe('lintBrief', () => {
     assert.deepEqual(lintBrief(twice, context()).problems, []);
     assert.deepEqual(lintBrief(draft().replace(/\n/g, '\r\n'), context()).problems, []);
   });
+
+  it('reads blocking as yes or true alone, in any case', () => {
+    for (const [value, blocking, ok] of [
+      ['yes', true, true],
+      ['TRUE', true, true],
+      ['No', false, true],
+      ['FALSE', false, true],
+      ['notrue', false, false],
+      ['yesno', false, false],
+      ['xno', false, false],
+      ['nox', false, false],
+    ] as const) {
+      const lint = lintBrief(draft({ blocking: value }), context());
+      assert.equal(lint.fields?.blocking, blocking, value);
+      assert.equal(lint.ok, ok, value);
+    }
+  });
+
+  it('says a resolved brief by a ref blames a missing path plainly, and names a fix by its short id', () => {
+    const missing = lintBrief(draft({ status: 'resolved', 'resolved-by': 'main', 'blamed-paths': ' gone.sh' }), context({ pathDeletedSince: () => true }));
+    assert.ok(missing.problems.includes('blamed path does not exist in this tree: gone.sh'), missing.problems.join('\n'));
+    const kept = lintBrief(draft({ status: 'resolved', 'resolved-by': SHA, 'blamed-paths': ' gone.sh' }), context());
+    assert.deepEqual(kept.problems, ['blamed path does not exist in this tree: gone.sh, and ccccccc or a later commit in this history did not remove it']);
+  });
+
+  it("compares the branch's changes as git spells them", () => {
+    assert.match(lintBrief(draft({ 'blamed-paths': ' tools/lint.sh' }), context({ changedFiles: ['./tools//lint.sh', '/abs'] })).problems.join(), /own diff: tools\/lint.sh/);
+  });
+
+  it('refuses a brief with no evidence section without asking for evidence, or an empty one', () => {
+    const none = draft().replace(/## What happened\n```\n\$ pnpm lint\n.*\n```\n/, '');
+    assert.deepEqual(lintBrief(none, context()).problems, ['missing section: ## What happened']);
+    const empty = draft().replace(/```\n\$ pnpm lint\n.*\n```/, '');
+    assert.deepEqual(lintBrief(empty, context()).problems, ['section is empty: ## What happened']);
+  });
+
+  for (const [name, evidence, ok] of [
+    ['a quote with no space after >', '>```\n>out\n>```', true],
+    ['a tilde fence whose info holds a backtick', '~~~ a`b\nout\n~~~', true],
+    ['a fence indented four spaces', 'ran:\n    ```\n    out\n    ```', false],
+    ['two backticks', '``\nout\n``', false],
+    ['a fence after text on its line', 'see ```\nout', false],
+  ] as const) {
+    it(`takes ${name} as ${ok ? '' : 'no '}evidence`, () => {
+      assert.equal(lintBrief(draft().replace(/```\n\$ pnpm lint\n.*\n```/, evidence), context()).ok, ok);
+    });
+  }
 });
 
 describe('deletedSince', () => {
@@ -182,6 +263,11 @@ describe('briefToIssue and issueToBrief', () => {
     assert.equal(issueToBrief('text'), null);
     assert.equal(issueToBrief(`${FIELDS_FENCE}\nunclosed`), null);
     assert.deepEqual(briefToIssue('no front', 'T').body, `${FIELDS_FENCE}\n\n\`\`\`\nno front`);
+  });
+
+  it('leaves out an indented comment, and keeps a key that only starts like a state key', () => {
+    const issue = briefToIssue('---\nslug: s\n  # indented\nstatus-page: x\nresolved-by: y\n---\nbody', 'T');
+    assert.equal(issue.body, `${FIELDS_FENCE}\nslug: s\nstatus-page: x\n\`\`\`\nbody`);
   });
 });
 
@@ -248,6 +334,20 @@ describe('judgeBrief', () => {
     assert.deepEqual(judge(issue({ ...closed, stateReason: 'completed', closingSha: SHA })), { ok: true });
     assert.match(JSON.stringify(judge(issue({ ...closed, stateReason: 'completed', closingSha: SHA }), 'handed-off', 'feature/a', false)), /closed by ccccccc, which is not in this branch's history/);
   });
+
+  it('passes a carrying blocking brief that lints, and refuses a close whose commit is a ref', () => {
+    const carrying = briefToIssue(draft({ blocking: 'yes' }, '## What I verified\nIt passes.\n## Why I did not hand off\nOne line.'), 'T').body;
+    assert.deepEqual(judge(issue({ body: carrying }), 'carrying'), { ok: true });
+    const verdict = judge(issue({ body: blocking, state: 'CLOSED', stateReason: 'completed', closingSha: 'main' }));
+    assert.equal(verdict.ok, false);
+    if (!verdict.ok) assert.match(verdict.detail, /closed \(completed\) by no merged pull request/);
+  });
+
+  it('reads a closed brief whose blamed path is gone', () => {
+    const gone = briefToIssue(draft({ 'blamed-paths': ' gone.sh' }), 'T').body;
+    assert.deepEqual(judge(issue({ body: gone, state: 'CLOSED', stateReason: 'completed' })), { ok: true });
+    assert.equal(judge(issue({ body: gone })).ok, false);
+  });
 });
 
 describe('lintDraft', () => {
@@ -280,6 +380,39 @@ describe('openBrief and addToProject', () => {
     await assert.rejects(openBrief(silent, 't', 'example-org/example-app', { title: 'T', body: 'B' }), /did not say which/);
     const bare = new FakeSys().route('POST', `${REPO}/issues`, { status: 500, json: null });
     await assert.rejects(openBrief(bare, 't', 'example-org/example-app', { title: 'T', body: 'B' }), /\(HTTP 500\)$/);
+    for (const [status, json] of [
+      [201, null],
+      [201, { number: 9 }],
+      [201, { number: 9, id: 900 }],
+    ] as const) {
+      const partial = new FakeSys().route('POST', `${REPO}/issues`, { status, json });
+      await assert.rejects(openBrief(partial, 't', 'example-org/example-app', { title: 'T', body: 'B' }), /did not say which/);
+    }
+  });
+
+  it('takes any 2xx as an answer and nothing outside it', async () => {
+    const said = { number: 9, id: 900, html_url: 'https://github.com/x/9' };
+    for (const [status, ok] of [[200, true], [299, true], [199, false], [300, false]] as const) {
+      const sys = new FakeSys().route('POST', `${REPO}/issues`, { status, json: { ...said, message: 'm' } });
+      const opened = openBrief(sys, 't', 'example-org/example-app', { title: 'T', body: 'B' });
+      if (ok) assert.deepEqual(await opened, { number: 9, id: 900, url: 'https://github.com/x/9' });
+      else await assert.rejects(opened, new RegExp(`^Error: GitHub refused to open the Brief issue \\(HTTP ${status}: m\\)$`));
+    }
+    const odd = new FakeSys().route('POST', `${REPO}/issues`, { status: 403, json: { message: 5 } });
+    await assert.rejects(openBrief(odd, 't', 'example-org/example-app', { title: 'T', body: 'B' }), /^Error: GitHub refused to open the Brief issue \(HTTP 403\)$/);
+  });
+
+  it('says which step of adding to a Project GitHub refused', async () => {
+    const denied = new FakeSys().route('GET', REPO, { status: 404, json: { message: 'Not Found' } });
+    await assert.rejects(addToProject(denied, 't', 'example-org/example-app', 900, 'Board'), /^Error: GitHub refused to read example-org\/example-app \(HTTP 404: Not Found\)$/);
+    const unlisted = new FakeSys().route('GET', REPO, { status: 200, json: {} }).route('GET', '/orgs/example-org/projectsV2?per_page=100&page=1', { status: 403, json: null });
+    await assert.rejects(addToProject(unlisted, 't', 'example-org/example-app', 900, 'Board'), /^Error: GitHub refused to list example-org's Projects \(HTTP 403\)$/);
+    const unadded = new FakeSys()
+      .route('GET', REPO, { status: 200, json: { owner: {} } })
+      .route('GET', '/orgs/example-org/projectsV2?per_page=100&page=1', { status: 200, json: [{ number: 4, title: 'Board' }] })
+      .route('POST', '/orgs/example-org/projectsV2/4/items', { status: 422, json: null });
+    await assert.rejects(addToProject(unadded, 't', 'example-org/example-app', 900, 'Board'), /^Error: GitHub refused to add the issue to "Board" \(HTTP 422\)$/);
+    assert.equal(unadded.requests.at(-1)?.method, 'POST');
   });
 
   it("adds the issue to the organisation's open Project by title, past a full page", async () => {
@@ -347,6 +480,49 @@ describe('readBrief', () => {
     assert.equal(sys.requests.some((one) => /pulls\/[456]$/.test(one.url)), false, 'only merged pull requests of this repository are read');
   });
 
+  it('takes the newest of two fixes, a Fixes in the body after a title, and reads only cross-references with a number', async () => {
+    const sys = closed([
+      crossed(1, '2026-01-01'),
+      crossed(2, '2026-01-02'),
+      { event: 'connected', source: { issue: { number: 7, repository_url: 'https://api.github.com/repos/example-org/example-app', pull_request: { merged_at: '2026-01-07' } } } },
+      { event: 'cross-referenced', source: { issue: { repository_url: 'https://api.github.com/repos/example-org/example-app', pull_request: { merged_at: '2026-01-08' } } } },
+    ])
+      .route('GET', `${REPO}/pulls/2`, { status: 200, json: { title: 'x', body: 'Fixes #9', merged_at: '2026-01-02', merge_commit_sha: 'd'.repeat(40), base: { ref: 'main' } } })
+      .route('GET', `${REPO}/pulls/1`, { status: 200, json: { title: 'Fixes #9', merged_at: '2026-01-01', merge_commit_sha: SHA, base: { ref: 'main' } } });
+    assert.equal((await readBrief(sys, 't', 'example-org/example-app', 9))?.closingSha, 'd'.repeat(40));
+    assert.deepEqual(
+      sys.requests.filter((one) => /\/pulls\//.test(one.url)).map((one) => one.url.split('/').at(-1)),
+      ['2'],
+    );
+  });
+
+  it('matches the repository whatever its case in the slug', async () => {
+    const UPPER = '/repos/Example-Org/Example-App';
+    const sys = new FakeSys()
+      .route('GET', `${UPPER}/issues/9`, { status: 200, json: { ...open, state: 'closed', state_reason: 'completed' } })
+      .route('GET', `${UPPER}/issues/9/timeline?per_page=100&page=1`, { status: 200, json: [crossed(1, '2026-01-01', 'https://api.github.com/repos/example-org/example-app')] })
+      .route('GET', UPPER, { status: 200, json: { default_branch: 'main' } })
+      .route('GET', `${UPPER}/pulls/1`, { status: 200, json: { title: 'Fixes #9', merged_at: '2026-01-01', merge_commit_sha: SHA, base: { ref: 'main' } } });
+    assert.equal((await readBrief(sys, 't', 'Example-Org/Example-App', 9))?.closingSha, SHA);
+  });
+
+  it('finds no fix in a pull request GitHub says is unmerged, has no base, or in a repository it cannot read', async () => {
+    const fixes = { title: 'Fixes #9', merged_at: '2026-01-01', merge_commit_sha: SHA, base: { ref: 'main' } };
+    for (const [pull, repo] of [
+      [{ ...fixes, merged_at: null }, { default_branch: 'main' }],
+      [{ title: 'Fixes #9', merged_at: '2026-01-01', merge_commit_sha: SHA }, { default_branch: 'main' }],
+      [fixes, null],
+    ] as const) {
+      const sys = closed([crossed(1, '2026-01-01')]).route('GET', REPO, { status: 200, json: repo }).route('GET', `${REPO}/pulls/1`, { status: 200, json: pull });
+      assert.equal((await readBrief(sys, 't', 'example-org/example-app', 9))?.closingSha, null);
+    }
+  });
+
+  it('reads no brief from a 200 with no body', async () => {
+    const sys = new FakeSys().route('GET', `${REPO}/issues/9`, { status: 200, json: null });
+    assert.equal(await readBrief(sys, 't', 'example-org/example-app', 9), null);
+  });
+
   it('finds no fix when no merged pull request says Fixes, and reads no repository without one', async () => {
     const none = closed([{ event: 'closed', commit_id: null }]);
     assert.equal((await readBrief(none, 't', 'example-org/example-app', 9))?.closingSha, null);
@@ -355,5 +531,77 @@ describe('readBrief', () => {
     assert.equal((await readBrief(unsaid, 't', 'example-org/example-app', 9))?.closingSha, null);
     const empty = closed([crossed(1, '2026-01-01')]).route('GET', `${REPO}/pulls/1`, { status: 200, json: null });
     assert.equal((await readBrief(empty, 't', 'example-org/example-app', 9))?.closingSha, null);
+  });
+});
+
+describe('brief, as the gate reads it', () => {
+  const brief = (over: Partial<BriefIssue> = {}): BriefIssue => ({ number: 9, state: 'OPEN', stateReason: null, type: 'Brief', body: briefToIssue(draft(), 'T').body, closingSha: null, ...over });
+  /** The draft with its evidence section last, holding `evidence`. */
+  const evidenceLast = (evidence: string): string => `${draft().replace(/## What happened\n```\n\$ pnpm lint\n.*\n```\n/, '')}\n## What happened\n${evidence}`;
+
+  it('opens its fields block with the info string that issues already carry', () => {
+    assert.equal(FIELDS_FENCE, '```yaml brief');
+  });
+
+  it('finds frontmatter only at the first line, and a fields block only at the top, moved back as it was', () => {
+    assert.equal(splitFrontmatter('x\n---\na: 1\n---\n'), null);
+    assert.equal(issueToBrief('text\n```\nx'), null);
+    assert.equal(issueToBrief(`${FIELDS_FENCE}\na: 1\n\`\`\`\nbody\nmore`), '---\na: 1\nstatus: open\n---\nbody\nmore');
+  });
+
+  it('refuses a brief whose frontmatter cannot be read as fields, and a field given as a list', () => {
+    for (const markdown of ['# x', '---\na: [\n---\n', '---\nslug:\n  a: 1\n---\n']) assert.equal(lintBrief(markdown, context()).ok, false, markdown);
+    assert.ok(lintBrief(draft({ slug: ' [a, b]' }), context()).problems.includes('frontmatter `slug` is empty'));
+  });
+
+  it('says an open brief that names a commit blames a missing path plainly', () => {
+    const lint = lintBrief(draft({ 'resolved-by': SHA, 'blamed-paths': ' gone.sh' }), context({ pathDeletedSince: () => true }));
+    assert.ok(lint.problems.includes('blamed path does not exist in this tree: gone.sh'), lint.problems.join('\n'));
+  });
+
+  for (const [name, evidence, ok] of [
+    ['an opening tilde fence whose info holds a backtick', '~~~ a`b\nout', true],
+    ['a line that is one inline span', '```log```', false],
+    ['two tildes', '~~\nout\n~~', false],
+    ['a quote indented three spaces', '   > ```\n   > out\n   > ```', true],
+    ['a quote indented four spaces', 'ran:\n    > ```\n    > out\n    > ```', false],
+  ] as const) {
+    it(`takes ${name} as ${ok ? '' : 'no '}evidence`, () => assert.equal(lintBrief(evidenceLast(evidence), context()).ok, ok));
+  }
+
+  it('says in full why a blocking brief closed by a commit outside this history has not landed', () => {
+    const blocking = briefToIssue(draft({ blocking: 'yes' }), 'T').body;
+    assert.deepEqual(judgeBrief('#9', brief({ body: blocking, state: 'CLOSED', stateReason: 'completed', closingSha: SHA }), { branch: 'feature/a', disposition: 'handed-off', lint: context(), isAncestorOfHead: () => false }), {
+      ok: false,
+      reason: 'handoff-not-landed',
+      detail: "#9 was closed by ccccccc, which is not in this branch's history; merge it in before pushing",
+    });
+  });
+
+  it('refuses a draft that does not lint, though it is open and from this branch', () => {
+    assert.deepEqual(lintDraft(draft({ blocking: 'maybe' }), 'feature/a', context()), {
+      ok: false,
+      problems: ['frontmatter `blocking` must be yes or no (got "maybe"): an unreadable value would quietly downgrade a blocker'],
+    });
+  });
+
+  it('refuses an opened issue GitHub does not give a number or an id', async () => {
+    for (const json of [{ id: 900, html_url: 'u' }, { number: 9, html_url: 'u' }]) {
+      const sys = new FakeSys().route('POST', `${REPO}/issues`, { status: 201, json });
+      await assert.rejects(openBrief(sys, 't', 'example-org/example-app', { title: 'T', body: 'B' }), /did not say which/, JSON.stringify(json));
+    }
+  });
+
+  it('reads an issue with its token, no brief from any answer but 200, and a state reason only as text', async () => {
+    const open = { number: 9, state: 'open', type: { name: 'Brief' }, body: 'B' };
+    const sys = new FakeSys().route('GET', `${REPO}/issues/9`, { status: 200, json: open });
+    assert.deepEqual(await readBrief(sys, 'tok', 'example-org/example-app', 9), { number: 9, state: 'OPEN', stateReason: null, type: 'Brief', body: 'B', closingSha: null });
+    assert.equal(sys.requests.at(-1)?.token, 'tok');
+    for (const status of [201, 404, 410, 500]) {
+      sys.route('GET', `${REPO}/issues/9`, { status, json: open });
+      assert.equal(await readBrief(sys, 't', 'example-org/example-app', 9), null, String(status));
+    }
+    sys.route('GET', `${REPO}/issues/9`, { status: 200, json: { ...open, state_reason: 5 } });
+    assert.equal((await readBrief(sys, 't', 'example-org/example-app', 9))?.stateReason, null);
   });
 });

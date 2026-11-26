@@ -84,7 +84,7 @@ export function signalArgs(args: readonly string[]): { pr: number; ciOnly: boole
 
 /** The `"signals"` settings; none named is no bots and no findings file. Throws on a malformed entry. */
 export function signalSettings(raw: unknown): SignalSettings {
-  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).signals : undefined;
+  const value = (raw as { signals?: unknown } | null | undefined)?.signals;
   if (value === undefined) return { bots: [] };
   const where = `${SETTINGS_PATH}: "signals"`;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${where} must be an object`);
@@ -146,11 +146,12 @@ export function dedupe(raw: readonly RawSignal[], bots: readonly string[]): Sign
       ...winner,
       ...threads[0],
       ...(winner.severity ?? loser.severity ? { severity: (winner.severity ?? loser.severity) as string } : {}),
-      sources: [...new Set([...(kept.sources ?? [kept.source]), signal.source])],
+      // Every signal in `merged` was given its sources when it went in.
+      sources: [...new Set([...(kept.sources as Source[]), signal.source])],
       ...(threads.length ? { threads } : {}),
     };
   }
-  return merged.map((signal, i) => ({ ...signal, id: `SIG-${String(i + 1).padStart(3, '0')}`, sources: signal.sources ?? [signal.source] }));
+  return merged.map((signal, i) => ({ ...signal, id: `SIG-${String(i + 1).padStart(3, '0')}`, sources: signal.sources as Source[] }));
 }
 
 const NEAR_LINES = 10;
@@ -314,7 +315,8 @@ export interface RestComment {
   createdAt?: string;
 }
 
-const isId = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+// Number.isSafeInteger is false for anything but a number.
+const isId = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0;
 
 /** Every review comment on the pull request, replies too, over REST. */
 export async function restComments(sys: Sys, token: string, slug: string, pr: number): Promise<RestComment[]> {
@@ -433,11 +435,12 @@ export async function ciSignals(sys: Sys, token: string, slug: string, head: str
     if (!isId(run?.id) || typeof run.name !== 'string') throw new Error(`${commit} lists a check run with no id or name`);
     const actions = run.app?.slug === 'github-actions';
     if (actions) actionsRuns++;
-    if (typeof run.conclusion !== 'string' || !FAILED.has(run.conclusion)) continue;
+    // A conclusion that is not text (null while the run goes on) is in no set of failures.
+    if (!FAILED.has(run.conclusion as string)) continue;
     let body = [`${run.name}: ${run.conclusion}`, run.output?.title, run.output?.summary].filter((part) => typeof part === 'string' && part).join('\n');
     if (actions) {
       const log = await sys.http(`${API}/repos/${slug}/actions/jobs/${run.id}/logs`, { token, text: true });
-      const lines = log.status === 200 ? excerpt(log.text ?? '') : '';
+      const lines = log.status === 200 && log.text ? excerpt(log.text) : '';
       if (lines) body = lines;
     }
     signals.push({ source: 'ci-failure', check: run.name, file: null, line: null, body, failureType: failureType(body) });

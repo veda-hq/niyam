@@ -84,6 +84,31 @@ describe('ownersAlone', () => {
     assert.deepEqual(await ownersAlone(sys, 'tok', comments, [OWNER]), { kept: [], othersEdited: 7, unread: 0 });
   });
 
+  it('asks only for edited comments with a GraphQL id, each once', async () => {
+    const sys = github({ IC_1: [OWNER] });
+    const comments = [comment('IC_1'), comment('IC_1'), comment(undefined), comment('IC_2', false)];
+    assert.deepEqual(await ownersAlone(sys, 'tok', comments, [OWNER]), { kept: [comments[0], comments[1], comments[3]], othersEdited: 1, unread: 0 });
+    assert.deepEqual(
+      graphqlCalls(sys).map((call) => (call.body as { variables: { ids: string[] } }).variables.ids),
+      [['IC_1']],
+    );
+  });
+
+  it('reads exactly 100 comments in one request', async () => {
+    const ids = Array.from({ length: 100 }, (_, n) => `IC_${n}`);
+    const sys = github(Object.fromEntries(ids.map((id) => [id, [OWNER]])));
+    assert.equal((await ownersAlone(sys, 'tok', ids.map((id) => comment(id)), [OWNER])).kept.length, 100);
+    assert.equal(graphqlCalls(sys).length, 1);
+  });
+
+  it('takes no nodes from an answer that is not a 200, and stops asking at the first that is not', async () => {
+    const ids = Array.from({ length: 150 }, (_, n) => `IC_${n}`);
+    const sys = new FakeSys();
+    sys.route('POST', '/graphql', () => ({ status: 500, json: { data: { nodes: [{ id: 'IC_0', userContentEdits: { totalCount: 1, nodes: [{ editor: { login: OWNER } }] } }] } } }));
+    assert.deepEqual(await ownersAlone(sys, 'tok', ids.map((id) => comment(id)), [OWNER]), { kept: [], othersEdited: 0, unread: 150 });
+    assert.equal(graphqlCalls(sys).length, 1);
+  });
+
   it('reads 100 comments a request', async () => {
     const ids = Array.from({ length: 150 }, (_, n) => `IC_${n}`);
     const sys = github(Object.fromEntries(ids.map((id) => [id, [OWNER]])));

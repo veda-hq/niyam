@@ -105,10 +105,15 @@ describe('env', () => {
 
   it('says why the shell could not start the command', () => {
     const sys = ready();
-    sys.execOverride = (call) => (call.interactive ? { code: 127, stdout: '', stderr: 'spawn /bin/sh ENOENT' } : undefined);
+    sys.execOverride = (call) => (call.interactive ? { code: 127, stdout: '', stderr: ' spawn /bin/sh ENOENT\n' } : undefined);
     const result = envIn(sys, ['--', 'codex']);
     assert.equal(result.code, 127);
     assert.equal(result.err.at(-1), 'niyam env: codex: spawn /bin/sh ENOENT');
+  });
+
+  it('prints each line ended by ;, leaving out blank lines and comments but not a # later in a line', () => {
+    assert.equal(forEval('export A=1\n\n   \n# a comment\nexport B=\'x # y\'\n'), "export A=1;\nexport B='x # y';");
+    assert.equal(forEval(''), '');
   });
 
   it('takes nothing, or a command after --', () => {

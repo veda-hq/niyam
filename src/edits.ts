@@ -37,18 +37,19 @@ interface Node {
  * proxy refuses it, an edited comment does not count.
  */
 export async function ownersAlone<T extends Written>(sys: Sys, token: string, comments: T[], owners: string[]): Promise<Kept<T>> {
-  const edited = comments.filter((comment) => comment.updated_at !== undefined && comment.updated_at > comment.created_at);
+  const edited = comments.filter((comment) => (comment.updated_at ?? '') > comment.created_at);
   const ids = [...new Set(edited.flatMap((comment) => (comment.node_id ? [comment.node_id] : [])))];
-  const theirs = new Set<string>();
+  // A comment with no node_id is never among them.
+  const theirs = new Set<string | undefined>();
   let answered = true;
   // GitHub looks up at most 100 nodes a request.
   for (let at = 0; at < ids.length; at += 100) {
     // A request that fails outright, or a body that is not JSON, is GraphQL not answering too.
-    const { status, json } = await sys
+    const answer = await sys
       .http(`${API}/graphql`, { method: 'POST', token, body: { query: QUERY, variables: { ids: ids.slice(at, at + 100) } } })
-      .catch(() => ({ status: 0, json: null }));
-    const nodes = (json as { data?: { nodes?: (Node | null)[] } } | null)?.data?.nodes;
-    if (status !== 200 || !Array.isArray(nodes)) {
+      .catch(() => undefined);
+    const nodes = (answer?.json as { data?: { nodes?: (Node | null)[] } } | null | undefined)?.data?.nodes;
+    if (answer?.status !== 200 || !Array.isArray(nodes)) {
       answered = false;
       break;
     }
@@ -62,7 +63,7 @@ export async function ownersAlone<T extends Written>(sys: Sys, token: string, co
   let othersEdited = 0;
   let unread = 0;
   for (const comment of comments) {
-    if (!edited.includes(comment) || (comment.node_id && theirs.has(comment.node_id))) kept.push(comment);
+    if (!edited.includes(comment) || theirs.has(comment.node_id)) kept.push(comment);
     else if (answered) othersEdited++;
     else unread++;
   }
