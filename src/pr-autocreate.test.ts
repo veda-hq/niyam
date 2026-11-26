@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
 import { NO_TOKEN, sessionRecord } from './agent.ts';
 import { PROXY_TOKEN } from './cloud.ts';
@@ -12,9 +13,11 @@ import { GITHUB_API } from './host.ts';
 import {
   AUTOFIX_SOURCE,
   MARKER,
+  OPT_OUT_VAR,
   OPTOUT_KEPT,
   PR_LIST_LIMIT,
   Pulls,
+  REMOTE,
   RETIRED_REFUSAL,
   RETIRED_UNCHECKED,
   STATE_DIR,
@@ -22,8 +25,14 @@ import {
   autofixDir,
   autofixState,
   claudeHook,
+  eligible,
   ensurePr,
+  heldBy,
   listForAutofix,
+  optedOutNow,
+  ownSlices,
+  placeholder,
+  stateDir,
   optedOut,
   optoutLines,
   optoutPath,
@@ -33,6 +42,7 @@ import {
   pushedRefs,
   recordOptout,
   refuseRetired,
+  settingsAt,
   reminder,
   retiredBy,
   spawnWatchers,
@@ -40,11 +50,13 @@ import {
   watch,
   watchArgs,
   withLock,
+  type Pull,
   type PullsOf,
 } from './pr-autocreate.ts';
 import { run } from './run.ts';
 import { realSys } from './sys.ts';
 import type { HttpResult, Sys } from './types.ts';
+import { slicesNamed } from './work.ts';
 
 const SLUG = 'example-org/example-app';
 const URL_OF = `https://github.com/${SLUG}.git`;
@@ -170,11 +182,806 @@ function context(out: string[]): string {
   return (JSON.parse(out[0] as string) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
 }
 
+/** One turn of the event loop, so the results so far reach the lane's reader before git blocks the loop again. */
+const reported = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 10));
+
 function record(work: string, branch: string): Record<string, unknown> {
   return JSON.parse(readFileSync(statePath(work, branch), 'utf8')) as Record<string, unknown>;
 }
 
+/**
+ * A FakeSys whose clock each sleep moves on, so a lock a mutant leaves behind ends at withLock's deadline rather
+ * than holding the suite.
+ */
+function clocked(): FakeSys {
+  const sys = new FakeSys();
+  let clock = sys.now().getTime();
+  sys.now = () => new Date(clock);
+  sys.sleep = (ms) => {
+    sys.slept.push(ms);
+    clock += ms;
+    return Promise.resolve();
+  };
+  return sys;
+}
+
+// In-process cases first: the lane bails at the first failure, so a mutant they kill never waits on the real-git
+// suites below.
+describe('pr-autocreate, in-process', () => {
+  it('keeps its records, opt-out and marker where the desktop app reads them', () => {
+    assert.deepEqual([OPT_OUT_VAR, REMOTE, STATE_DIR, MARKER], ['NIYAM_PR_AUTOCREATE', 'origin', '.tmp/pr-autocreate', '<!-- pr-autocreate: placeholder body -->']);
+    assert.equal(stateDir(ROOT), `${ROOT}/.tmp/pr-autocreate`);
+    assert.equal(statePath(ROOT, 'a/b'), `${ROOT}/.tmp/pr-autocreate/a_b-${createHash('sha256').update('a/b').digest('hex').slice(0, 12)}.json`);
+    assert.equal(optoutPath(ROOT, 'a/b'), statePath(ROOT, 'a/b').replace(/\.json$/, '.optout'));
+    assert.equal(statePath(ROOT, 'x.json'), `${ROOT}/.tmp/pr-autocreate/x.json-${createHash('sha256').update('x.json').digest('hex').slice(0, 12)}.json`);
+  });
+
+  it('takes these defaults', () => {
+    assert.deepEqual(autocreateSettings({}), {
+      base: 'main',
+      draft: false,
+      autofixList: false,
+      protected: ['main', 'master', 'develop', 'prod', 'production'],
+      skip: ['mergify/', 'gh-readonly-queue/'],
+      optOut: [],
+      describe: '`gh pr edit --body-file`',
+    });
+    for (const raw of [null, undefined, 'text', 5, { prAutocreate: undefined }, { prAutocreate: {} }]) assert.deepEqual(autocreateSettings(raw), autocreateSettings({}), JSON.stringify(raw));
+    assert.deepEqual(Object.keys(autocreateSettings({ prAutocreate: {} })).sort(), ['autofixList', 'base', 'describe', 'draft', 'optOut', 'protected', 'skip']);
+  });
+
+  it('takes a retired page only as one https link', () => {
+    for (const [retired, message] of [
+      ['a\nb', '.github/niyam.json "prAutocreate".retired must be one line'],
+      ['xhttps://a', '.github/niyam.json "prAutocreate".retired must be an https link'],
+      ['https://a b', '.github/niyam.json "prAutocreate".retired must be an https link'],
+    ]) {
+      assert.throws(() => autocreateSettings({ prAutocreate: { retired } }), { message }, retired);
+    }
+  });
+
+  it('reads an opt-out record line by line, each a full sha and a flag', () => {
+    const sys = clocked();
+    const path = optoutPath(ROOT, 'feature');
+    for (const text of [`${SHA} 1x\n`, `x${SHA} 1\n`, `${SHA} 1\n${OTHER} 00`]) {
+      sys.files.set(path, text);
+      assert.equal(optoutLines(sys, ROOT, 'feature'), undefined, JSON.stringify(text));
+    }
+    const long = 'c'.repeat(64);
+    sys.files.set(path, `${long} 1\n${SHA} 0\n`);
+    assert.deepEqual(optoutLines(sys, ROOT, 'feature'), [[long, '1'], [SHA, '0']]);
+    assert.equal(optoutPath(ROOT, 'x.json'), statePath(ROOT, 'x.json').slice(0, -'.json'.length) + '.optout');
+  });
+
+  it('reads a ref line as a deletion only when its local sha is all zeros', () => {
+    const line = (local: string) => `refs/heads/a ${local} refs/heads/b ${OTHER}`;
+    for (const local of [`a${'0'.repeat(39)}`, `${'0'.repeat(39)}a`]) assert.deepEqual(pushedRefs(line(local)), [{ localSha: local, branch: 'b', remoteSha: OTHER }], local);
+    assert.deepEqual(pushedRefs(line('0'.repeat(40))), []);
+  });
+
+  it('refuses settings of the wrong kind, each with its own words', () => {
+    const cases: [unknown, string][] = [
+      ['x', '.github/niyam.json "prAutocreate" must be an object'],
+      [true, '.github/niyam.json "prAutocreate" must be an object'],
+      [null, '.github/niyam.json "prAutocreate" must be an object'],
+      [{ base: 5 }, '.github/niyam.json "prAutocreate".base must be a branch name'],
+      [{ base: 'a b' }, '.github/niyam.json "prAutocreate".base must be a branch name'],
+      [{ base: 'ab//c' }, '.github/niyam.json "prAutocreate".base must be a branch name'],
+      [{ base: '/a' }, '.github/niyam.json "prAutocreate".base must be a branch name'],
+      [{ draft: 'no' }, '.github/niyam.json "prAutocreate".draft must be true or false'],
+      [{ protected: [5] }, '.github/niyam.json "prAutocreate".protected must be a list of branch names'],
+      [{ optOut: ['1ABC'] }, '.github/niyam.json "prAutocreate".optOut must be a list of variable names'],
+      [{ optOut: ['ABC-x'] }, '.github/niyam.json "prAutocreate".optOut must be a list of variable names'],
+      [{ describe: 5 }, '.github/niyam.json "prAutocreate".describe must be one line'],
+      [{ describe: 'a\rb' }, '.github/niyam.json "prAutocreate".describe must be one line'],
+    ];
+    for (const [value, message] of cases) assert.throws(() => autocreateSettings({ prAutocreate: value }), { message }, JSON.stringify(value));
+  });
+
+  it('opens no pull request for the base, a protected branch, a skipped prefix or no name', () => {
+    const settings = autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: ['bot/'] } });
+    assert.equal(eligible(settings, 'feature'), true);
+    for (const name of ['', 'trunk', 'release', 'bot/x']) assert.equal(eligible(settings, name), false, name);
+    assert.equal(eligible(settings, 'main'), true, 'only the settings protect');
+    assert.equal(eligible(autocreateSettings({ prAutocreate: { skip: ['bot/', 'queue/'] } }), 'bot/x'), false, 'any one prefix skips');
+  });
+
+  it("reads the repository's settings file, the defaults where it has none", () => {
+    const sys = clocked();
+    sys.files.delete(`${ROOT}/.github/niyam.json`);
+    assert.deepEqual(settingsAt(sys, ROOT), autocreateSettings({}));
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { base: 'trunk' } }));
+    assert.equal(settingsAt(sys, ROOT).base, 'trunk');
+    sys.files.set(`${ROOT}/.github/niyam.json`, '{');
+    let unparsed = '';
+    try {
+      JSON.parse('{');
+    } catch (error) {
+      unparsed = (error as Error).message;
+    }
+    assert.throws(() => settingsAt(sys, ROOT), { message: `.github/niyam.json cannot be read: ${unparsed}` });
+    sys.read = () => {
+      throw 'plain';
+    };
+    assert.throws(() => settingsAt(sys, ROOT), { message: '.github/niyam.json cannot be read: plain' });
+  });
+
+  it('starts an opt-out record afresh, then adds to it', async () => {
+    const sys = clocked();
+    await recordOptout(sys, ROOT, 'feature', SHA, true);
+    assert.equal(sys.files.get(optoutPath(ROOT, 'feature')), `${SHA} 1\n`);
+    await recordOptout(sys, ROOT, 'feature', OTHER, false);
+    assert.equal(sys.files.get(optoutPath(ROOT, 'feature')), `${SHA} 1\n${OTHER} 0\n`);
+  });
+
+  it('opts out by NIYAM_PR_AUTOCREATE=0 or an older name the settings give', () => {
+    const settings = autocreateSettings({ prAutocreate: { optOut: ['OLD_PR'] } });
+    const sys = clocked();
+    assert.equal(optedOutNow(sys, settings), false);
+    for (const env of [{ NIYAM_PR_AUTOCREATE: '0' }, { OLD_PR: '0' }]) {
+      sys.env = env;
+      assert.equal(optedOutNow(sys, settings), true);
+    }
+    sys.env = { NIYAM_PR_AUTOCREATE: '1', OLD_PR: 'no' };
+    assert.equal(optedOutNow(sys, settings), false);
+  });
+
+  it('holds a pull request as a draft unless its own commits name exactly one slice', () => {
+    assert.equal(heldBy(slicesNamed('Slice: #7', SLUG), SLUG), undefined);
+    assert.equal(heldBy([], SLUG), 'its own commits name no slice in a `Slice:` trailer');
+    assert.equal(heldBy(slicesNamed('Slice: #7\n\nSlice: other/repo#8', SLUG), SLUG), 'its own commits name 2 slices (#7, other/repo#8)');
+  });
+
+  /** A FakeSys whose git answers each command from `answers`, by its arguments; anything else fails. */
+  const gitting = (answers: Record<string, string>): FakeSys => {
+    const sys = clocked();
+    sys.execOverride = (call) => {
+      if (call.command !== 'git') return undefined;
+      const out = answers[call.args.join(' ')];
+      return out === undefined ? { code: 1, stdout: '', stderr: 'no' } : { code: 0, stdout: out, stderr: '' };
+    };
+    return sys;
+  };
+  const AHEAD = `rev-parse --verify --quiet refs/remotes/origin/main`;
+
+  it("reads the branch's own slices, from the commits ahead of the base, or all of them", () => {
+    const ahead = gitting({ [AHEAD]: 'f00d\n', [`log --no-merges --reverse --format=%B refs/remotes/origin/main..${SHA}`]: 'feat\n\nSlice: #7\n' });
+    assert.deepEqual(ownSlices(ahead, ROOT, 'main', SHA, SLUG), slicesNamed('Slice: #7', SLUG));
+    assert.ok(ahead.calls.every((call) => call.cwd === ROOT && call.timeoutMs === 30_000));
+    const whole = gitting({ [`log --no-merges --reverse --format=%B ${SHA}`]: 'Slice: #8\n' });
+    assert.deepEqual(ownSlices(whole, ROOT, 'main', SHA, SLUG), slicesNamed('Slice: #8', SLUG));
+    assert.deepEqual(ownSlices(gitting({}), ROOT, 'main', SHA, SLUG), []);
+  });
+
+  const settings = autocreateSettings({});
+  const LOG = `log --no-merges --reverse --format=%h %s refs/remotes/origin/main..${SHA}`;
+  const intro = `Opened automatically when \`feature\` was pushed. The pushing session replaces this body with the full description (\`gh pr edit --body-file\`).`;
+
+  it('lists the commits the push sent in the placeholder, titled by the first', () => {
+    const sys = gitting({ [AHEAD]: 'f00d\n', [LOG]: 'abc1234 ✨ feat: one\ndef5678 fix: two words\n' });
+    assert.deepEqual(placeholder(sys, ROOT, settings, 'feature', SHA), {
+      title: '✨ feat: one',
+      body: [MARKER, intro, '', '## Commits', '', '- ✨ feat: one (`abc1234`)', '- fix: two words (`def5678`)', ''].join('\n'),
+    });
+    const footed = autocreateSettings({ prAutocreate: { footer: 'Made by a bot.' } });
+    assert.deepEqual(placeholder(sys, ROOT, footed, 'feature', SHA, 'its own commits name no slice in a `Slice:` trailer').body.split('\n'), [
+      MARKER,
+      intro,
+      '',
+      "Opened as a draft: its own commits name no slice in a `Slice:` trailer, so it may carry another slice's work. The session marks it ready with `gh pr ready` and this pull request's number once its description is written.",
+      '',
+      '## Commits',
+      '',
+      '- ✨ feat: one (`abc1234`)',
+      '- fix: two words (`def5678`)',
+      '',
+      'Made by a bot.',
+      '',
+    ]);
+  });
+
+  it('titles the placeholder by the branch when git lists nothing, and lists at most 50 commits', () => {
+    for (const sys of [gitting({}), gitting({ [AHEAD]: 'f00d\n', [LOG]: '' })]) {
+      assert.deepEqual(placeholder(sys, ROOT, settings, 'feature', SHA), { title: 'feature', body: [MARKER, intro, '', '## Commits', '', ''].join('\n') });
+    }
+    const many = (n: number) => Array.from({ length: n }, (_, at) => `c${String(at).padStart(6, '0')} subject ${at}`).join('\n');
+    const lines = (n: number) => placeholder(gitting({ [AHEAD]: 'f00d\n', [LOG]: many(n) }), ROOT, settings, 'feature', SHA).body.split('\n').filter((line) => line.startsWith('- '));
+    assert.equal(lines(50).length, 50);
+    assert.equal(lines(50).at(-1), '- subject 49 (`c000049`)');
+    assert.deepEqual(lines(52).slice(-2), ['- subject 49 (`c000049`)', '- …and 2 more']);
+  });
+
+  /** Pulls over a FakeSys, with each request's options as given. */
+  const asking = (): { sys: FakeSys; pulls: Pulls; options: string[][] } => {
+    const sys = clocked();
+    const options: string[][] = [];
+    const http = sys.http.bind(sys);
+    sys.http = (url, given = {}) => {
+      options.push(Object.keys(given));
+      return http(url, given);
+    };
+    return { sys, pulls: new Pulls(sys, SLUG, 'ghp_t', false), options };
+  };
+  const LIST = `/repos/${SLUG}/pulls?head=${encodeURIComponent('example-org:feature')}&state=all&per_page=${PR_LIST_LIMIT}`;
+  const restPull = (number: number, extra: Record<string, unknown> = {}) => ({ number, html_url: `https://github.com/${SLUG}/pull/${number}`, state: 'open', merged_at: null, head: { ref: 'feature' }, ...extra });
+
+  it('asks GitHub as the token, a minute to open a pull request and half one to read', async () => {
+    const { sys, pulls, options } = asking();
+    sys.route('GET', LIST, { status: 200, json: [] });
+    sys.route('POST', `/repos/${SLUG}/pulls`, { status: 201, json: restPull(5) });
+    sys.route('GET', `/repos/${SLUG}/pulls/5`, { status: 200, json: { body: 'b' } });
+    assert.deepEqual(await pulls.list('feature'), []);
+    assert.deepEqual(await pulls.create('feature', 'main', 't', 'b', true), { number: 5, url: `https://github.com/${SLUG}/pull/5`, state: 'OPEN' });
+    assert.equal(await pulls.body(5), 'b');
+    assert.deepEqual(
+      sys.requests.map(({ method, token, timeoutMs, body }) => [method, token, timeoutMs, body]),
+      [
+        ['GET', 'ghp_t', 30_000, undefined],
+        ['POST', 'ghp_t', 60_000, { head: 'feature', base: 'main', title: 't', body: 'b', draft: true }],
+        ['GET', 'ghp_t', 30_000, undefined],
+      ],
+    );
+    assert.deepEqual(options, [['method', 'token', 'timeoutMs'], ['method', 'token', 'timeoutMs', 'body'], ['method', 'token', 'timeoutMs']]);
+  });
+
+  it('reads a pull request only with a whole number, a link and an open or closed state', () => {
+    const url = `https://github.com/${SLUG}/pull/5`;
+    for (const value of [null, undefined, 'x', 5, {}, { number: 1.5, html_url: url, state: 'open' }, { number: 'x', html_url: url, state: 'open' }, { number: 5, html_url: 7, state: 'open' }]) {
+      assert.equal(Pulls.read(value), undefined, JSON.stringify(value));
+    }
+    assert.deepEqual(Pulls.read({ number: 5, html_url: url, state: 'closed', merged_at: null }), { number: 5, url, state: 'CLOSED' });
+    assert.deepEqual(Pulls.read({ number: 5, html_url: url, state: 'closed', merged_at: '2026-11-14T00:00:00Z' }), { number: 5, url, state: 'MERGED' });
+  });
+
+  it("drops a listed pull request GitHub gives no head for, and a full page says so", async () => {
+    const { sys, pulls } = asking();
+    sys.route('GET', LIST, { status: 200, json: [restPull(5, { head: undefined }), restPull(6)] });
+    assert.deepEqual(await pulls.listing('feature'), { pulls: [{ number: 6, url: `https://github.com/${SLUG}/pull/6`, state: 'OPEN' }], full: false });
+    sys.route('GET', LIST, { status: 200, json: Array.from({ length: PR_LIST_LIMIT }, (_, at) => restPull(at + 1)) });
+    assert.equal((await pulls.listing('feature') as { full: boolean }).full, true);
+    sys.route('GET', LIST, { status: 200, json: Array.from({ length: PR_LIST_LIMIT - 1 }, (_, at) => restPull(at + 1)) });
+    assert.equal((await pulls.listing('feature') as { full: boolean }).full, false);
+  });
+
+  it('says why it could not open a pull request, and when the branch has nothing ahead', async () => {
+    const answers: [HttpResult, unknown][] = [
+      [{ status: 200, json: restPull(5) }, 'GitHub answered 200 opening a pull request'],
+      [{ status: 422, json: { errors: [{ message: 'No commits between main and feature' }] } }, { noneAhead: true }],
+      [{ status: 400, json: { errors: [{ message: 'No commits between main and feature' }] } }, 'GitHub answered 400 opening a pull request'],
+      [{ status: 422, json: null }, 'GitHub answered 422 opening a pull request'],
+      [{ status: 422, json: undefined }, 'GitHub answered 422 opening a pull request'],
+    ];
+    for (const [answer, made] of answers) {
+      const { sys, pulls } = asking();
+      sys.route('POST', `/repos/${SLUG}/pulls`, answer);
+      assert.deepEqual(await pulls.create('feature', 'main', 't', 'b', false), made, JSON.stringify(answer));
+    }
+  });
+
+  it("reads a pull request's body: text, none as empty, or undefined when GitHub does not say", async () => {
+    const answers: [HttpResult, string | undefined][] = [
+      [{ status: 200, json: { body: null } }, ''],
+      [{ status: 200, json: null }, undefined],
+      [{ status: 200, json: {} }, undefined],
+      [{ status: 404, json: { body: 'b' } }, undefined],
+    ];
+    for (const [answer, body] of answers) {
+      const { sys, pulls } = asking();
+      sys.route('GET', `/repos/${SLUG}/pulls/5`, answer);
+      assert.equal(await pulls.body(5), body, JSON.stringify(answer));
+    }
+  });
+
+  /** ensurePr over FakeGitHub, with git answering from `answers`. */
+  const deciding = (answers: Record<string, string> = {}): { sys: FakeSys; github: FakeGitHub; pulls: Pulls } => {
+    const sys = gitting(answers);
+    const github = new FakeGitHub();
+    sys.http = github.http as FakeSys['http'];
+    return { sys, github, pulls: new Pulls(sys, SLUG, 't', false) };
+  };
+
+  it("says a merged pull request retired the branch, with the settings' page when they give one", async () => {
+    for (const [given, says] of [
+      [{}, 'Branch feature already has MERGED PR #7, so no new PR was opened: a merged PR retires its branch.'],
+      [{ retired: 'https://x.invalid/r' }, 'Branch feature already has MERGED PR #7, so no new PR was opened: a merged PR retires its branch (https://x.invalid/r).'],
+    ] as const) {
+      const { sys, github, pulls } = deciding();
+      github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+      const state = await ensurePr(sys, ROOT, autocreateSettings({ prAutocreate: given }), 'feature', SHA, pulls);
+      assert.deepEqual(state, { remoteSha: SHA, branch: 'feature', pr: null, created: false, notes: [says] });
+    }
+  });
+
+  it('keeps an opted-out push\'s "no PR", with when it was decided', async () => {
+    const { sys, github, pulls } = deciding();
+    sys.files.set(optoutPath(ROOT, 'feature'), `${SHA} 1\n`);
+    const state = await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    assert.deepEqual(state, { remoteSha: SHA, branch: 'feature', pr: null, created: false, notes: [], optedOutAt: sys.now().getTime() / 1000 });
+    // With NIYAM_PR_OPTOUT_RECHECK unset, the answer stands for 60 seconds.
+    const asked = github.calls.length;
+    await sys.sleep(59_000);
+    assert.deepEqual(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls), state);
+    assert.equal(github.calls.length, asked);
+  });
+
+  it('retries a failed create unless a second listing shows an open pull request', async () => {
+    const seconds: (string | Pull[])[] = ['GitHub answered 502 listing pull requests', [{ number: 9, url: 'u', state: 'CLOSED' }]];
+    for (const second of seconds) {
+      const { sys, github, pulls } = deciding({ [AHEAD]: 'f00d\n', [`rev-list --count refs/remotes/origin/main..${SHA}`]: '1\n' });
+      github.createAnswer = { status: 500, json: null };
+      const list = pulls.list.bind(pulls);
+      let listed = 0;
+      pulls.list = (branch) => (listed++ === 0 ? list(branch) : Promise.resolve(second));
+      assert.deepEqual(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls), { problem: 'could not create a PR for feature (GitHub answered 500 opening a pull request); will retry' }, JSON.stringify(second));
+    }
+  });
+
+  const NONE = `rev-list --count refs/remotes/origin/main..${SHA}`;
+  const created = (cloud: boolean) => `PR #100 was opened as a draft: its own commits name no slice in a \`Slice:\` trailer, so it may carry another slice's work. Once its description is written, ${
+    cloud ? "ask the user to mark it ready: `gh pr ready 100` needs GraphQL, which this cloud session's GitHub proxy refuses" : 'mark it ready with `gh pr ready 100`'
+  }.`;
+
+  it('opens a draft for a branch that names no slice, saying how to mark it ready', async () => {
+    for (const cloud of [false, true]) {
+      const { sys, github } = deciding({ [AHEAD]: 'f00d\n', [NONE]: '1\n' });
+      const state = await ensurePr(sys, ROOT, settings, 'feature', SHA, new Pulls(sys, SLUG, 't', cloud));
+      assert.deepEqual(state, { remoteSha: SHA, branch: 'feature', pr: { number: 100, url: `https://github.com/${SLUG}/pull/100`, state: 'OPEN' }, created: true, notes: [created(cloud)] });
+      assert.equal((github.calls.find((call) => call.method === 'POST')?.body as { draft?: unknown }).draft, true);
+    }
+  });
+
+  it('opens none for a branch with nothing ahead of the base, asking git exactly that', async () => {
+    const { sys, github, pulls } = deciding({ [AHEAD]: 'f00d\n', [NONE]: '0\n' });
+    assert.deepEqual(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls), { remoteSha: SHA, branch: 'feature', pr: null, created: false, notes: ['Branch feature has no commits ahead of main, so no PR was opened.'] });
+    assert.equal(github.count('POST', 'pulls'), 0);
+    assert.deepEqual(
+      sys.calls.map((call) => call.args.join(' ')),
+      [AHEAD, NONE],
+    );
+  });
+
+  it('takes the open pull request, and says one closed unmerged is the user\'s to reopen', async () => {
+    const open = deciding();
+    open.github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' }, { number: 8, head: 'feature', state: 'open', merged_at: null, body: '' });
+    assert.deepEqual(await ensurePr(open.sys, ROOT, settings, 'feature', SHA, open.pulls), { remoteSha: SHA, branch: 'feature', pr: { number: 8, url: `https://github.com/${SLUG}/pull/8`, state: 'OPEN' }, created: false, notes: [] });
+    const closed = deciding();
+    closed.github.pulls.push({ number: 9, head: 'feature', state: 'closed', merged_at: null, body: '' });
+    assert.deepEqual(await ensurePr(closed.sys, ROOT, settings, 'feature', SHA, closed.pulls), {
+      remoteSha: SHA,
+      branch: 'feature',
+      pr: null,
+      created: false,
+      notes: ["Branch feature's PR #9 was closed without merging, so no new PR was opened; reopening it is the user's call."],
+    });
+  });
+
+  it('answers from the record for the commit it holds, writing it inside the toplevel', async () => {
+    const { sys, github, pulls } = deciding();
+    github.pulls.push({ number: 8, head: 'feature', state: 'open', merged_at: null, body: '' });
+    const confined: string[] = [];
+    const confine = sys.confine.bind(sys);
+    sys.confine = (root, path) => {
+      confined.push(path);
+      confine(root, path);
+    };
+    const first = await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    assert.ok(confined.filter((path) => path === statePath(ROOT, 'feature')).length >= 2, 'checked by the lock, and again by the write');
+    assert.ok(sys.dirs.includes(stateDir(ROOT)));
+    const asked = github.calls.length;
+    assert.deepEqual(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls), first);
+    assert.equal(github.calls.length, asked, 'the record answers');
+    // A record that is no record asks again.
+    sys.files.set(statePath(ROOT, 'feature'), 'null');
+    await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    assert.equal(github.calls.length, asked + 1);
+  });
+
+  it('waits on a lock up to the very edge of stale, and gives up once 90 seconds have passed', async () => {
+    const sys = clocked();
+    const lock = `${statePath(ROOT, 'feature')}.lock`;
+    sys.files.set(lock, '');
+    sys.mtimes.set(lock, new Date(sys.now().getTime() - 180_000));
+    const order: string[] = [];
+    const sleep = sys.sleep.bind(sys);
+    sys.sleep = async (ms) => {
+      order.push('waited');
+      sys.files.delete(lock);
+      await sleep(ms);
+    };
+    await withLock(sys, ROOT, 'feature', () => order.push('ran'));
+    assert.deepEqual(order, ['waited', 'ran']);
+
+    const held = clocked();
+    held.files.set(lock, '');
+    held.mtimes.set(lock, held.now());
+    await assert.rejects(withLock(held, ROOT, 'feature', () => 'never'), { message: `lock ${lock} held too long` });
+    // A wait at 0 s, … and one at 90 s itself, the deadline not yet passed.
+    assert.deepEqual(held.slept, Array.from({ length: 181 }, () => 500));
+  });
+
+  it('reads a push only after git, and only from a parse it can make', () => {
+    const cwd = '/w';
+    assert.equal(pushTarget('push origin x', cwd, HOME), undefined, 'no git');
+    assert.equal(pushTarget('git -c', cwd, HOME), undefined, 'options to the end');
+    assert.deepEqual(pushTarget('git push', cwd, HOME, () => {
+      throw new Error('unreadable');
+    }), { dir: cwd, resolvable: false });
+    assert.deepEqual(pushTarget('git -C ~ push origin feature', cwd, HOME), { dir: HOME, branch: 'feature', resolvable: true });
+    assert.deepEqual(pushTarget('git -C x~/r push origin feature', cwd, HOME), { dir: '/w/x~/r', branch: 'feature', resolvable: true });
+    for (const option of ['--push-option', '--receive-pack', '--exec']) {
+      assert.deepEqual(pushTarget(`git push ${option} value origin feature`, cwd, HOME), { dir: cwd, branch: 'feature', resolvable: true }, option);
+    }
+    for (const option of ['--all', '--repo=x', '--prune', '-d']) assert.deepEqual(pushTarget(`git push ${option} origin feature`, cwd, HOME), { dir: cwd, resolvable: false }, option);
+  });
+});
+
+describe('the opt-out record', () => {
+  const root = ROOT;
+  const path = optoutPath(root, 'feature');
+
+  it('fails closed on a record recordOptout never writes, and on a full one without the commit', () => {
+    const sys = clocked();
+    assert.equal(optedOut(sys, root, 'feature', SHA), false);
+    for (const text of [`${SHA} 1`, `${SHA} 2\n`, 'junk\n', '\n']) {
+      sys.files.set(path, text);
+      assert.equal(optoutLines(sys, root, 'feature'), undefined, JSON.stringify(text));
+      assert.equal(optedOut(sys, root, 'feature', SHA), true);
+    }
+    sys.files.set(path, `${OTHER} 0\n`.repeat(OPTOUT_KEPT));
+    assert.equal(optedOut(sys, root, 'feature', SHA), true);
+    sys.files.set(path, `${SHA} 1\n${OTHER} 0\n${SHA} 0\n`);
+    assert.equal(optedOut(sys, root, 'feature', SHA), false);
+    sys.read = () => {
+      throw new Error('EACCES');
+    };
+    assert.equal(optoutLines(sys, root, 'feature'), undefined);
+  });
+
+  it('keeps the last OPTOUT_KEPT pushes, and never trims the line of the commit the remote holds', async () => {
+    const sys = clocked();
+    const landed = 'c'.repeat(40);
+    sys.files.set(path, `${landed} 1\n`);
+    for (let n = 0; n < OPTOUT_KEPT + 5; n++) await recordOptout(sys, root, 'feature', n.toString(16).padStart(40, '0'), false, landed);
+    const lines = (sys.files.get(path) as string).split('\n').filter(Boolean);
+    assert.equal(lines.length, OPTOUT_KEPT);
+    assert.equal(lines[0], `${landed} 1`);
+    assert.equal(optedOut(sys, root, 'feature', landed), true);
+    assert.ok(sys.replaced.includes(path));
+    sys.files.set(path, 'unreadable');
+    await recordOptout(sys, root, 'feature', SHA, true);
+    assert.equal(sys.files.get(path), `${SHA} 1\n`);
+  });
+
+  it('waits for the branch lock a decision holds, abandons a stale one, and gives up after 90 seconds', async () => {
+    const sys = clocked();
+    const lock = `${statePath(root, 'feature')}.lock`;
+    sys.files.set(lock, '');
+    let order: string[] = [];
+    const held = withLock(sys, root, 'feature', () => order.push('ran'));
+    const sleep = sys.sleep.bind(sys);
+    sys.sleep = async (ms) => {
+      order.push('waited');
+      sys.files.delete(lock);
+      await sleep(ms);
+    };
+    await held;
+    assert.deepEqual(order, ['waited', 'ran']);
+    assert.equal(sys.files.has(lock), false);
+
+    order = [];
+    sys.files.set(lock, '');
+    sys.mtimes.set(lock, new Date(sys.now().getTime() - 181_000));
+    await withLock(sys, root, 'feature', () => order.push('ran'));
+    assert.deepEqual(order, ['ran']);
+
+    sys.files.set(lock, '');
+    sys.mtimes.set(lock, sys.now());
+    let clock = sys.now().getTime();
+    sys.now = () => new Date(clock);
+    sys.sleep = async (ms) => {
+      clock += ms;
+    };
+    await assert.rejects(withLock(sys, root, 'feature', () => order.push('never')), /lock .* held too long/);
+    assert.equal(sys.files.has(lock), true);
+  });
+
+  it('claims again when the lock goes between the claim and its age', async () => {
+    const sys = clocked();
+    let first = true;
+    sys.claim = () => {
+      if (first) {
+        first = false;
+        return false;
+      }
+      return true;
+    };
+    sys.modified = () => undefined;
+    assert.equal(await withLock(sys, root, 'feature', () => 'ran'), 'ran');
+  });
+});
+
+describe('ensurePr', () => {
+  function fake(): { sys: FakeSys; github: FakeGitHub; pulls: Pulls } {
+    const sys = clocked();
+    const github = new FakeGitHub();
+    sys.http = github.http as FakeSys['http'];
+    sys.execOverride = (call) => (call.command === 'git' ? { code: 1, stdout: '', stderr: '' } : undefined);
+    return { sys, github, pulls: new Pulls(sys, SLUG, 't', false) };
+  }
+  const settings = autocreateSettings({});
+
+  it('takes the open pull request a racing creator opened when its own create fails', async () => {
+    const { sys, github, pulls } = fake();
+    github.createAnswer = { status: 422, json: { message: 'Validation Failed', errors: [{ message: 'A pull request already exists for example-org:feature.' }] } };
+    const raced = Object.assign(pulls, {
+      list: async (branch: string) => (github.count('POST', 'pulls') === 0 ? [] : [{ number: 3, url: 'u', state: 'OPEN' as const }].filter(() => branch === 'feature')),
+    });
+    const state = await ensurePr(sys, ROOT, settings, 'feature', SHA, raced);
+    assert.deepEqual(state, { remoteSha: SHA, branch: 'feature', pr: { number: 3, url: 'u', state: 'OPEN' }, created: false, notes: [] });
+  });
+
+  it('retries a create that failed with no pull request to find, and keeps nothing', async () => {
+    const { sys, github, pulls } = fake();
+    github.createAnswer = { status: 500, json: null };
+    assert.deepEqual(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls), { problem: 'could not create a PR for feature (GitHub answered 500 opening a pull request); will retry' });
+    github.createAnswer = undefined;
+    github.queued.push(new Error('socket hang up'));
+    github.queued.push({ status: 200, json: [] });
+    github.queued.push({ status: 500, json: null });
+    assert.match(JSON.stringify(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls)), /could not list PRs for feature \(socket hang up\)/);
+    assert.match(JSON.stringify(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls)), /could not create a PR for feature/);
+    assert.equal(sys.exists(statePath(ROOT, 'feature')), false);
+  });
+
+  it('records no commits ahead when GitHub says so', async () => {
+    const { sys, github, pulls } = fake();
+    github.createAnswer = { status: 422, json: { message: 'Validation Failed', errors: [{ message: 'No commits between main and feature' }] } };
+    const state = await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    assert.deepEqual('notes' in state && state.notes, ['Branch feature has no commits ahead of main, so no PR was opened.']);
+  });
+
+  it('reads the whole list as unreadable when one pull is, and drops pulls of another branch', async () => {
+    const { sys, github, pulls } = fake();
+    github.extra = [{ number: 'x' }];
+    assert.deepEqual(await pulls.list('feature'), 'GitHub listed pull requests unreadably');
+    github.extra = [{ number: 4, html_url: 'u', state: 'open', merged_at: null, head: { ref: 'not-feature' } }];
+    assert.deepEqual(await pulls.list('feature'), []);
+    github.queued.push({ status: 200, json: { message: 'not a list' } });
+    assert.deepEqual(await pulls.list('feature'), 'GitHub listed pull requests unreadably');
+    for (const value of [null, 'x', { number: 1, html_url: '', state: 'open' }, { number: 1, html_url: 'u', state: 'draft' }]) assert.equal(Pulls.read(value), undefined);
+    github.queued.push({ status: 201, json: { number: 1 } });
+    assert.equal(await pulls.create('feature', 'main', 't', 'b', false), 'GitHub answered 201 opening a pull request');
+    github.queued.push(new Error('offline'));
+    assert.equal(await pulls.create('feature', 'main', 't', 'b', false), 'offline');
+    github.queued.push({ status: 200, json: { body: 7 } });
+    assert.equal(await pulls.body(1), undefined);
+    github.queued.push(new Error('offline'));
+    assert.equal(await pulls.body(1), undefined);
+  });
+
+  it('names a non-Error failure as text', async () => {
+    const { sys, pulls } = fake();
+    sys.http = () => Promise.reject('plain');
+    assert.equal(await pulls.list('feature'), 'plain');
+  });
+
+  it('keeps an opted-out branch\'s "no PR" for NIYAM_PR_OPTOUT_RECHECK seconds', async () => {
+    const { sys, github, pulls } = fake();
+    sys.files.set(optoutPath(ROOT, 'feature'), `${SHA} 1\n`);
+    await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    const asked = github.calls.length;
+    for (const value of ['5', 'soon', '-1', '', ' ']) {
+      sys.env = { NIYAM_PR_OPTOUT_RECHECK: value };
+      await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    }
+    assert.equal(github.calls.length, asked);
+    sys.env = { NIYAM_PR_OPTOUT_RECHECK: '0' };
+    await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    assert.equal(github.calls.length, asked + 1);
+    sys.files.set(statePath(ROOT, 'feature'), '[]');
+    await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
+    assert.equal(github.calls.length, asked + 2);
+  });
+});
+
+describe('pushTarget', () => {
+  const cwd = '/w';
+  it('reads where a push goes', () => {
+    assert.deepEqual(pushTarget('git push', cwd, HOME), { dir: cwd, resolvable: true });
+    assert.deepEqual(pushTarget('cd x && git push -u origin HEAD', cwd, HOME), { dir: cwd, resolvable: true });
+    assert.deepEqual(pushTarget('git push origin +feature:', cwd, HOME), { dir: cwd, resolvable: true });
+    assert.deepEqual(pushTarget('git -c a=b -C ~/r push --force-with-lease -o ci.skip origin feature', cwd, HOME), { dir: `${HOME}/r`, branch: 'feature', resolvable: true });
+    assert.deepEqual(pushTarget('git push origin local:refs/heads/remote', cwd, HOME), { dir: cwd, branch: 'remote', resolvable: true });
+    assert.deepEqual(pushTarget('git status; git push origin x | cat', cwd, HOME), { dir: cwd, branch: 'x', resolvable: true });
+    assert.deepEqual(pushTarget('sudo git --no-pager push', cwd, HOME), { dir: cwd, resolvable: true });
+  });
+
+  it('names nothing for a command that pushes nothing, and only git can say for the rest', () => {
+    assert.equal(pushTarget('git status && echo push', cwd, HOME), undefined);
+    assert.equal(pushTarget('git -C', cwd, HOME), undefined);
+    for (const command of ['git push --delete origin x', 'git push origin --tags', 'git push --mirror', 'git --work-tree=x push', 'git push upstream', 'git push origin $(branch)']) {
+      assert.equal(pushTarget(command, cwd, HOME)?.resolvable, false, command);
+    }
+  });
+});
+
+describe('autocreateSettings', () => {
+  it('takes the defaults, or what the client sets', () => {
+    assert.deepEqual(autocreateSettings(null), autocreateSettings({}));
+    assert.equal(autocreateSettings({}).autofixList, false);
+    assert.deepEqual(autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: [], optOut: ['OLD_VAR'], retired: 'https://x.invalid/a', retire: 'tool retire --pr {number}', footer: 'f', autofixList: true } }), {
+      base: 'trunk',
+      draft: false,
+      autofixList: true,
+      protected: ['release'],
+      skip: [],
+      optOut: ['OLD_VAR'],
+      describe: '`gh pr edit --body-file`',
+      retired: 'https://x.invalid/a',
+      retire: 'tool retire --pr {number}',
+      footer: 'f',
+    });
+  });
+
+  it('names the first key it cannot take', () => {
+    for (const [value, error] of [
+      [{ base: '../x' }, /base must be a branch name/],
+      [{ protected: 'main' }, /protected must be a list of branch names/],
+      [{ skip: [''] }, /skip must be a list of branch names/],
+      [{ optOut: ['lower'] }, /optOut must be a list of variable names/],
+      [{ describe: 'a\nb' }, /describe must be one line/],
+      [{ footer: ' ' }, /footer must be one line/],
+      [{ retired: 'http://x' }, /retired must be an https link/],
+      [{ retire: 'tool retire' }, /retire must name the merged pull request as \{number\}/],
+      [{ retire: 'a\nb' }, /retire must be one line/],
+      [{ autofixList: 'yes' }, /autofixList must be true or false/],
+      [{ autocreate: true }, /unknown key "autocreate".*"footer" and "autofixList"/],
+    ] as const) {
+      assert.throws(() => autocreateSettings({ prAutocreate: value }), error);
+    }
+  });
+});
+
+describe('pullsFor: the token GitHub is asked with', () => {
+  const ID = 'abc-123';
+  function at(): FakeSys {
+    const sys = clocked().ready();
+    sys.execOverride = (call) => (call.command === 'git' && call.args[0] === 'config' ? { code: 0, stdout: `${URL_OF}\n`, stderr: '' } : undefined);
+    return sys;
+  }
+
+  /** The token the transport's first request carries, or why it made none. */
+  async function tokenOf(sys: FakeSys, session: string | undefined): Promise<string | undefined> {
+    const pulls = pullsFor(sys, ROOT, session);
+    assert.ok(pulls instanceof Pulls);
+    sys.requests.length = 0;
+    const listed = await pulls.list('feature');
+    return typeof listed === 'string' && sys.requests.length === 0 ? listed : sys.requests[0]?.token;
+  }
+
+  it("acts as the session's agent, or not at all", async () => {
+    const sys = at();
+    assert.match((await tokenOf(sys, ID)) ?? '', /^niyam could not act as the agent \(.*\); run `niyam doctor`$/);
+    sys.files.set(sessionRecord(HOME, ID) as string, `${JSON.stringify({ agent: 'ExampleBot' })}\n`);
+    sys.env = { CLAUDE_CODE_REMOTE: 'true' };
+    const cloud = pullsFor(sys, ROOT, ID);
+    assert.ok(cloud instanceof Pulls && cloud.cloud && cloud.slug === SLUG);
+    assert.equal(await tokenOf(sys, ID), PROXY_TOKEN);
+  });
+
+  it("uses the push's GH_TOKEN for the watcher, else gh's account, never the lock's placeholder", async () => {
+    const sys = at();
+    sys.env = { GH_TOKEN: 'ghp_push' };
+    assert.equal(await tokenOf(sys, undefined), 'ghp_push');
+    sys.env = { GH_TOKEN: NO_TOKEN };
+    const base = sys.execOverride;
+    sys.execOverride = (call) => (call.command === 'gh' ? { code: 0, stdout: 'ghp_gh\n', stderr: '' } : base(call));
+    assert.equal(await tokenOf(sys, undefined), 'ghp_gh');
+    sys.execOverride = (call) => (call.command === 'gh' ? { code: 0, stdout: `${NO_TOKEN}\n`, stderr: '' } : base(call));
+    assert.equal(await tokenOf(sys, undefined), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
+    sys.execOverride = (call) => (call.command === 'gh' ? { code: 1, stdout: '', stderr: 'no' } : base(call));
+    assert.equal(await tokenOf(sys, undefined), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
+  });
+
+  it('finds the token once, at the first request', async () => {
+    const sys = at();
+    let found = 0;
+    const pulls = new Pulls(sys, SLUG, () => {
+      found++;
+      return 'ghp_once';
+    }, false);
+    await pulls.list('a');
+    await pulls.body(1);
+    assert.equal(found, 1);
+    assert.deepEqual(sys.requests.map((request) => request.token), ['ghp_once', 'ghp_once']);
+  });
+
+  it('asks nothing of a repository whose origin is not on GitHub', () => {
+    const sys = at();
+    sys.execOverride = () => ({ code: 0, stdout: 'git@gitlab.com:a/b.git\n', stderr: '' });
+    assert.deepEqual(pullsFor(sys, ROOT, undefined), { problem: 'origin is not a github.com repository' });
+  });
+});
+
+describe('niyam pr-autocreate', () => {
+  it('never exits with a usage error, which would hold a hook', async () => {
+    const seen = capture();
+    assert.equal(await run(['pr-autocreate'], seen.io, () => clocked()), 0);
+    assert.equal(await run(['pr-autocreate', 'nope', '--x'], seen.io, () => clocked()), 0);
+    assert.deepEqual(seen.err, [
+      'pr-autocreate: unknown mode ""; it takes claude-hook, spawn-watchers, refuse-retired or watch; nothing done',
+      'pr-autocreate: unknown mode "nope"; it takes claude-hook, spawn-watchers, refuse-retired or watch; nothing done',
+    ]);
+  });
+
+  it('exits 0 when the machine cannot even be read', async () => {
+    const seen = capture();
+    assert.equal(await run(['pr-autocreate', 'claude-hook'], seen.io, () => Promise.reject(new Error('no home'))), 0);
+    assert.deepEqual(seen.err, ['pr-autocreate: unexpected error (no home); nothing done']);
+    assert.equal(await run(['pr-autocreate', 'claude-hook'], seen.io, () => Promise.reject('plain')), 0);
+  });
+
+  it('reads the hook and pre-push input from stdin, and fails open on its own error', async () => {
+    const sys = clocked();
+    sys.stdin = 'not json';
+    const hooked = capture();
+    assert.equal(await prAutocreate(sys, hooked.io, ['claude-hook']), 0);
+    assert.deepEqual(hooked.err, ['pr-autocreate: hook input is not valid JSON; nothing done']);
+    sys.stdin = '';
+    assert.equal(await prAutocreate(sys, capture().io, ['spawn-watchers', '--root', ROOT, '--remote', 'origin']), 0);
+    const watched = capture();
+    assert.equal(await prAutocreate(sys, watched.io, ['watch']), 0);
+    assert.match(watched.out[0] as string, /watch: watch needs --root; no PR opened$/);
+    sys.readStdin = () => {
+      throw new Error('EBADF');
+    };
+    const broken = capture();
+    assert.equal(await prAutocreate(sys, broken.io, ['claude-hook']), 0);
+    assert.deepEqual(broken.err, ['pr-autocreate: unexpected error (EBADF); nothing done']);
+  });
+
+  it('runs refuse-retired from stdin, and a crash there exits RETIRED_UNCHECKED, never the 0 of a live branch', async () => {
+    const sys = clocked();
+    sys.stdin = '';
+    assert.equal(await prAutocreate(sys, capture().io, ['refuse-retired', '--root', ROOT, '--remote', 'origin']), 0);
+    sys.readStdin = () => {
+      throw new Error('EBADF');
+    };
+    const broken = capture();
+    assert.equal(await prAutocreate(sys, broken.io, ['refuse-retired', '--root', ROOT, '--remote', 'origin']), RETIRED_UNCHECKED);
+    assert.deepEqual(broken.out, ["⚠️  Could not check whether a pushed branch's PR already merged (pr-autocreate crashed: EBADF); not checked."]);
+    sys.readStdin = () => {
+      throw 'plain';
+    };
+    const plain = capture();
+    assert.equal(await prAutocreate(sys, plain.io, ['refuse-retired']), RETIRED_UNCHECKED);
+    assert.match(plain.out[0] as string, /pr-autocreate crashed: plain\); not checked\.$/);
+  });
+});
+
+describe('retiredBy and pushedRefs', () => {
+  const pull = (number: number, state: 'OPEN' | 'MERGED' | 'CLOSED') => ({ number, url: `https://github.com/${SLUG}/pull/${number}`, state });
+  it('a merged PR retires a branch only while none is open', () => {
+    assert.equal(retiredBy([]), undefined);
+    assert.equal(retiredBy([pull(1, 'CLOSED')]), undefined);
+    assert.equal(retiredBy([pull(2, 'OPEN'), pull(1, 'MERGED')]), undefined);
+    assert.deepEqual(retiredBy([pull(3, 'CLOSED'), pull(1, 'MERGED')]), pull(1, 'MERGED'));
+  });
+
+  it("reads git's pre-push ref lines: the remote branch of each real commit", () => {
+    assert.deepEqual(pushedRefs([`refs/heads/a ${SHA} refs/heads/b ${OTHER}`, `x ${'0'.repeat(40)} refs/heads/gone ${OTHER}`, `refs/tags/t ${SHA} refs/tags/t ${OTHER}`, '  ', 'a b c'].join('\n')), [
+      { localSha: SHA, branch: 'b', remoteSha: OTHER },
+    ]);
+  });
+});
+
+// The real-git suites below block the event loop in git, so on macOS, where stdout to a pipe is written
+// asynchronously, the in-process results above would reach the lane's reader only once the file ends. One turn of
+// the loop first lets them out, so a mutant they kill ends here.
 describe('pr-autocreate claude-hook (real git, GitHub faked)', () => {
+  before(reported);
+  afterEach(reported);
+
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
   let sys: ReturnType<typeof machine>;
@@ -490,6 +1297,7 @@ describe('pr-autocreate claude-hook (real git, GitHub faked)', () => {
 });
 
 describe("pr-autocreate claude-hook and sarathi's Auto-fix list", () => {
+  afterEach(reported);
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
   let sys: ReturnType<typeof machine>;
@@ -672,6 +1480,7 @@ describe("pr-autocreate claude-hook and sarathi's Auto-fix list", () => {
 });
 
 describe('pr-autocreate spawn-watchers and watch (real git, GitHub faked)', () => {
+  afterEach(reported);
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
   let sys: ReturnType<typeof machine>;
@@ -853,350 +1662,8 @@ describe('pr-autocreate spawn-watchers and watch (real git, GitHub faked)', () =
   });
 });
 
-describe('the opt-out record', () => {
-  const root = ROOT;
-  const path = optoutPath(root, 'feature');
-
-  it('fails closed on a record recordOptout never writes, and on a full one without the commit', () => {
-    const sys = new FakeSys();
-    assert.equal(optedOut(sys, root, 'feature', SHA), false);
-    for (const text of [`${SHA} 1`, `${SHA} 2\n`, 'junk\n', '\n']) {
-      sys.files.set(path, text);
-      assert.equal(optoutLines(sys, root, 'feature'), undefined, JSON.stringify(text));
-      assert.equal(optedOut(sys, root, 'feature', SHA), true);
-    }
-    sys.files.set(path, `${OTHER} 0\n`.repeat(OPTOUT_KEPT));
-    assert.equal(optedOut(sys, root, 'feature', SHA), true);
-    sys.files.set(path, `${SHA} 1\n${OTHER} 0\n${SHA} 0\n`);
-    assert.equal(optedOut(sys, root, 'feature', SHA), false);
-    sys.read = () => {
-      throw new Error('EACCES');
-    };
-    assert.equal(optoutLines(sys, root, 'feature'), undefined);
-  });
-
-  it('keeps the last OPTOUT_KEPT pushes, and never trims the line of the commit the remote holds', async () => {
-    const sys = new FakeSys();
-    const landed = 'c'.repeat(40);
-    sys.files.set(path, `${landed} 1\n`);
-    for (let n = 0; n < OPTOUT_KEPT + 5; n++) await recordOptout(sys, root, 'feature', n.toString(16).padStart(40, '0'), false, landed);
-    const lines = (sys.files.get(path) as string).split('\n').filter(Boolean);
-    assert.equal(lines.length, OPTOUT_KEPT);
-    assert.equal(lines[0], `${landed} 1`);
-    assert.equal(optedOut(sys, root, 'feature', landed), true);
-    assert.ok(sys.replaced.includes(path));
-    sys.files.set(path, 'unreadable');
-    await recordOptout(sys, root, 'feature', SHA, true);
-    assert.equal(sys.files.get(path), `${SHA} 1\n`);
-  });
-
-  it('waits for the branch lock a decision holds, abandons a stale one, and gives up after 90 seconds', async () => {
-    const sys = new FakeSys();
-    const lock = `${statePath(root, 'feature')}.lock`;
-    sys.files.set(lock, '');
-    let order: string[] = [];
-    const held = withLock(sys, root, 'feature', () => order.push('ran'));
-    sys.sleep = async (ms) => {
-      sys.slept.push(ms);
-      order.push('waited');
-      sys.files.delete(lock);
-    };
-    await held;
-    assert.deepEqual(order, ['waited', 'ran']);
-    assert.equal(sys.files.has(lock), false);
-
-    order = [];
-    sys.files.set(lock, '');
-    sys.mtimes.set(lock, new Date(sys.now().getTime() - 181_000));
-    await withLock(sys, root, 'feature', () => order.push('ran'));
-    assert.deepEqual(order, ['ran']);
-
-    sys.files.set(lock, '');
-    sys.mtimes.set(lock, sys.now());
-    let clock = sys.now().getTime();
-    sys.now = () => new Date(clock);
-    sys.sleep = async (ms) => {
-      clock += ms;
-    };
-    await assert.rejects(withLock(sys, root, 'feature', () => order.push('never')), /lock .* held too long/);
-    assert.equal(sys.files.has(lock), true);
-  });
-
-  it('claims again when the lock goes between the claim and its age', async () => {
-    const sys = new FakeSys();
-    let first = true;
-    sys.claim = () => {
-      if (first) {
-        first = false;
-        return false;
-      }
-      return true;
-    };
-    sys.modified = () => undefined;
-    assert.equal(await withLock(sys, root, 'feature', () => 'ran'), 'ran');
-  });
-});
-
-describe('ensurePr', () => {
-  function fake(): { sys: FakeSys; github: FakeGitHub; pulls: Pulls } {
-    const sys = new FakeSys();
-    const github = new FakeGitHub();
-    sys.http = github.http as FakeSys['http'];
-    sys.execOverride = (call) => (call.command === 'git' ? { code: 1, stdout: '', stderr: '' } : undefined);
-    return { sys, github, pulls: new Pulls(sys, SLUG, 't', false) };
-  }
-  const settings = autocreateSettings({});
-
-  it('takes the open pull request a racing creator opened when its own create fails', async () => {
-    const { sys, github, pulls } = fake();
-    github.createAnswer = { status: 422, json: { message: 'Validation Failed', errors: [{ message: 'A pull request already exists for example-org:feature.' }] } };
-    const raced = Object.assign(pulls, {
-      list: async (branch: string) => (github.count('POST', 'pulls') === 0 ? [] : [{ number: 3, url: 'u', state: 'OPEN' as const }].filter(() => branch === 'feature')),
-    });
-    const state = await ensurePr(sys, ROOT, settings, 'feature', SHA, raced);
-    assert.deepEqual(state, { remoteSha: SHA, branch: 'feature', pr: { number: 3, url: 'u', state: 'OPEN' }, created: false, notes: [] });
-  });
-
-  it('retries a create that failed with no pull request to find, and keeps nothing', async () => {
-    const { sys, github, pulls } = fake();
-    github.createAnswer = { status: 500, json: null };
-    assert.deepEqual(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls), { problem: 'could not create a PR for feature (GitHub answered 500 opening a pull request); will retry' });
-    github.createAnswer = undefined;
-    github.queued.push(new Error('socket hang up'));
-    github.queued.push({ status: 200, json: [] });
-    github.queued.push({ status: 500, json: null });
-    assert.match(JSON.stringify(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls)), /could not list PRs for feature \(socket hang up\)/);
-    assert.match(JSON.stringify(await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls)), /could not create a PR for feature/);
-    assert.equal(sys.exists(statePath(ROOT, 'feature')), false);
-  });
-
-  it('records no commits ahead when GitHub says so', async () => {
-    const { sys, github, pulls } = fake();
-    github.createAnswer = { status: 422, json: { message: 'Validation Failed', errors: [{ message: 'No commits between main and feature' }] } };
-    const state = await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
-    assert.deepEqual('notes' in state && state.notes, ['Branch feature has no commits ahead of main, so no PR was opened.']);
-  });
-
-  it('reads the whole list as unreadable when one pull is, and drops pulls of another branch', async () => {
-    const { sys, github, pulls } = fake();
-    github.extra = [{ number: 'x' }];
-    assert.deepEqual(await pulls.list('feature'), 'GitHub listed pull requests unreadably');
-    github.extra = [{ number: 4, html_url: 'u', state: 'open', merged_at: null, head: { ref: 'not-feature' } }];
-    assert.deepEqual(await pulls.list('feature'), []);
-    github.queued.push({ status: 200, json: { message: 'not a list' } });
-    assert.deepEqual(await pulls.list('feature'), 'GitHub listed pull requests unreadably');
-    for (const value of [null, 'x', { number: 1, html_url: '', state: 'open' }, { number: 1, html_url: 'u', state: 'draft' }]) assert.equal(Pulls.read(value), undefined);
-    github.queued.push({ status: 201, json: { number: 1 } });
-    assert.equal(await pulls.create('feature', 'main', 't', 'b', false), 'GitHub answered 201 opening a pull request');
-    github.queued.push(new Error('offline'));
-    assert.equal(await pulls.create('feature', 'main', 't', 'b', false), 'offline');
-    github.queued.push({ status: 200, json: { body: 7 } });
-    assert.equal(await pulls.body(1), undefined);
-    github.queued.push(new Error('offline'));
-    assert.equal(await pulls.body(1), undefined);
-  });
-
-  it('names a non-Error failure as text', async () => {
-    const { sys, pulls } = fake();
-    sys.http = () => Promise.reject('plain');
-    assert.equal(await pulls.list('feature'), 'plain');
-  });
-
-  it('keeps an opted-out branch\'s "no PR" for NIYAM_PR_OPTOUT_RECHECK seconds', async () => {
-    const { sys, github, pulls } = fake();
-    sys.files.set(optoutPath(ROOT, 'feature'), `${SHA} 1\n`);
-    await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
-    const asked = github.calls.length;
-    for (const value of ['5', 'soon', '-1', '']) {
-      sys.env = { NIYAM_PR_OPTOUT_RECHECK: value };
-      await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
-    }
-    assert.equal(github.calls.length, asked);
-    sys.env = { NIYAM_PR_OPTOUT_RECHECK: '0' };
-    await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
-    assert.equal(github.calls.length, asked + 1);
-    sys.files.set(statePath(ROOT, 'feature'), '[]');
-    await ensurePr(sys, ROOT, settings, 'feature', SHA, pulls);
-    assert.equal(github.calls.length, asked + 2);
-  });
-});
-
-describe('pushTarget', () => {
-  const cwd = '/w';
-  it('reads where a push goes', () => {
-    assert.deepEqual(pushTarget('git push', cwd, HOME), { dir: cwd, resolvable: true });
-    assert.deepEqual(pushTarget('cd x && git push -u origin HEAD', cwd, HOME), { dir: cwd, resolvable: true });
-    assert.deepEqual(pushTarget('git push origin +feature:', cwd, HOME), { dir: cwd, resolvable: true });
-    assert.deepEqual(pushTarget('git -c a=b -C ~/r push --force-with-lease -o ci.skip origin feature', cwd, HOME), { dir: `${HOME}/r`, branch: 'feature', resolvable: true });
-    assert.deepEqual(pushTarget('git push origin local:refs/heads/remote', cwd, HOME), { dir: cwd, branch: 'remote', resolvable: true });
-    assert.deepEqual(pushTarget('git status; git push origin x | cat', cwd, HOME), { dir: cwd, branch: 'x', resolvable: true });
-    assert.deepEqual(pushTarget('sudo git --no-pager push', cwd, HOME), { dir: cwd, resolvable: true });
-  });
-
-  it('names nothing for a command that pushes nothing, and only git can say for the rest', () => {
-    assert.equal(pushTarget('git status && echo push', cwd, HOME), undefined);
-    assert.equal(pushTarget('git -C', cwd, HOME), undefined);
-    for (const command of ['git push --delete origin x', 'git push origin --tags', 'git push --mirror', 'git --work-tree=x push', 'git push upstream', 'git push origin $(branch)']) {
-      assert.equal(pushTarget(command, cwd, HOME)?.resolvable, false, command);
-    }
-  });
-});
-
-describe('autocreateSettings', () => {
-  it('takes the defaults, or what the client sets', () => {
-    assert.deepEqual(autocreateSettings(null), autocreateSettings({}));
-    assert.equal(autocreateSettings({}).autofixList, false);
-    assert.deepEqual(autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: [], optOut: ['OLD_VAR'], retired: 'https://x.invalid/a', retire: 'tool retire --pr {number}', footer: 'f', autofixList: true } }), {
-      base: 'trunk',
-      draft: false,
-      autofixList: true,
-      protected: ['release'],
-      skip: [],
-      optOut: ['OLD_VAR'],
-      describe: '`gh pr edit --body-file`',
-      retired: 'https://x.invalid/a',
-      retire: 'tool retire --pr {number}',
-      footer: 'f',
-    });
-  });
-
-  it('names the first key it cannot take', () => {
-    for (const [value, error] of [
-      [{ base: '../x' }, /base must be a branch name/],
-      [{ protected: 'main' }, /protected must be a list of branch names/],
-      [{ skip: [''] }, /skip must be a list of branch names/],
-      [{ optOut: ['lower'] }, /optOut must be a list of variable names/],
-      [{ describe: 'a\nb' }, /describe must be one line/],
-      [{ footer: ' ' }, /footer must be one line/],
-      [{ retired: 'http://x' }, /retired must be an https link/],
-      [{ retire: 'tool retire' }, /retire must name the merged pull request as \{number\}/],
-      [{ retire: 'a\nb' }, /retire must be one line/],
-      [{ autofixList: 'yes' }, /autofixList must be true or false/],
-      [{ autocreate: true }, /unknown key "autocreate".*"footer" and "autofixList"/],
-    ] as const) {
-      assert.throws(() => autocreateSettings({ prAutocreate: value }), error);
-    }
-  });
-});
-
-describe('pullsFor: the token GitHub is asked with', () => {
-  const ID = 'abc-123';
-  function at(): FakeSys {
-    const sys = new FakeSys().ready();
-    sys.execOverride = (call) => (call.command === 'git' && call.args[0] === 'config' ? { code: 0, stdout: `${URL_OF}\n`, stderr: '' } : undefined);
-    return sys;
-  }
-
-  /** The token the transport's first request carries, or why it made none. */
-  async function tokenOf(sys: FakeSys, session: string | undefined): Promise<string | undefined> {
-    const pulls = pullsFor(sys, ROOT, session);
-    assert.ok(pulls instanceof Pulls);
-    sys.requests.length = 0;
-    const listed = await pulls.list('feature');
-    return typeof listed === 'string' && sys.requests.length === 0 ? listed : sys.requests[0]?.token;
-  }
-
-  it("acts as the session's agent, or not at all", async () => {
-    const sys = at();
-    assert.match((await tokenOf(sys, ID)) ?? '', /^niyam could not act as the agent \(.*\); run `niyam doctor`$/);
-    sys.files.set(sessionRecord(HOME, ID) as string, `${JSON.stringify({ agent: 'ExampleBot' })}\n`);
-    sys.env = { CLAUDE_CODE_REMOTE: 'true' };
-    const cloud = pullsFor(sys, ROOT, ID);
-    assert.ok(cloud instanceof Pulls && cloud.cloud && cloud.slug === SLUG);
-    assert.equal(await tokenOf(sys, ID), PROXY_TOKEN);
-  });
-
-  it("uses the push's GH_TOKEN for the watcher, else gh's account, never the lock's placeholder", async () => {
-    const sys = at();
-    sys.env = { GH_TOKEN: 'ghp_push' };
-    assert.equal(await tokenOf(sys, undefined), 'ghp_push');
-    sys.env = { GH_TOKEN: NO_TOKEN };
-    const base = sys.execOverride;
-    sys.execOverride = (call) => (call.command === 'gh' ? { code: 0, stdout: 'ghp_gh\n', stderr: '' } : base(call));
-    assert.equal(await tokenOf(sys, undefined), 'ghp_gh');
-    sys.execOverride = (call) => (call.command === 'gh' ? { code: 0, stdout: `${NO_TOKEN}\n`, stderr: '' } : base(call));
-    assert.equal(await tokenOf(sys, undefined), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
-    sys.execOverride = (call) => (call.command === 'gh' ? { code: 1, stdout: '', stderr: 'no' } : base(call));
-    assert.equal(await tokenOf(sys, undefined), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
-  });
-
-  it('finds the token once, at the first request', async () => {
-    const sys = at();
-    let found = 0;
-    const pulls = new Pulls(sys, SLUG, () => {
-      found++;
-      return 'ghp_once';
-    }, false);
-    await pulls.list('a');
-    await pulls.body(1);
-    assert.equal(found, 1);
-    assert.deepEqual(sys.requests.map((request) => request.token), ['ghp_once', 'ghp_once']);
-  });
-
-  it('asks nothing of a repository whose origin is not on GitHub', () => {
-    const sys = at();
-    sys.execOverride = () => ({ code: 0, stdout: 'git@gitlab.com:a/b.git\n', stderr: '' });
-    assert.deepEqual(pullsFor(sys, ROOT, undefined), { problem: 'origin is not a github.com repository' });
-  });
-});
-
-describe('niyam pr-autocreate', () => {
-  it('never exits with a usage error, which would hold a hook', async () => {
-    const seen = capture();
-    assert.equal(await run(['pr-autocreate'], seen.io, () => new FakeSys()), 0);
-    assert.equal(await run(['pr-autocreate', 'nope', '--x'], seen.io, () => new FakeSys()), 0);
-    assert.deepEqual(seen.err, [
-      'pr-autocreate: unknown mode ""; it takes claude-hook, spawn-watchers, refuse-retired or watch; nothing done',
-      'pr-autocreate: unknown mode "nope"; it takes claude-hook, spawn-watchers, refuse-retired or watch; nothing done',
-    ]);
-  });
-
-  it('exits 0 when the machine cannot even be read', async () => {
-    const seen = capture();
-    assert.equal(await run(['pr-autocreate', 'claude-hook'], seen.io, () => Promise.reject(new Error('no home'))), 0);
-    assert.deepEqual(seen.err, ['pr-autocreate: unexpected error (no home); nothing done']);
-    assert.equal(await run(['pr-autocreate', 'claude-hook'], seen.io, () => Promise.reject('plain')), 0);
-  });
-
-  it('reads the hook and pre-push input from stdin, and fails open on its own error', async () => {
-    const sys = new FakeSys();
-    sys.stdin = 'not json';
-    const hooked = capture();
-    assert.equal(await prAutocreate(sys, hooked.io, ['claude-hook']), 0);
-    assert.deepEqual(hooked.err, ['pr-autocreate: hook input is not valid JSON; nothing done']);
-    sys.stdin = '';
-    assert.equal(await prAutocreate(sys, capture().io, ['spawn-watchers', '--root', ROOT, '--remote', 'origin']), 0);
-    const watched = capture();
-    assert.equal(await prAutocreate(sys, watched.io, ['watch']), 0);
-    assert.match(watched.out[0] as string, /watch: watch needs --root; no PR opened$/);
-    sys.readStdin = () => {
-      throw new Error('EBADF');
-    };
-    const broken = capture();
-    assert.equal(await prAutocreate(sys, broken.io, ['claude-hook']), 0);
-    assert.deepEqual(broken.err, ['pr-autocreate: unexpected error (EBADF); nothing done']);
-  });
-
-  it('runs refuse-retired from stdin, and a crash there exits RETIRED_UNCHECKED, never the 0 of a live branch', async () => {
-    const sys = new FakeSys();
-    sys.stdin = '';
-    assert.equal(await prAutocreate(sys, capture().io, ['refuse-retired', '--root', ROOT, '--remote', 'origin']), 0);
-    sys.readStdin = () => {
-      throw new Error('EBADF');
-    };
-    const broken = capture();
-    assert.equal(await prAutocreate(sys, broken.io, ['refuse-retired', '--root', ROOT, '--remote', 'origin']), RETIRED_UNCHECKED);
-    assert.deepEqual(broken.out, ["⚠️  Could not check whether a pushed branch's PR already merged (pr-autocreate crashed: EBADF); not checked."]);
-    sys.readStdin = () => {
-      throw 'plain';
-    };
-    const plain = capture();
-    assert.equal(await prAutocreate(sys, plain.io, ['refuse-retired']), RETIRED_UNCHECKED);
-    assert.match(plain.out[0] as string, /pr-autocreate crashed: plain\); not checked\.$/);
-  });
-});
-
 describe('pr-autocreate refuse-retired (real git, GitHub faked)', () => {
+  afterEach(reported);
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
   let sys: ReturnType<typeof machine>;
@@ -1290,23 +1757,8 @@ describe('pr-autocreate refuse-retired (real git, GitHub faked)', () => {
   });
 });
 
-describe('retiredBy and pushedRefs', () => {
-  const pull = (number: number, state: 'OPEN' | 'MERGED' | 'CLOSED') => ({ number, url: `https://github.com/${SLUG}/pull/${number}`, state });
-  it('a merged PR retires a branch only while none is open', () => {
-    assert.equal(retiredBy([]), undefined);
-    assert.equal(retiredBy([pull(1, 'CLOSED')]), undefined);
-    assert.equal(retiredBy([pull(2, 'OPEN'), pull(1, 'MERGED')]), undefined);
-    assert.deepEqual(retiredBy([pull(3, 'CLOSED'), pull(1, 'MERGED')]), pull(1, 'MERGED'));
-  });
-
-  it("reads git's pre-push ref lines: the remote branch of each real commit", () => {
-    assert.deepEqual(pushedRefs([`refs/heads/a ${SHA} refs/heads/b ${OTHER}`, `x ${'0'.repeat(40)} refs/heads/gone ${OTHER}`, `refs/tags/t ${SHA} refs/tags/t ${OTHER}`, '  ', 'a b c'].join('\n')), [
-      { localSha: SHA, branch: 'b', remoteSha: OTHER },
-    ]);
-  });
-});
-
 describe('pr-autocreate behind a link out of the toplevel (real git, GitHub faked)', () => {
+  afterEach(reported);
   let w: ReturnType<typeof world>;
   let github: FakeGitHub;
   let sys: ReturnType<typeof machine>;

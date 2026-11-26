@@ -5,7 +5,7 @@ import { githubSlug, isNoToken, SETTINGS_PATH } from './agent.ts';
 import { agentEnv } from './as-agent.ts';
 import { schema } from './doc-numbers.ts';
 import { GITHUB_API, GITHUB_HOST } from './host.ts';
-import { commands } from './shell.ts';
+import { commands, type Simple } from './shell.ts';
 import type { HttpResult, Output, Sys } from './types.ts';
 import { refName, sessionToken, slicesNamed, type IssueRef } from './work.ts';
 
@@ -90,7 +90,8 @@ function line(value: unknown, name: string): string | undefined {
 
 /** The settings, from the parsed settings file; throws naming the first bad key. */
 export function autocreateSettings(raw: unknown): AutocreateSettings {
-  const value = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).prAutocreate : undefined;
+  // A settings file that is not an object has no "prAutocreate": a string or number reads it as undefined too.
+  const value = (raw as { prAutocreate?: unknown } | null | undefined)?.prAutocreate;
   if (value === undefined) return { ...DEFAULTS };
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${where} must be an object`);
   const { base = DEFAULTS.base, draft = DEFAULTS.draft, protected: guarded = DEFAULTS.protected, skip = DEFAULTS.skip, optOut = DEFAULTS.optOut, describe, retired, retire, footer, autofixList = DEFAULTS.autofixList, ...rest } = value as Record<string, unknown>;
@@ -104,7 +105,8 @@ export function autocreateSettings(raw: unknown): AutocreateSettings {
     draft,
     autofixList,
     protected: strings(guarded, 'protected', (item) => BRANCH.test(item)),
-    skip: strings(skip, 'skip', (item) => item.length > 0 && BRANCH.test(item)),
+    // BRANCH takes no empty name, so no prefix skips every branch.
+    skip: strings(skip, 'skip', (item) => BRANCH.test(item)),
     optOut: strings(optOut, 'optOut', (item) => ENV_NAME.test(item)),
     describe: line(describe, 'describe') ?? DEFAULTS.describe,
   };
@@ -158,7 +160,8 @@ export function stateDir(root: string): string {
 /** A branch's record: a readable prefix for people, a digest that keeps `a/b` and `a_b` apart. */
 export function statePath(root: string, branch: string): string {
   const readable = branch.replace(/[^A-Za-z0-9._-]/g, '_');
-  const digest = createHash('sha256').update(branch, 'utf8').digest('hex').slice(0, 12);
+  // A string is hashed as UTF-8.
+  const digest = createHash('sha256').update(branch).digest('hex').slice(0, 12);
   return `${stateDir(root)}/${readable}-${digest}.json`;
 }
 
@@ -200,8 +203,8 @@ export interface State {
 
 function loadState(sys: Sys, root: string, branch: string): Partial<State> {
   try {
-    const value: unknown = JSON.parse(sys.read(statePath(root, branch)));
-    return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Partial<State>) : {};
+    // Anything but a record, null aside, has none of its fields, so it reads as no record.
+    return (JSON.parse(sys.read(statePath(root, branch))) ?? {}) as Partial<State>;
   } catch {
     return {};
   }
@@ -209,7 +212,7 @@ function loadState(sys: Sys, root: string, branch: string): Partial<State> {
 
 function saveState(sys: Sys, root: string, state: State): void {
   sys.confine(root, statePath(root, state.branch));
-  sys.mkdir(stateDir(root));
+  // The folder is there: a record is written only under the branch lock, which withLock made it for.
   sys.write(statePath(root, state.branch), JSON.stringify(state));
 }
 
@@ -271,16 +274,21 @@ export async function withLock<T>(sys: Sys, root: string, branch: string, body: 
   for (const each of [path, statePath(root, branch), optoutPath(root, branch)]) sys.confine(root, each);
   sys.mkdir(stateDir(root));
   const deadline = sys.now().getTime() + LOCK_WAIT_MS;
-  while (!sys.claim(path)) {
+  // Recursion, not a loop: a claim that never comes ends at the deadline, or in the stack, never in a hang.
+  const claimed = async (): Promise<void> => {
+    if (sys.claim(path)) return;
     const changed = sys.modified(path);
-    if (changed === undefined) continue;
-    if (sys.now().getTime() - changed.getTime() > LOCK_STALE_MS) {
-      sys.remove(path);
-      continue;
+    // A lock gone between the claim and its age is claimed again at once.
+    if (changed !== undefined) {
+      if (sys.now().getTime() - changed.getTime() > LOCK_STALE_MS) sys.remove(path);
+      else {
+        if (sys.now().getTime() > deadline) throw new Error(`lock ${path} held too long`);
+        await sys.sleep(500);
+      }
     }
-    if (sys.now().getTime() > deadline) throw new Error(`lock ${path} held too long`);
-    await sys.sleep(500);
-  }
+    return claimed();
+  };
+  await claimed();
   try {
     return await body();
   } finally {
@@ -325,7 +333,8 @@ function ownRange(sys: Sys, root: string, base: string, sha: string): string {
  * inherited trailers lean toward a draft. A log git cannot read names none.
  */
 export function ownSlices(sys: Sys, root: string, base: string, sha: string, slug: string): IssueRef[] {
-  return slicesNamed(git(sys, root, ['log', '--no-merges', '--reverse', '--format=%B', ownRange(sys, root, base, sha)]) ?? '', slug);
+  const log = git(sys, root, ['log', '--no-merges', '--reverse', '--format=%B', ownRange(sys, root, base, sha)]);
+  return log === undefined ? [] : slicesNamed(log, slug);
 }
 
 /**
@@ -378,8 +387,8 @@ export class Pulls {
 
   /** A REST pull as a decision reads it, or undefined when a field it decides by is missing. */
   static read(value: unknown): Pull | undefined {
-    if (typeof value !== 'object' || value === null) return undefined;
-    const pull = value as Record<string, unknown>;
+    // Anything but an object has none of the fields below, so it is refused by them.
+    const pull = (value ?? {}) as Record<string, unknown>;
     if (!Number.isInteger(pull.number) || typeof pull.html_url !== 'string' || !pull.html_url || (pull.state !== 'open' && pull.state !== 'closed')) return undefined;
     return { number: pull.number as number, url: pull.html_url, state: pull.merged_at ? 'MERGED' : pull.state === 'open' ? 'OPEN' : 'CLOSED' };
   }
@@ -419,16 +428,17 @@ export class Pulls {
     if (typeof got === 'string') return got;
     const pull = got.status === 201 ? Pulls.read(got.json) : undefined;
     if (pull) return pull;
-    const text = JSON.stringify(got.json ?? '');
+    const text = String(JSON.stringify(got.json));
     if (got.status === 422 && /no commits between/i.test(text)) return { noneAhead: true };
     return `GitHub answered ${got.status} opening a pull request`;
   }
 
   /** The pull request's body now; undefined when GitHub cannot say. */
   async body(number: number): Promise<string | undefined> {
-    const got = await this.call('GET', `pulls/${number}`);
-    if (typeof got === 'string' || got.status !== 200) return undefined;
-    const body = (got.json as { body?: unknown } | null)?.body;
+    // A string, why GitHub could not be asked, has no status.
+    const { status, json } = (await this.call('GET', `pulls/${number}`)) as HttpResult;
+    if (status !== 200) return undefined;
+    const body = (json as { body?: unknown } | null)?.body;
     return typeof body === 'string' ? body : body === null ? '' : undefined;
   }
 }
@@ -541,10 +551,10 @@ const UNRESOLVABLE_OPTS = new Set(['--all', '--mirror', '--tags', '--repo', '--p
  * this cannot name exactly (several refspecs, another remote, --all,
  * --git-dir, a word only the shell can expand) is unresolvable.
  */
-export function pushTarget(command: string, cwd: string, home: string): PushTarget | undefined {
+export function pushTarget(command: string, cwd: string, home: string, parse: (line: string) => Simple[] = (line) => commands(line, () => undefined)): PushTarget | undefined {
   let simples;
   try {
-    simples = commands(command, () => undefined);
+    simples = parse(command);
   } catch {
     return { dir: cwd, resolvable: false };
   }
@@ -554,8 +564,11 @@ export function pushTarget(command: string, cwd: string, home: string): PushTarg
     let dir = cwd;
     let at = start + 1;
     let unresolvable = false;
-    while (at < words.length && (words[at]?.text ?? '').startsWith('-')) {
-      const option = (words[at] as { text: string }).text;
+    // At most one step a word: a step that does not move on ends in a wrong reading, never a hang.
+    for (const _ of words) {
+      // Past the last word there is no option.
+      const option = words[at]?.text;
+      if (!option?.startsWith('-')) break;
       const next = words[at + 1];
       if (option === '-C' && next) {
         if (!next.known) unresolvable = true;
@@ -570,10 +583,15 @@ export function pushTarget(command: string, cwd: string, home: string): PushTarg
     if (words[at]?.text !== 'push') continue;
     if (unresolvable) return { dir: cwd, resolvable: false };
     const positionals: string[] = [];
-    for (let each = at + 1; each < words.length; each++) {
-      const word = words[each] as { text: string; known: boolean };
+    // An option that takes a value takes the next word.
+    let value = false;
+    for (const word of words.slice(at + 1)) {
+      if (value) {
+        value = false;
+        continue;
+      }
       if (VALUE_OPTS.has(word.text)) {
-        each++;
+        value = true;
         continue;
       }
       if (UNRESOLVABLE_OPTS.has(word.text.split('=')[0] as string)) return { dir, resolvable: false };
