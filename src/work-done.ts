@@ -1,4 +1,5 @@
-import { API, anyLogin, either } from './agent.ts';
+import { API, anyLogin, either, loadSettings } from './agent.ts';
+import { PERSONAL_REPO, isOn, isPersonal, notAdoptedLine, offLine } from './features.ts';
 import { instant } from './instant.ts';
 import type { Output, Sys } from './types.ts';
 
@@ -54,7 +55,7 @@ async function read(sys: Sys, token: string, url: string, what: string): Promise
  * GitHub does not answer.
  */
 async function list<T>(sys: Sys, token: string, url: string, what: string, page = 1): Promise<T[]> {
-  const json = await read(sys, token, `${url}?per_page=100&page=${page}`, what);
+  const json = await read(sys, token, `${url}${url.includes('?') ? '&' : '?'}per_page=100&page=${page}`, what);
   if (!Array.isArray(json)) throw new Error(`cannot read ${what}: GitHub did not answer a list (${url.replace(API, '')})`);
   return json.length === 100 ? [...(json as T[]), ...(await list<T>(sys, token, url, what, page + 1))] : (json as T[]);
 }
@@ -141,4 +142,40 @@ export async function closeIfDone(sys: Sys, io: Output, token: string, slug: str
   if (closed.status !== 200) refusedWrite(closed, `close #${number}`);
   io.out(`✓ #${number}: closed, since all ${verdict.subIssues.length} of its sub-issues are closed (${names})`);
   return true;
+}
+
+/**
+ * The hourly sweep, `niyam work-done` (#657): closes each open Work item of
+ * the repository that is done, as Slice done would at a merge. It catches a
+ * last slice closed by hand, dropped as not planned, or closed by a pull
+ * request in another repository, which no Slice done run here sees: a close
+ * made with a workflow's GITHUB_TOKEN starts no workflow run, so no
+ * `issues: closed` event would. Only a Work item whose body says
+ * `**Slices:** all filed` is read past the list.
+ */
+export async function workDone(sys: Sys, io: Output): Promise<number> {
+  const { GITHUB_REPOSITORY: slug, GH_TOKEN: token } = sys.env;
+  if (!slug || !token) throw new Error('work-done runs in GitHub Actions: GITHUB_REPOSITORY and GH_TOKEN must be set');
+  const notAdopted = notAdoptedLine(sys, sys.cwd, 'work-done');
+  if (notAdopted) {
+    io.out(notAdopted);
+    return 0;
+  }
+  if (!isOn(sys, sys.cwd, 'work-rules')) {
+    io.out(offLine('work-done', 'work-rules'));
+    return 0;
+  }
+  if (await isPersonal(sys, slug, token)) {
+    io.out(offLine('work-done', 'work-rules', PERSONAL_REPO));
+    return 0;
+  }
+  const open = await list<DoneIssue>(sys, token, `${API}/repos/${slug}/issues?state=open&type=Work%20item`, `${slug}'s open Work items`);
+  const filed = open.filter((item) => !item.pull_request && ALL_FILED.test(String(item.body)));
+  if (filed.length === 0) {
+    io.out(`work-done: ${open.length} open Work item${open.length === 1 ? '' : 's'}, none saying its slices are all filed; nothing to close`);
+    return 0;
+  }
+  const { owners } = loadSettings(sys, sys.cwd);
+  for (const item of filed) await closeIfDone(sys, io, token, slug, item.number, owners);
+  return 0;
 }

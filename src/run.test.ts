@@ -319,6 +319,7 @@ describe('each command reaches its own code (#628)', () => {
     [['decisions-weekly'], 1, /^niyam decisions-weekly: decisions-weekly runs in GitHub Actions/],
     [['needs-owner'], 1, /^niyam needs-owner: needs-owner runs in GitHub Actions/],
     [['issue-type'], 1, /^niyam issue-type: issue-type runs in GitHub Actions/],
+    [['work-done'], 1, /^niyam work-done: work-done runs in GitHub Actions/],
     [['pr-design'], 1, /^niyam pr-design: pr-design runs in GitHub Actions/],
     [['pr-identity'], 1, /^niyam pr-identity: pr-identity runs in GitHub Actions/],
   ] as const) {

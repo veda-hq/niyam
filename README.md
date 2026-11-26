@@ -773,6 +773,19 @@ sub-issues GitHub does not list to the token stays open. That job alone of a pul
 pull requests from the repository itself: a fork's run gets a read-only token, so
 a slice a fork's pull request builds is closed by hand.
 
+**Work item done, hourly.** A last slice closed by hand, dropped as not
+planned, or closed by a pull request in another repository starts no Slice
+done run here, and a close made with a workflow's GITHUB_TOKEN starts no run
+at all, so no `issues: closed` event could catch it. So the shared
+workflow's Work item done job runs `niyam work-done` on the asks job's
+hourly cron (`41 * * * *`), with that job's `issues: write`, and on a run by
+hand, with the weekly job's. It lists the repository's open Work items,
+reads further only those whose body says `**Slices:** all filed`, and
+closes each one that is done by the rules above, with the same comment,
+naming no pull request. It prints one line for each Work item it judged, or
+one line when none says its slices are all filed. No client workflow
+changes: a client gets the job when its pin moves to a release with it.
+
 **Checking the board.** `niyam board-audit [owner/repo] [--project <title>]`
 compares a repository with its Project and changes nothing: the open issues
 not on it, the unarchived items whose Status disagrees with their issue
