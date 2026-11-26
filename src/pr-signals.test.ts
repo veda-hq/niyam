@@ -13,7 +13,9 @@ import {
   findingSignals,
   normalizeBody,
   prSignals,
+  proxyThreads,
   readFindings,
+  restComments,
   signalArgs,
   signalSettings,
   threadSignals,
@@ -637,6 +639,9 @@ describe('prSignals in a Claude cloud session', () => {
     );
     assert.deepEqual(out.resolved, [{ file: 'src/a.ts', line: 30, preview: 'Rename it.' }]);
     assert.ok(!sys.requests.some((r) => r.url.endsWith('/graphql')));
+    const [signal] = out.signals as unknown as { author?: string; createdAt?: string }[];
+    assert.deepEqual([signal?.author, signal?.createdAt], ['review-bot[bot]', '2026-11-14T00:00:00Z']);
+    assert.ok(sys.requests.filter((r) => r.url.includes('/ccr/')).every((r) => r.token === 'ghp_good'));
   });
 
   it('refuses a thread list or comment it cannot read', async () => {
@@ -649,5 +654,341 @@ describe('prSignals in a Claude cloud session', () => {
     const nameless = cloud();
     nameless.route('GET', `${REPO}/pulls/7/comments?per_page=100&page=1`, { status: 200, json: [{ body: 'no id' }] });
     await assert.rejects(run(nameless, ['7']), /a review comment on #7 has no id/);
+  });
+});
+
+describe('pr-signals at the edges', () => {
+  it('reads only a bare number from 1, of any length', () => {
+    assert.deepEqual(signalArgs(['17']), { pr: 17, ciOnly: false });
+    for (const arg of ['7x', 'x7', '#', '-7']) assert.throws(() => signalArgs([arg]), { message: `unexpected argument "${arg}"` });
+  });
+
+  it('reads settings that are not an object as none, and a bot only as a whole login', () => {
+    assert.deepEqual(signalSettings('x'), { bots: [] });
+    assert.deepEqual(signalSettings(undefined), { bots: [] });
+    assert.throws(() => signalSettings({ signals: { bots: ['a[bot]b'] } }), /bots must be a list of GitHub logins/);
+    assert.deepEqual(signalSettings({ signals: { findings: 'review/' } }), { bots: [], findings: 'review/' });
+  });
+
+  it('drops every marker, however it is written, and only where it is a word', () => {
+    assert.equal(normalizeBody('[a] x [b] P2 fix p3:y'), 'x fix y');
+    assert.equal(normalizeBody('top1 and p12 stay'), 'top1 and p12 stay');
+    assert.equal(normalizeBody('severity high a severity:low b severity : mid c severities stay xseverity: d'), 'a b c severities stay xseverity: d');
+    assert.equal(normalizeBody('a_b ~c >d #e'), 'a b c d e');
+  });
+
+  it("folds a bot's thread and a local finding at a file with no line only on the same body, keeping the winner's severity", () => {
+    assert.equal(dedupe([thread('one', { author: 'review-bot', line: null }), local('two', { line: null })], ['review-bot']).length, 2);
+    const [one] = dedupe([local('same', { severity: 'P2' }), thread('same', { severity: 'P1' })], []);
+    assert.equal(one?.severity, 'P1');
+  });
+
+  it('takes a resolved thread as near only with both lines known, within ten lines', () => {
+    const resolved = [
+      { file: 'src/a.ts', line: 13, preview: 'p13' },
+      { file: 'src/a.ts', line: 14, preview: 'p14' },
+      { file: 'src/a.ts', line: 5, preview: 'p5' },
+      { file: 'src/a.ts', line: null, preview: 'pnull' },
+      { file: null, line: 3, preview: 'nofile' },
+    ];
+    const [atLine, noLine, noFile] = addCandidates(dedupe([thread('x'), thread('y', { line: null }), thread('z', { file: null })], []), resolved, () => '');
+    assert.deepEqual(atLine?.candidates, [
+      { file: 'src/a.ts', line: 13, preview: 'p13', matchedBy: 'proximity' },
+      { file: 'src/a.ts', line: 5, preview: 'p5', matchedBy: 'proximity' },
+    ]);
+    assert.equal(noLine?.candidates, undefined);
+    assert.equal(noFile?.candidates, undefined);
+  });
+
+  it('takes a resolved thread as alike when either body holds the other, from 12 characters', () => {
+    const resolved = [
+      { file: 'src/z.ts', line: 50, preview: 'The cache key misses the tenant id' },
+      { file: 'src/z.ts', line: 60, preview: 'twelve chars' },
+    ];
+    const [shorter, exact] = addCandidates(dedupe([thread('cache key misses', { file: 'src/x.ts' }), thread('twelve chars', { file: 'src/y.ts' })], []), resolved, () => '');
+    assert.deepEqual(shorter?.candidates, [{ ...resolved[0], matchedBy: 'body' }]);
+    assert.deepEqual(exact?.candidates, [{ ...resolved[1], matchedBy: 'body' }]);
+  });
+
+  it("reads a file's history once for two signals near one thread, and none for a thread with no time", () => {
+    const asked: string[] = [];
+    const signals = addCandidates(
+      dedupe([thread('x'), thread('y', { line: 4 })], []),
+      [
+        { file: 'src/a.ts', line: 3, preview: 'p', createdAt: 't' },
+        { file: 'src/a.ts', line: 5, preview: 'q' },
+      ],
+      (file, since) => {
+        asked.push(`${file}@${since}`);
+        return 'd';
+      },
+    );
+    for (const signal of signals) {
+      assert.deepEqual(signal.candidates, [
+        { file: 'src/a.ts', line: 3, preview: 'p', createdAt: 't', matchedBy: 'proximity', diff: 'd' },
+        { file: 'src/a.ts', line: 5, preview: 'q', matchedBy: 'proximity' },
+      ]);
+    }
+    assert.deepEqual(asked, ['src/a.ts@t']);
+  });
+
+  it('reads a findings file of null, or with no metadata, as a clean review', () => {
+    assert.deepEqual(readFindings('null'), { status: 'ok', findings: [] });
+    assert.deepEqual(readFindings('{"metadata":null}'), { status: 'ok', findings: [] });
+  });
+
+  it('keeps every kind of error line, and strips only a leading log time', () => {
+    assert.equal(excerpt(['Fail here', '✖ one', '✘ two', 'cannot x', 'missing y', 'expected z', 'ERROR up', 'fine'].join('\n')), ['Fail here', '✖ one', '✘ two', 'cannot x', 'missing y', 'expected z', 'ERROR up'].join('\n'));
+    assert.equal(excerpt('2026-11-14T17:05:17Z error a\n2026-11-14T17:05:17.12Z error b\nat 2026-11-14T17:05:17Z error c'), 'error a\nerror b\nat 2026-11-14T17:05:17Z error c');
+  });
+
+  it('names each kind of failure by any of its words', () => {
+    assert.deepEqual(
+      ['tsc exited', 'type error', 'ts123', 'lint found', 'jest', 'expect(x)', 'compile', 'bundling', 'ts12'].map(failureType),
+      ['typecheck', 'typecheck', 'typecheck', 'lint', 'test', 'test', 'build', 'build', 'other'],
+    );
+  });
+
+  it('reads every review comment over REST as it is, and refuses one with no whole id', async () => {
+    const sys = new FakeSys();
+    sys.route('GET', `${REPO}/pulls/7/comments?per_page=100&page=1`, {
+      status: 200,
+      json: [
+        { id: 5, in_reply_to_id: 0, user: null, body: 3, path: 4, line: 'x', original_line: 'y', created_at: 9 },
+        { id: 6, in_reply_to_id: 5, user: { login: 'u' }, body: 'b', path: 'p', line: 2, original_line: 1, created_at: 't' },
+      ],
+    });
+    assert.deepEqual(await restComments(sys, 't', 'example-org/example-app', 7), [
+      { id: 5, inReplyTo: null, body: '', path: null, line: null },
+      { id: 6, inReplyTo: 5, author: 'u', body: 'b', path: 'p', line: 2, createdAt: 't' },
+    ]);
+    for (const bad of [null, { id: 0 }, { id: 1.5 }, { id: '5' }]) {
+      sys.route('GET', `${REPO}/pulls/7/comments?per_page=100&page=1`, { status: 200, json: [bad] });
+      await assert.rejects(restComments(sys, 't', 'example-org/example-app', 7), /a review comment on #7 has no id/, JSON.stringify(bad));
+    }
+  });
+
+  it("reads the proxy's thread list as it is, and refuses one it cannot read", async () => {
+    const route = `${REPO}/pulls/7/ccr/review_threads`;
+    const sys = new FakeSys().route('GET', route, { status: 200, json: [{ resolved: true, comment_ids: [1, 2] }] });
+    assert.deepEqual(await proxyThreads(sys, 't', 'example-org/example-app', 7), [{ resolved: true, comments: [1, 2] }]);
+    sys.route('GET', route, { status: 200, json: {} });
+    await assert.rejects(proxyThreads(sys, 't', 'example-org/example-app', 7), /cannot read repos\/example-org\/example-app\/pulls\/7\/ccr\/review_threads \(HTTP 200\)/);
+    for (const bad of [null, { comment_ids: [1] }, { resolved: false, comment_ids: '1' }, { resolved: false, comment_ids: [0] }]) {
+      sys.route('GET', route, { status: 200, json: [bad] });
+      await assert.rejects(proxyThreads(sys, 't', 'example-org/example-app', 7), /lists a thread it does not name/, JSON.stringify(bad));
+    }
+  });
+
+  it("names a failing check by its conclusion when GitHub Actions did not run it or its log is gone, and refuses entries it cannot read", async () => {
+    const sys = session();
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, {
+      status: 200,
+      json: {
+        check_runs: [
+          { id: 5, name: 'x', conclusion: 'startup_failure', app: null },
+          { id: 6, name: 'y', conclusion: 'failure', app: { slug: 'github-actions' } },
+        ],
+      },
+    });
+    sys.route('GET', `${REPO}/actions/jobs/6/logs`, { status: 410, json: null, text: 'error x' });
+    assert.deepEqual(await ciSignals(sys, 't', 'example-org/example-app', HEAD), {
+      signals: [
+        { source: 'ci-failure', check: 'x', file: null, line: null, body: 'x: startup_failure', failureType: 'other' },
+        { source: 'ci-failure', check: 'y', file: null, line: null, body: 'y: failure', failureType: 'other' },
+      ],
+      checkRuns: 2,
+      actionsRuns: 1,
+    });
+    for (const bad of [null, { id: 5 }]) {
+      sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [bad] } });
+      await assert.rejects(ciSignals(sys, 't', 'example-org/example-app', HEAD), /lists a check run with no id or name/);
+    }
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [] } });
+    sys.route('GET', `${REPO}/commits/${HEAD}/status?per_page=100&page=1`, { status: 200, json: { statuses: [null] } });
+    await assert.rejects(ciSignals(sys, 't', 'example-org/example-app', HEAD), /lists a status with no name or state/);
+  });
+
+  it('refuses a pull request GitHub answers other than 200 or without its state and head', async () => {
+    for (const [status, json] of [
+      [500, { state: 'open', merged_at: null, head: { sha: HEAD } }],
+      [200, {}],
+      [200, { state: 'open' }],
+    ] as const) {
+      const sys = session();
+      sys.route('GET', `${REPO}/pulls/7`, { status, json });
+      await assert.rejects(run(sys, ['7']), new RegExp(`^Error: cannot read pull request #7 in example-org/example-app \\(HTTP ${status}\\)$`));
+    }
+  });
+
+  it('refuses threads GitHub gives with errors beside its data, or with no body', async () => {
+    const partial = session();
+    partial.route('POST', '/graphql', { status: 200, json: { data: { repository: null }, errors: [{ message: 'partial' }] } });
+    await assert.rejects(run(partial, ['7']), /GitHub refused to read the review threads of #7 \(HTTP 200: partial\)/);
+    const empty = session();
+    empty.route('POST', '/graphql', { status: 200, json: null });
+    await assert.rejects(run(empty, ['7']), /GitHub refused to read the review threads of #7 \(HTTP 200\)$/);
+  });
+
+  it('reads every page of threads, a comment with no body, path or line as such', async () => {
+    const sys = session();
+    const pages = [
+      { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ id: 'PRRT_a', isResolved: false, comments: { nodes: [{ id: 'PRRC_a' }] } }] },
+      { pageInfo: { hasNextPage: false }, nodes: [{ id: 'PRRT_b', isResolved: false, comments: {} }] },
+    ];
+    let page = 0;
+    sys.route('POST', '/graphql', () => ({ status: 200, json: { data: { repository: { pullRequest: { reviewThreads: pages[page++] } } } } }));
+    const out = parsed(await run(sys, ['7']));
+    assert.deepEqual(out.signals, [{ source: 'review-thread', thread: 'PRRT_a', comment: 'PRRC_a', body: '', file: null, line: null, sources: ['review-thread'], threads: [{ thread: 'PRRT_a', comment: 'PRRC_a' }], id: 'SIG-001' }]);
+    assert.deepEqual(
+      sys.requests.filter((r) => r.url.endsWith('/graphql')).map((r) => (r.body as { variables: Record<string, unknown> }).variables),
+      [
+        { owner: 'example-org', name: 'example-app', pr: 7 },
+        { owner: 'example-org', name: 'example-app', pr: 7, after: 'c1' },
+      ],
+    );
+  });
+
+  it('says nothing dropped when every finding is on the diff, and lists no files for an empty review', async () => {
+    const kept = session();
+    kept.files.set(`${ROOT}/.tmp/review/findings.json`, JSON.stringify({ issues: [{ title: 'x', file: 'src/a.ts', line: 1 }] }));
+    kept.route('GET', `${REPO}/pulls/7/files?per_page=100&page=1`, { status: 200, json: [null, { filename: 'src/a.ts' }] });
+    const out = parsed(await run(kept, ['7']));
+    assert.deepEqual(out.findings, { status: 'ok' });
+    assert.ok(out.signals.some((s) => s.sources.includes('local-findings')));
+    const empty = session();
+    empty.files.set(`${ROOT}/.tmp/review/findings.json`, JSON.stringify({ issues: [] }));
+    assert.deepEqual(parsed(await run(empty, ['7'])).findings, { status: 'ok' });
+    assert.ok(!empty.requests.some((r) => r.url.includes('/files')));
+  });
+
+  it("reads a resolved thread's file history since it opened, whole up to 4000 characters", async () => {
+    const sys = session();
+    const calls: { args: readonly string[]; cwd?: string }[] = [];
+    sys.execOverride = (call) => {
+      if (call.command !== 'git' || call.args[0] !== 'log') return undefined;
+      calls.push({ args: call.args, ...(call.cwd ? { cwd: call.cwd } : {}) });
+      return { code: 0, stdout: 'x'.repeat(4000), stderr: '' };
+    };
+    const [candidate] = (parsed(await run(sys, ['7'])).signals[0]?.candidates ?? []) as { diff?: string }[];
+    assert.equal(candidate?.diff, 'x'.repeat(4000));
+    assert.deepEqual(calls, [{ args: ['log', '-p', '--after=2026-11-13T00:00:00Z', '--', 'src/a.ts'], cwd: ROOT }]);
+  });
+});
+
+describe('pr-signals, as GitHub answers', () => {
+  it('drops each marker as a space, so the words around it stay apart', () => {
+    assert.equal(normalizeBody('a[b]c'), 'a c');
+    assert.equal(normalizeBody('x:p1:y'), 'x: y');
+    assert.equal(normalizeBody('x:severity:high:y'), 'x: :y');
+  });
+
+  it("folds only a bot's own login at one place, and no other source with an author", () => {
+    assert.equal(dedupe([thread('one', { author: 'review[bot]-bot' }), local('two')], ['review-bot']).length, 2, 'only a trailing [bot] marks a bot');
+    assert.equal(dedupe([{ source: 'ci-failure', file: 'src/a.ts', line: 3, author: 'review-bot', body: 'one' }, local('two')], ['review-bot']).length, 2);
+    assert.equal(dedupe([thread('one', { author: 'review-bot', file: null }), local('two', { file: null })], ['review-bot']).length, 2);
+    assert.equal(dedupe([thread('same'), thread('same', { line: 9 })], []).length, 2);
+    assert.equal(dedupe([thread('same'), thread('same', { file: 'src/b.ts' })], []).length, 2);
+  });
+
+  it('reads the pull request with the session token, and refuses one with no state, or no body', async () => {
+    for (const json of [null, { head: { sha: HEAD } }]) {
+      const sys = session();
+      sys.route('GET', `${REPO}/pulls/7`, { status: 200, json });
+      await assert.rejects(run(sys, ['7']), /^Error: cannot read pull request #7 in example-org\/example-app \(HTTP 200\)$/, JSON.stringify(json));
+    }
+    const sys = session();
+    await run(sys, ['7', '--ci-only']);
+    const reads = sys.requests.filter((r) => r.url.endsWith('/pulls/7'));
+    assert.equal(reads.length, 2);
+    assert.ok(reads.every((r) => r.token === 'ghp_good'));
+  });
+
+  it('says a closed pull request in full, with no merge time as null', async () => {
+    const result = await run(session({ state: 'closed', merged_at: undefined }), ['7']);
+    assert.deepEqual(parsed(result), { ok: false, reason: 'pr-not-open', pr: 7, state: 'CLOSED', mergedAt: null, phase: 'start' } as never);
+  });
+
+  it('asks GitHub for the threads in one query', async () => {
+    const sys = session();
+    await run(sys, ['7']);
+    const query = (sys.requests.find((r) => r.url.endsWith('/graphql'))?.body as { query: string }).query;
+    assert.equal(
+      query,
+      'query($owner: String!, $name: String!, $pr: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $pr) { reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id isResolved comments(first: 1) { nodes { id author { login } body path line originalLine createdAt } } } } } } }',
+    );
+  });
+
+  it('refuses threads GitHub answers other than 200 though it gives data, or with no data, saying its error when it gives one', async () => {
+    const data = { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } } } };
+    for (const [status, json] of [
+      [403, { data }],
+      [200, { data: null }],
+      [200, { data: null, errors: [] }],
+      [200, { data: null, errors: [{}] }],
+    ] as const) {
+      const sys = session();
+      sys.route('POST', '/graphql', { status, json });
+      await assert.rejects(run(sys, ['7']), new RegExp(`^Error: GitHub refused to read the review threads of #7 \\(HTTP ${status}\\)$`), JSON.stringify(json));
+    }
+    const nobody = session();
+    nobody.route('POST', '/graphql', { status: 200, json: { data: { repository: null } } });
+    await assert.rejects(run(nobody, ['7']), /^Error: GitHub shows no pull request #7 in example-org\/example-app$/);
+  });
+
+  it("takes a review comment's original line when it has no line now", async () => {
+    const sys = new FakeSys().route('GET', `${REPO}/pulls/7/comments?per_page=100&page=1`, { status: 200, json: [{ id: 7, original_line: 3 }] });
+    assert.deepEqual(await restComments(sys, 't', 'example-org/example-app', 7), [{ id: 7, inReplyTo: null, body: '', path: null, line: 3 }]);
+  });
+
+  it("reads the proxy's thread list with the token, and refuses any answer but 200, or a thread whose every comment it cannot name", async () => {
+    const route = `${REPO}/pulls/7/ccr/review_threads`;
+    const sys = new FakeSys().route('GET', route, { status: 200, json: [] });
+    assert.deepEqual(await proxyThreads(sys, 'tok', 'example-org/example-app', 7), []);
+    assert.equal(sys.requests.at(-1)?.token, 'tok');
+    sys.route('GET', route, { status: 502, json: [] });
+    await assert.rejects(proxyThreads(sys, 't', 'example-org/example-app', 7), /\(HTTP 502\)$/);
+    sys.route('GET', route, { status: 200, json: [{ resolved: false, comment_ids: [1, 0] }] });
+    await assert.rejects(proxyThreads(sys, 't', 'example-org/example-app', 7), /lists a thread it does not name/);
+  });
+
+  it('words a failing check from its text parts alone, and asks a log only of GitHub Actions, as text', async () => {
+    const sys = session();
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, {
+      status: 200,
+      json: {
+        check_runs: [
+          { id: 31, name: 'x', conclusion: 'failure', app: { slug: 'other' }, output: { title: 5, summary: 'S' } },
+          { id: 32, name: 'y', conclusion: 'failure', app: { slug: 'github-actions' } },
+        ],
+      },
+    });
+    sys.route('GET', `${REPO}/actions/jobs/32/logs`, { status: 200, json: null, text: 'error z' });
+    sys.route('GET', `${REPO}/commits/${HEAD}/status?per_page=100&page=1`, {
+      status: 200,
+      json: { statuses: [{ context: 'd', state: 'failure', description: '' }, { context: 'e', state: 'error', description: 5 }] },
+    });
+    const http = sys.http.bind(sys);
+    const asked: { url: string; options: unknown }[] = [];
+    sys.http = (url, options) => {
+      asked.push({ url, options });
+      return http(url, options);
+    };
+    assert.deepEqual(
+      (await ciSignals(sys, 't', 'example-org/example-app', HEAD)).signals.map((s) => s.body),
+      ['x: failure\nS', 'error z', 'd: failure', 'e: error'],
+    );
+    assert.deepEqual(
+      asked.filter((one) => one.url.includes('/logs')),
+      [{ url: `https://api.github.com${REPO}/actions/jobs/32/logs`, options: { token: 't', text: true } }],
+    );
+  });
+
+  it('reads no history from a git log that failed, whatever it printed', async () => {
+    const sys = session();
+    sys.execOverride = (call) => (call.command === 'git' && call.args[0] === 'log' ? { code: 1, stdout: 'partial', stderr: 'bad' } : undefined);
+    const [candidate] = (parsed(await run(sys, ['7'])).signals[0]?.candidates ?? []) as { diff?: string }[];
+    assert.ok(candidate);
+    assert.equal(candidate.diff, undefined);
   });
 });

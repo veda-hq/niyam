@@ -69,32 +69,31 @@ export function splitFrontmatter(markdown: string): { frontmatter: string; body:
 
 /** The body's `## ` sections by heading; a heading inside a fence is captured output, not a section. */
 export function splitSections(markdown: string): Map<string, string> {
-  const sections = new Map<string, string>();
-  let heading: string | null = null;
-  let buffer: string[] = [];
+  // Each heading's lines; a repeated heading keeps its place and takes the last body.
+  const bodies = new Map<string, string[]>();
+  // The current section's lines; none before the first heading.
+  let body: string[] | undefined;
   let fence: string | null = null;
-  const flush = (): void => {
-    if (heading !== null) sections.set(heading, buffer.join('\n').trim());
-  };
   for (const line of markdown.split(/\r?\n/)) {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    // `.*` runs to the end of the line, so the pattern needs no `$`.
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)/.exec(line);
     if (marker) {
-      const [, run = '', rest = ''] = marker;
+      // Both groups always take part in a match.
+      const run = marker[1] as string;
+      const rest = marker[2] as string;
       // A backtick fence's info string holds no backtick: ```x``` is an inline span, not a fence.
       if (fence === null) {
         if (run[0] === '~' || !rest.includes('`')) fence = run;
       } else if (run[0] === fence[0] && run.length >= fence.length && /^\s*$/.test(rest)) fence = null;
     }
     if (fence === null && /^##\s+\S/.test(line)) {
-      flush();
-      heading = line.trim().replace(/\s+/g, ' ');
-      buffer = [];
+      body = [];
+      bodies.set(line.trim().replace(/\s+/g, ' '), body);
       continue;
     }
-    if (heading !== null) buffer.push(line);
+    body?.push(line);
   }
-  flush();
-  return sections;
+  return new Map([...bodies].map(([heading, lines]) => [heading, lines.join('\n').trim()]));
 }
 
 export interface BriefFields {
@@ -119,9 +118,10 @@ export function readFrontmatter(frontmatter: string, yaml: Yaml): { fields: Reco
   } catch {
     return null;
   }
-  if (parsed === null || parsed === undefined) parsed = {};
+  // Empty text reads as null: no fields.
+  parsed ??= {};
   if (typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const flat = (value: unknown): string | null => (value === null || value === undefined ? '' : typeof value === 'object' ? null : String(value).trim());
+  const flat = (value: unknown): string | null => (typeof value === 'object' && value !== null ? null : String(value ?? '').trim());
   const fields: Record<string, string | string[]> = {};
   const nonScalar: string[] = [];
   for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
@@ -207,7 +207,8 @@ export function lintBrief(markdown: string, context: LintContext): LintResult {
   }
   if (fields.status === 'rejected' && !fields.resolutionNote) problems.push('`status: rejected` needs a `resolution-note:` saying why');
   if (fields.blamedPaths.length === 0) problems.push('`blamed-paths` is empty: a handoff names the files it holds responsible');
-  const changed = new Set(context.changedFiles.map(repoPath).filter((file): file is string => file !== null));
+  // A changed file outside the repository reads as null, which no blamed path matches.
+  const changed = new Set(context.changedFiles.map(repoPath));
   for (const path of fields.blamedPaths) {
     const canonical = repoPath(path);
     if (canonical === null) {
@@ -234,8 +235,9 @@ export function lintBrief(markdown: string, context: LintContext): LintResult {
   const evidence = sections.get(EVIDENCE_SECTION);
   // A fence of either marker, in a blockquote too, is evidence; an inline ```x``` span is not.
   const fenced = evidence?.split('\n').some((line) => {
-    const open = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    return open !== null && !(open[1]?.[0] === '`' && open[2]?.includes('`'));
+    const open = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})(.*)/.exec(line);
+    // Both groups always take part in a match.
+    return open !== null && !((open[1] as string)[0] === '`' &&(open[2] as string).includes('`'));
   });
   if (evidence && !fenced) problems.push(`${EVIDENCE_SECTION} holds no fenced evidence: paste the command and its output, not a description of it`);
   return { ok: problems.length === 0, problems, fields };
@@ -297,11 +299,13 @@ export function judgeBrief(
   if (markdown === null) return { ok: false, reason: 'brief-not-brief', detail: `${ref} has no fields block at the top of its body; open briefs with niyam brief <draft.md>, never by hand` };
   // A closed brief's blamed paths may be gone; its fields must still read, or a hand close could release `blocking: maybe`.
   const lint = lintBrief(markdown, { ...context.lint, ...(issue.state === 'OPEN' ? {} : { pathExists: () => true }), disposition: context.disposition });
-  if (!lint.ok || lint.fields === null) return { ok: false, reason: 'brief-invalid', detail: `${ref}: ${lint.problems.join('; ')}` };
-  if (lint.fields.discoveredOn !== context.branch) {
-    return { ok: false, reason: 'brief-other-branch', detail: `${ref} was discovered on "${lint.fields.discoveredOn}", not this branch "${context.branch}"; an older brief cannot answer for this push, so open one here` };
+  if (!lint.ok) return { ok: false, reason: 'brief-invalid', detail: `${ref}: ${lint.problems.join('; ')}` };
+  // A brief that lints has its fields: lintBrief gives null only with a problem.
+  const fields = lint.fields as BriefFields;
+  if (fields.discoveredOn !== context.branch) {
+    return { ok: false, reason: 'brief-other-branch', detail: `${ref} was discovered on "${fields.discoveredOn}", not this branch "${context.branch}"; an older brief cannot answer for this push, so open one here` };
   }
-  if (context.disposition !== 'handed-off' || !lint.fields.blocking) return { ok: true };
+  if (context.disposition !== 'handed-off' || !fields.blocking) return { ok: true };
   if (issue.state === 'OPEN') {
     return { ok: false, reason: 'handoff-not-landed', detail: `${ref} is blocking and still open: the push waits until a pull request saying "Fixes ${ref}" merges and you merge it in, or the issue is closed as not planned` };
   }
@@ -363,7 +367,7 @@ export async function addToProject(sys: Sys, token: string, slug: string, issueI
  */
 export async function readBrief(sys: Sys, token: string, slug: string, number: number): Promise<BriefIssue | null> {
   const got = await sys.http(`${API}/repos/${slug}/issues/${number}`, { token });
-  if (got.status === 404 || got.status === 410) return null;
+  // A missing issue (404, or 410 once deleted) is no brief, as is any answer but 200.
   const issue = got.json as { number?: unknown; state?: unknown; state_reason?: unknown; type?: { name?: unknown } | null; body?: unknown; pull_request?: unknown } | null;
   if (got.status !== 200 || issue?.number !== number || issue.pull_request) return null;
   let closingSha: string | null = null;
@@ -384,7 +388,7 @@ export async function readBrief(sys: Sys, token: string, slug: string, number: n
     const repo = merged.length ? ((await rest(sys, token, `${API}/repos/${slug}`, `read ${slug}`)) as { default_branch?: unknown } | null) : null;
     for (const pr of [...new Set(merged)].reverse()) {
       const pull = (await rest(sys, token, `${API}/repos/${slug}/pulls/${pr}`, `read pull request #${pr}`)) as { title?: string; body?: string | null; merged_at?: string | null; merge_commit_sha?: string | null; base?: { ref?: string } } | null;
-      if (pull?.merged_at && pull.merge_commit_sha && pull.base?.ref === repo?.default_branch && saysFixes(`${pull.title ?? ''}\n${pull.body ?? ''}`, number)) {
+      if (pull?.merged_at && pull.merge_commit_sha && pull.base?.ref === repo?.default_branch && saysFixes([pull.title, pull.body].join('\n'), number)) {
         closingSha = pull.merge_commit_sha;
         break;
       }
