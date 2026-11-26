@@ -768,7 +768,7 @@ describe('needsOwner', () => {
   it('names the hourly cron in the shared workflow as the code does', () => {
     const checks = readFileSync(new URL('../.github/workflows/checks.yml', import.meta.url), 'utf8');
     assert.equal(checks.split(`github.event.schedule != '${HOURLY}'`).length, 2, 'the decisions job skips it');
-    assert.equal(checks.split(`github.event.schedule == '${HOURLY}'`).length, 3, 'the needs-owner and issue-type jobs run on it');
+    assert.equal(checks.split(`github.event.schedule == '${HOURLY}'`).length, 4, 'the needs-owner, issue-type and work-done jobs run on it');
     assert.match(checks, /pull_request_review_comment/);
   });
 

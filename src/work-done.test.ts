@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { FakeSys, capture } from './fake.test.ts';
-import { ALL_FILED, closeIfDone, workItemDone } from './work-done.ts';
+import { AGENT, FakeSys, ROOT, capture } from './fake.test.ts';
+import { ALL_FILED, closeIfDone, workDone, workItemDone } from './work-done.ts';
 
 const SLUG = 'example-org/example-app';
 const OTHER = 'example-org/example-plans';
@@ -240,5 +240,71 @@ describe('closeIfDone', () => {
     const unread = model();
     unread.route('GET', `${ITEM}/comments?per_page=100&page=1`, { status: 500, json: null });
     await assert.rejects(closeIfDone(unread, io, 'ghs_run', SLUG, 10, OWNERS), /^Error: cannot read #10's comments: HTTP 500 \(/);
+  });
+});
+
+describe('workDone', () => {
+  const OPEN = `/repos/${SLUG}/issues?state=open&type=Work%20item&per_page=100&page=1`;
+  /** The hourly run: Work item #10 as `model` holds it, and the open Work items `open` lists. */
+  function hourly(open: Node[], change?: Parameters<typeof model>[0]): FakeSys {
+    const sys = model(change);
+    sys.env = { GITHUB_REPOSITORY: SLUG, GH_TOKEN: 'ghs_run' };
+    sys.route('GET', OPEN, { status: 200, json: open });
+    return sys;
+  }
+  async function run(sys: FakeSys): Promise<string[]> {
+    const { io, out } = capture();
+    assert.equal(await workDone(sys, io), 0);
+    return out;
+  }
+
+  it('closes each open Work item that is done, naming no pull request', async () => {
+    const sys = hourly([{ number: 10, body: FILED }]);
+    assert.deepEqual(await run(sys), ['✓ #10: closed, since all 2 of its sub-issues are closed (#12, #13)']);
+    assert.deepEqual(writes(sys), [
+      ['POST', `${ITEM}/comments`, { body: 'All of its sub-issues are closed (#12, #13), and its spec says its slices are all filed: closing this Work item.' }],
+      ['PATCH', ITEM, { state: 'closed', state_reason: 'completed' }],
+    ]);
+  });
+
+  it('reads past the list only a Work item whose body says its slices are all filed, and no pull request', async () => {
+    const sys = hourly([
+      { number: 10, body: FILED },
+      { number: 11, body: 'The spec.\n\n**Slices:**\n1. #14' },
+      { number: 15, body: null },
+      { number: 16, body: FILED, pull_request: {} },
+    ], (m) => (m.subIssues[1] = issue(13, { state: 'open' })));
+    assert.deepEqual(await run(sys), ['- #10 stays open: #13 is still open']);
+    assert.deepEqual(sys.requests.filter((request) => /\/issues\/1[156]\b/.test(request.url)), []);
+    assert.deepEqual(writes(sys), []);
+  });
+
+  it('says so in one line when no open Work item says its slices are all filed', async () => {
+    assert.deepEqual(await run(hourly([])), ['work-done: 0 open Work items, none saying its slices are all filed; nothing to close']);
+    assert.deepEqual(await run(hourly([{ number: 11, body: 'No line.' }])), ['work-done: 1 open Work item, none saying its slices are all filed; nothing to close']);
+  });
+
+  it('closes nothing with the work rules off, before the repository adopts niyam, or in a personal repository', async () => {
+    const off = hourly([{ number: 10, body: FILED }]);
+    off.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: OWNER, agent: AGENT, features: ['identity'] }));
+    assert.deepEqual(await run(off), ['work-done: work-rules is off in .github/niyam.json; nothing to check']);
+    const before = hourly([{ number: 10, body: FILED }]);
+    before.files.delete(`${ROOT}/.github/niyam.json`);
+    assert.match((await run(before))[0] ?? '', /^work-done: /);
+    const personal = hourly([{ number: 10, body: FILED }]);
+    personal.ownerType = 'User';
+    assert.match((await run(personal))[0] ?? '', /^work-done: work-rules is off on a repository owned by a personal account/);
+    assert.deepEqual([...writes(off), ...writes(before), ...writes(personal)], []);
+    assert.equal([off, before, personal].some((sys) => sys.requests.some((request) => request.url.endsWith(OPEN))), false);
+  });
+
+  it('needs the Actions environment, and fails naming a list it cannot read', async () => {
+    await assert.rejects(workDone(new FakeSys(), capture().io), /^Error: work-done runs in GitHub Actions: GITHUB_REPOSITORY and GH_TOKEN must be set$/);
+    const token = new FakeSys();
+    token.env = { GITHUB_REPOSITORY: SLUG };
+    await assert.rejects(workDone(token, capture().io), /work-done runs in GitHub Actions/);
+    const unread = hourly([]);
+    unread.route('GET', OPEN, { status: 403, json: { message: 'Resource not accessible by integration' } });
+    await assert.rejects(run(unread), /^Error: cannot read example-org\/example-app's open Work items: Resource not accessible by integration \(\/repos\/example-org\/example-app\/issues\?state=open&type=Work%20item&per_page=100&page=1\)$/);
   });
 });

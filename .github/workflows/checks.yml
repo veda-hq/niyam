@@ -364,3 +364,35 @@ jobs:
       - run: node .niyam/src/cli.ts issue-type
         env:
           GH_TOKEN: ${{ github.token }}
+
+  work-done:
+    name: Work item done
+    # A Work item whose spec says its slices are all filed closes once every one of them is closed (#655). Slice done
+    # closes it at a merge; this sweep catches a last slice closed by hand, dropped, or closed from another repository.
+    # A close made with a workflow's GITHUB_TOKEN starts no run, so no issues: closed event could.
+    if: (github.event_name == 'schedule' && github.event.schedule == '41 * * * *') || github.event_name == 'workflow_dispatch'
+    # One run at a time, so two cannot both comment on one Work item.
+    concurrency:
+      group: niyam-work-done-${{ github.repository }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The caller's permissions: the client's niyam-asks job grants issues: write on the hourly cron, its weekly job on
+    # workflow_dispatch.
+    steps:
+      # The settings come from the default branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository || 'veda-hq/niyam' }}
+          ref: ${{ job.workflow_sha || inputs.niyam-ref || 'main' }}
+          path: .niyam
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: node .niyam/src/cli.ts work-done
+        env:
+          GH_TOKEN: ${{ github.token }}

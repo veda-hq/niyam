@@ -29,6 +29,7 @@ import { sessionStart } from './session-start.ts';
 import { SSH_SIGN, sshSign } from './ssh-sign.ts';
 import { upgrade } from './upgrade.ts';
 import { fileState, prMerged, prStarted, prePush, prWorkRules, propose } from './work.ts';
+import { workDone } from './work-done.ts';
 import type { Output, Sys } from './types.ts';
 
 import { CLI } from './names.ts';
@@ -67,6 +68,7 @@ Commands:
   pr-identity      Run by the shared workflow: agent commits Verified and pushed by the agent
   pr-work-rules    Run by the shared workflow: an agent pull request builds one slice it may build
   pr-merged        Run by the shared workflow: a merged pull request closes the slice and States it names
+  work-done        Run by the shared workflow hourly: a Work item whose slices are all filed and closed is closed
   pr-started       Run by the shared workflow: an opened pull request moves its slice to In Progress on the board
   pr-design        Run by the shared workflow: each state of the slice links a frame from the design library
   decisions-weekly Run by the shared workflow weekly: decision checks, undo issues, expiring labels
@@ -284,6 +286,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
     case 'pr-identity':
     case 'pr-work-rules':
     case 'pr-merged':
+    case 'work-done':
     case 'pr-started':
     case 'pr-design':
     case 'decisions-weekly':
@@ -332,6 +335,7 @@ export async function run(args: readonly string[], io: Output, sys: () => Sys | 
         if (command === 'pr-identity') return await prIdentity(await sys(), io);
         if (command === 'pr-work-rules') return await prWorkRules(await sys(), io);
         if (command === 'pr-merged') return await prMerged(await sys(), io);
+        if (command === 'work-done') return await workDone(await sys(), io);
         if (command === 'pr-started') return await prStarted(await sys(), io);
         if (command === 'pre-push') {
           const real = await sys();
