@@ -4,8 +4,8 @@ import { describe, it } from 'node:test';
 import { launcherPath, launcherScript, pathsFor, sessionScript } from './agent.ts';
 import { AGENT, AGENT_ID, CLASSIC, CLI, FakeSys, HOME, NODE, KEY, PRIVATE_KEY, PUBLIC_KEY, TOKEN, capture } from './fake.test.ts';
 import { declinedPath, movedPath, ownerFixes, readMoved } from './lockout.ts';
-import { TOKEN_PAGE, machine, machineArgs, tokenInstructions } from './machine.ts';
-import { KEYCHAIN } from './token-store.ts';
+import { TOKEN_PAGE, leftoverToken, machine, machineArgs, moveLeftoverRecords, tokenInstructions } from './machine.ts';
+import { KEYCHAIN, type TokenStore } from './token-store.ts';
 import { SESSION_0610, SESSION_069 } from './older-texts.test.ts';
 
 const SESSION = `${HOME}/.config/niyam/examplebot/session.sh`;
@@ -643,4 +643,226 @@ describe('tokenInstructions', () => {
       'https://github.com/settings/tokens/new?description=niyam%20agent&scopes=repo,workflow,read:org,project,write:ssh_signing_key',
     );
   });
+
+  it('says each step, in order', () => {
+    assert.deepEqual(tokenInstructions(AGENT), [
+      'token page opened, for ExampleBot',
+      'sign in as ExampleBot, in a private window',
+      'note and scopes are filled in; tick nothing else',
+      'Expiration: 90 days (doctor warns 14 days before)',
+      'Generate token, and copy it',
+      'SAML org: Configure SSO → Authorize, next to it',
+    ]);
+  });
+});
+
+describe('machine, step by step (#627)', () => {
+  const OLD_DIR = `${HOME}/.config/process-rules`;
+  const OLD_ITEM = `process-rules/${AGENT}`;
+  const marked = (out: string[]): string[] => out.filter((line) => line.startsWith('▲'));
+
+  /** A store that names nothing from before niyam, kept somewhere whose name says "this Mac's" only past its start. */
+  function testStore(held: Map<string, string>, old?: string): TokenStore {
+    return {
+      where: "a store, not this Mac's keychain",
+      item: (agent) => `the ${agent} item`,
+      read: (_sys, agent) => held.get(agent),
+      store: (_sys, agent, token) => {
+        held.set(agent, token);
+        return true;
+      },
+      readCommand: () => 'true',
+      ...(old === undefined ? {} : { leftover: () => old }),
+    };
+  }
+
+  it('copies each record into its own folder, counting what it copied', () => {
+    const sys = new FakeSys();
+    sys.files.set(`${OLD_DIR}/sessions/s1.json`, '{"agent":"ExampleBot"}\n');
+    sys.files.set(`${OLD_DIR}/sessions/s2.json`, '{"agent":"Old"}\n');
+    sys.files.set(`${OLD_DIR}/examplebot/gh-moved.json`, '{"logins":["owner"]}\n');
+    sys.files.set(`${HOME}/.config/niyam/sessions/s2.json`, '{"agent":"New"}\n');
+    assert.equal(moveLeftoverRecords(sys, OLD_DIR), 2);
+    assert.deepEqual(sys.dirs, [`${HOME}/.config/niyam/sessions`, `${HOME}/.config/niyam/examplebot`]);
+    assert.equal(sys.modes.get(`${HOME}/.config/niyam/sessions/s1.json`), 0o600);
+  });
+
+  it("checks the old entry against the store's own token, and names no old entry a store does not keep", () => {
+    const sys = new FakeSys();
+    const held = new Map<string, string>();
+    assert.equal(leftoverToken(sys, testStore(held), AGENT), undefined);
+    assert.deepEqual(leftoverToken(sys, testStore(held, 'ghp_old'), AGENT), { same: false, why: 'the ExampleBot item holds no token to check it against' });
+    held.set(AGENT, 'ghp_old');
+    assert.deepEqual(leftoverToken(sys, testStore(held, 'ghp_old'), AGENT), { same: true });
+    assert.deepEqual(leftoverToken(sys, testStore(held, 'ghp_other'), AGENT), { same: false, why: 'it holds another token than the ExampleBot item' });
+  });
+
+  it('takes no arguments to mean the agent the repository names, asking nothing', async () => {
+    const sys = done();
+    const { io, out } = capture();
+    assert.equal(await machine(sys, io), 0);
+    assert.equal(out.at(-1), '└  ExampleBot is ready on this Mac');
+  });
+
+  it("names a store's old entry, and its delete, in general terms where the store does not", async () => {
+    // Nothing held: a new token, pasted, the same as the old entry's, which the plan did not delete.
+    const sys = fresh();
+    const held = new Map<string, string>();
+    const { io, out } = capture();
+    assert.equal(await machine(sys, io, ['--yes'], testStore(held, TOKEN)), 0, out.join('\n'));
+    assert.ok(out.includes("│    token         classic, in a store, not this Mac's keychain (new)"), out.join('\n'));
+    assert.ok(out.includes("◇  token in a store, not this Mac's keychain"), out.join('\n'));
+    assert.deepEqual(marked(out), ["▲  the old keychain entry holds the token just stored, and this run's plan did not delete it → niyam machine"]);
+    assert.equal(held.get(AGENT), TOKEN);
+
+    // The same token held: the old entry goes, the store saying nothing against it.
+    const same = done();
+    const kept = capture();
+    assert.equal(await machine(same, kept.io, ['--yes'], testStore(new Map([[AGENT, TOKEN]]), TOKEN)), 0, kept.out.join('\n'));
+    assert.ok(kept.out.includes('│    keychain      delete the old entry: the ExampleBot item holds the same token'), kept.out.join('\n'));
+    assert.ok(kept.out.includes('◇  old keychain entry deleted'), kept.out.join('\n'));
+    assert.deepEqual(marked(kept.out), []);
+
+    // Another token: the old entry stays, said once.
+    const other = done();
+    const stays = capture();
+    assert.equal(await machine(other, stays.io, ['--yes'], testStore(new Map([[AGENT, TOKEN]]), 'ghp_other')), 0, stays.out.join('\n'));
+    assert.deepEqual(marked(stays.out), ['▲  the old keychain entry stays: it holds another token than the ExampleBot item → once nothing needs it, delete it']);
+
+    // A stored token that cannot stay is replaced, in the store's own words.
+    const stale = done();
+    const replaced = capture();
+    await machine(stale, replaced.io, ['--dry-run'], testStore(new Map([[AGENT, 'stale']])));
+    assert.ok(replaced.out.includes("│    token         classic, in a store, not this Mac's keychain (replaced)"), replaced.out.join('\n'));
+  });
+
+  it('replaces a stored token with exactly the days left that doctor warns at', async () => {
+    const sys = done();
+    sys.setToken(AGENT, 'ghp_old');
+    sys.acceptToken('ghp_old', AGENT, { ...CLASSIC, 'github-authentication-token-expiration': '2026-11-13 12:00:00 UTC' });
+    const { out } = await setUp(sys, '--dry-run');
+    assert.deepEqual(out.slice(2, 4), ['◇  This Mac', '│    token  ends in 14 days; a new one replaces it']);
+  });
+
+  it('derives a missing public half with ssh-keygen -y alone, making no new key', async () => {
+    const sys = fresh();
+    sys.files.set(KEY, PRIVATE_KEY);
+    assert.equal((await setUp(sys)).code, 0);
+    const keygen = sys.calls.filter((c) => c.command === 'ssh-keygen');
+    assert.deepEqual(keygen[0]?.args, ['-y', '-f', KEY]);
+    assert.ok(!keygen.some((c) => c.args[0] === '-q'), JSON.stringify(keygen));
+  });
+
+  it('fails when the key ssh-keygen made is not one it can use', async () => {
+    const sys = fresh();
+    sys.execOverride = (call) => (call.command === 'ssh-keygen' && call.args[0] === '-q' ? { code: 0, stdout: '', stderr: '' } : undefined);
+    const { code, out, err } = await setUp(sys);
+    assert.deepEqual({ code, err, last: out.at(-1) }, { code: 1, err: [`machine: ${KEY} is missing; move it aside and run machine again to make a new key`], last: '■  signing key' });
+  });
+
+  it('takes the pasted token without the spaces and line end around it', async () => {
+    const sys = fresh();
+    sys.secrets = [`  ${TOKEN}\n`];
+    assert.equal((await setUp(sys)).code, 0);
+    assert.equal(sys.token(AGENT), TOKEN);
+  });
+
+  it('posts nothing, and asks for nothing in the browser, when GitHub already lists the new key', async () => {
+    const sys = fresh();
+    let lists = 0;
+    // Listed the first time it is asked after the yes, and not again: the one answer is the one that counts.
+    sys.route('GET', '/user/ssh_signing_keys', () => ({ status: 200, json: lists++ === 0 ? [{ key: 'ssh-ed25519 AAAAkey' }] : [] }));
+    const { code, out, err } = await setUp(sys);
+    assert.deepEqual({ code, err }, { code: 0, err: [] }, out.join('\n'));
+    assert.ok(out.includes('◇  signing key registered'), out.join('\n'));
+    assert.ok(!sys.requests.some((r) => r.method === 'POST'));
+    assert.deepEqual(sys.opened, [TOKEN_PAGE]);
+    assert.equal(lists, 1);
+    assert.equal(sys.spun.filter((label) => label === 'signing key registered').length, 2);
+  });
+
+  it('tells how to add the key in the browser when the API refuses it', async () => {
+    const sys = fresh();
+    sys.route('POST', '/user/ssh_signing_keys', { status: 403, json: {} });
+    sys.answers = ['y', ''];
+    const { out } = await setUp(sys);
+    const told = [
+      '◇  signing key: add it in the browser, as ExampleBot',
+      "│  GitHub's API refused (HTTP 403); on the page this opened:",
+      '│  New SSH key → Key type: Signing Key, and paste:',
+      '│  ssh-ed25519 AAAAkey ExampleBot signing',
+    ].join('\n');
+    assert.ok(out.join('\n').includes(`\n${told}\n`), out.join('\n'));
+  });
+
+  it('deletes no old entry the plan did not name, one that came or went since the plan included', async () => {
+    const came = done();
+    came.files.delete(SESSION);
+    came.answers = ['y'];
+    const choose = came.choose.bind(came);
+    came.choose = async (question: string) => {
+      came.keychain.set(OLD_ITEM, TOKEN);
+      return choose(question);
+    };
+    const first = await setUp(came);
+    assert.deepEqual(marked(first.out), [], first.out.join('\n'));
+    assert.equal(came.keychain.get(OLD_ITEM), TOKEN);
+
+    const went = done();
+    went.files.delete(SESSION);
+    went.keychain.set(OLD_ITEM, TOKEN);
+    went.answers = ['y'];
+    const asked = went.choose.bind(went);
+    went.choose = async (question: string) => {
+      went.keychain.delete(OLD_ITEM);
+      return asked(question);
+    };
+    const second = await setUp(went);
+    assert.ok(second.out.includes('│    keychain      delete service process-rules, account ExampleBot: service niyam, account ExampleBot holds the same token'), second.out.join('\n'));
+    assert.ok(!second.out.some((line) => line.includes('deleted')), second.out.join('\n'));
+    assert.deepEqual(marked(second.out), []);
+    assert.ok(!went.calls.some((call) => call.args[0] === 'delete-generic-password'));
+  });
+
+  it('removes the old folder with nothing left worth fixing', async () => {
+    const sys = done();
+    sys.files.set(`${OLD_DIR}/bin/process-rules`, launcherScript(NODE, CLI));
+    const { code, out } = await setUp(sys, '--yes');
+    assert.equal(code, 0);
+    assert.ok(out.includes('◇  ~/.config/process-rules removed'), out.join('\n'));
+    assert.deepEqual(marked(out), []);
+  });
+
+  it("forgets what the owner declined once the saved git password alone is removed", async () => {
+    const sys = done();
+    sys.gitPassword = true;
+    sys.files.set(declinedPath(HOME, AGENT), JSON.stringify({ ghLogins: [], gitPassword: true }));
+    assert.equal((await setUp(sys, '--yes')).code, 0);
+    assert.equal(sys.gitPassword, false);
+    assert.equal(sys.exists(declinedPath(HOME, AGENT)), false);
+  });
+
+  it('records the move once gh alone is signed out, with no git password saved', async () => {
+    const sys = done();
+    sys.ghAccounts = ['example-owner'];
+    const { code, out } = await setUp(sys, '--yes');
+    assert.equal(code, 0);
+    assert.deepEqual(sys.ghAccounts, []);
+    assert.deepEqual(readMoved(sys, AGENT)?.logins, ['example-owner']);
+    for (const fix of ownerFixes(['example-owner'])) assert.ok(out.includes(`▲  ${fix.text} → ${fix.fix}`), out.join('\n'));
+  });
+
+  for (const [name, found] of [
+    ['fails', { code: 1, stdout: '/home/u/Library/pnpm/bin/niyam\n', stderr: '' }],
+    ['names no absolute path', { code: 0, stdout: 'niyam\n', stderr: '' }],
+    ['finds the launcher itself', { code: 0, stdout: `${LAUNCHER}\n`, stderr: '' }],
+  ] as const) {
+    it(`runs the installed CLI's own script when the shell's lookup ${name}`, async () => {
+      const sys = fresh();
+      sys.runtime = { node: NODE, cli: INSTALLED };
+      sys.execOverride = (call) => (call.command === '/bin/sh' ? found : undefined);
+      assert.equal((await setUp(sys)).code, 0);
+      assert.equal(sys.files.get(LAUNCHER), launcherScript(NODE, INSTALLED));
+    });
+  }
 });
