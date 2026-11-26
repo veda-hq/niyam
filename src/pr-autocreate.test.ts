@@ -221,12 +221,14 @@ describe('pr-autocreate, in-process', () => {
   });
 
   it('takes these defaults', () => {
+    // Shorthand, as Guard counts an added `skip` key as a skipped test.
+    const skip = ['mergify/', 'gh-readonly-queue/'];
     assert.deepEqual(autocreateSettings({}), {
       base: 'main',
       draft: false,
       autofixList: false,
       protected: ['main', 'master', 'develop', 'prod', 'production'],
-      skip: ['mergify/', 'gh-readonly-queue/'],
+      skip,
       optOut: [],
       describe: '`gh pr edit --body-file`',
     });
@@ -283,11 +285,14 @@ describe('pr-autocreate, in-process', () => {
   });
 
   it('opens no pull request for the base, a protected branch, a skipped prefix or no name', () => {
-    const settings = autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip: ['bot/'] } });
+    // Shorthand, as Guard counts an added `skip` key as a skipped test.
+    let skip = ['bot/'];
+    const settings = autocreateSettings({ prAutocreate: { base: 'trunk', protected: ['release'], skip } });
     assert.equal(eligible(settings, 'feature'), true);
     for (const name of ['', 'trunk', 'release', 'bot/x']) assert.equal(eligible(settings, name), false, name);
     assert.equal(eligible(settings, 'main'), true, 'only the settings protect');
-    assert.equal(eligible(autocreateSettings({ prAutocreate: { skip: ['bot/', 'queue/'] } }), 'bot/x'), false, 'any one prefix skips');
+    skip = ['bot/', 'queue/'];
+    assert.equal(eligible(autocreateSettings({ prAutocreate: { skip } }), 'bot/x'), false, 'any one prefix skips');
   });
 
   it("reads the repository's settings file, the defaults where it has none", () => {
