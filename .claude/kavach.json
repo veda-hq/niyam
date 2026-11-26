@@ -70,5 +70,8 @@
         "pnpm-lock.yaml"
       ]
     }
+  },
+  "rules": {
+    "other-sessions-worktree": "refuse"
   }
 }
