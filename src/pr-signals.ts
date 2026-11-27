@@ -672,10 +672,9 @@ export function verdictLine(pr: number, head: string, judged: Judged): string | 
       return judged.minimum === 'default'
         ? `⚠ CI on #${pr} is short: no GitHub Actions run that was not skipped is on ${head}, and the repository names no required checks`
         : `⚠ CI on #${pr} is short: ${judged.counted} of the ${judged.floor} check runs "minCheckRuns" asks for finished on ${head} without being skipped`;
-    default:
-      // Green needs no line.
-      return undefined;
   }
+  // Green needs no line.
+  return undefined;
 }
 
 /** Whether GitHub has worked out the pull request's `mergeable_state`: it says `unknown` while it computes it. */

@@ -1054,6 +1054,8 @@ describe('judge', () => {
     assert.equal(verdictOf([failed, going], CI, 'unknown'), 'failed');
     assert.equal(verdictOf([going], CI, 'clean'), 'pending');
     assert.equal(verdictOf([runOf(3, 'lint', 'success')], CI, 'clean'), 'short');
+    const both: Rules = { required: [{ context: 'ci', app: ACTIONS }, { context: 'build' }] };
+    assert.deepEqual(judge(checksOf([runOf(5, 'ci', 'success')]), both, 'clean').verdict, 'short');
     assert.equal(verdictOf([runOf(4, 'ci', 'success')], CI, 'blocked'), 'green');
   });
 
