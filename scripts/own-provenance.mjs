@@ -204,13 +204,17 @@ export async function main(io) {
 export const passed = packages => `own-provenance: ${packages.map(p => `${p.name}@${p.version}`).join(', ')} built and signed by ${REPOSITORY} ${WORKFLOW}`;
 
 /**
- * main's exit code where `argv` runs the file at `url`; undefined where something imported it.
- * @param {string[]} argv @param {string} url @param {Io} io
- * @returns {Promise<number> | undefined}
+ * Exits with main's code where `argv` runs the file at `url`; does nothing where something imported it.
+ * @param {string[]} argv @param {string} url @param {Io} io @param {(code: number) => void} exit
  */
-export function entry(argv, url, io) {
-  return argv[1] && url === pathToFileURL(argv[1]).href ? main(io) : undefined;
+export async function entry(argv, url, io, exit) {
+  if (!argv[1] || url !== pathToFileURL(argv[1]).href) return;
+  exit(await main(io));
 }
 
-// Imported, entry gives undefined, and the importer's exit code stands.
-process.exitCode = (await entry(process.argv, import.meta.url, IO)) ?? process.exitCode;
+/** The code the process exits with once the run ends. @param {number} code */
+export function setExitCode(code) {
+  process.exitCode = code;
+}
+
+await entry(process.argv, import.meta.url, IO, setExitCode);

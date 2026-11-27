@@ -17,6 +17,7 @@ import {
   passed,
   provenanceFailures,
   REPOSITORY,
+  setExitCode,
   signingPolicy,
   SLSA,
   THRESHOLDS,
@@ -367,18 +368,24 @@ describe('the Sigstore bundle, on real attestations', () => {
       assert.deepEqual(bad.said.log, []);
     });
 
-    test('run as the file, entry runs main; imported, it reads nothing and leaves the exit code as it was', async () => {
+    test("run as the file, entry exits with main's code; imported, it reads and exits nothing", async () => {
       const url = new URL('./own-provenance.mjs', import.meta.url).href;
-      assert.equal(await entry(['node', fileURLToPath(url)], url, io(LOCKED, KAVACH)), 0);
+      const exits = [];
+      await entry(['node', fileURLToPath(url)], url, io(LOCKED, KAVACH), code => exits.push(code));
+      await entry(['node', fileURLToPath(url)], url, io(LOCKED, null), code => exits.push(code));
+      assert.deepEqual(exits, [0, 1]);
       const never = () => assert.fail('nothing runs on import');
       const quiet = { readText: never, getJson: never, log: never, error: never };
-      assert.equal(entry(['node', '/repo/scripts/other.mjs'], url, quiet), undefined);
-      assert.equal(entry(['node'], url, quiet), undefined);
+      await entry(['node', '/repo/scripts/other.mjs'], url, quiet, never);
+      await entry(['node'], url, quiet, never);
+    });
+
+    test('setExitCode sets the code the process exits with, which importing leaves unset', () => {
+      assert.equal(process.exitCode, undefined, 'importing it set no exit code');
       const before = process.exitCode;
-      process.exitCode = 7;
       try {
-        await import(`${url}?imported`);
-        assert.equal(process.exitCode, 7);
+        setExitCode(5);
+        assert.equal(process.exitCode, 5);
       } finally {
         process.exitCode = before;
       }

@@ -128,12 +128,17 @@ export function main(argv) {
 }
 
 /**
- * main's exit code where `argv` runs the file at `url`; undefined where something imported it.
- * @param {string[]} argv @param {string} url @returns {number | undefined}
+ * Exits with main's code where `argv` runs the file at `url`; does nothing where something imported it.
+ * @param {string[]} argv @param {string} url @param {(code: number) => void} exit
  */
-export function entry(argv, url) {
-  return argv[1] && url === pathToFileURL(argv[1]).href ? main(argv.slice(2)) : undefined;
+export function entry(argv, url, exit) {
+  if (!argv[1] || url !== pathToFileURL(argv[1]).href) return;
+  exit(main(argv.slice(2)));
 }
 
-// Imported, entry gives undefined, and the importer's exit code stands.
-process.exitCode = entry(process.argv, import.meta.url) ?? process.exitCode;
+/** The code the process exits with once the run ends. @param {number} code */
+export function setExitCode(code) {
+  process.exitCode = code;
+}
+
+await entry(process.argv, import.meta.url, setExitCode);

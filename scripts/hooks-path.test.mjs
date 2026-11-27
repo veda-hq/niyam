@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 import { fileURLToPath } from 'node:url';
 
-import { decide, entry, HOOKS, main, realGit, toStderr } from './hooks-path.mjs';
+import { decide, entry, HOOKS, main, realGit, setExitCode, toStderr } from './hooks-path.mjs';
 
 /** A git that answers from `config`, recording each call. */
 function fakeGit({ gitDir = '/repo/.git', commonDir = '/repo/.git', hooksPath, setFails = false } = {}) {
@@ -116,23 +116,28 @@ describe('realGit', () => {
 describe('entry', () => {
   const url = new URL('./hooks-path.mjs', import.meta.url).href;
 
-  test('run as the file, as pnpm install runs it, it runs main', () => {
+  test('run as the file, as pnpm install runs it, it exits with what main gives', () => {
     const { git, calls } = fakeGit();
     const said = [];
-    assert.equal(entry(['node', fileURLToPath(url)], url, git, {}, (line) => said.push(line)), 0);
+    const exits = [];
+    entry(['node', fileURLToPath(url)], url, git, {}, (line) => said.push(line), (code) => exits.push(code));
+    assert.deepEqual(exits, [0]);
     assert.ok(calls.includes(`config --local core.hooksPath ${HOOKS}`));
     assert.equal(said.length, 1);
   });
 
-  test('imported, it asks and says nothing, and leaves the exit code as it was', async () => {
+  test('imported, it asks, says and exits nothing', () => {
+    assert.equal(process.exitCode, undefined, 'importing it set no exit code');
     const never = () => assert.fail('nothing runs on import');
-    assert.equal(entry(['node', '/repo/scripts/other.mjs'], url, never, {}, never), undefined);
-    assert.equal(entry(['node'], url, never, {}, never), undefined);
+    entry(['node', '/repo/scripts/other.mjs'], url, never, {}, never, never);
+    entry(['node'], url, never, {}, never, never);
+  });
+
+  test('setExitCode sets the code the process exits with', () => {
     const before = process.exitCode;
-    process.exitCode = 7;
     try {
-      await import(`${url}?imported`);
-      assert.equal(process.exitCode, 7);
+      setExitCode(5);
+      assert.equal(process.exitCode, 5);
     } finally {
       process.exitCode = before;
     }

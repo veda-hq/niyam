@@ -74,15 +74,19 @@ export function toStderr(line) {
 }
 
 /**
- * main's exit code where `argv` runs the file at `url`, as `pnpm install`
- * does; undefined where something imported it.
+ * Exits with main's code where `argv` runs the file at `url`, as `pnpm
+ * install` does; does nothing where something imported it.
  * @param {string[]} argv @param {string} url @param {Git} git
- * @param {Record<string, string | undefined>} env @param {(line: string) => void} say
- * @returns {number | undefined}
+ * @param {Record<string, string | undefined>} env @param {(line: string) => void} say @param {(code: number) => void} exit
  */
-export function entry(argv, url, git, env, say) {
-  return argv[1] && url === pathToFileURL(argv[1]).href ? main(git, env, say) : undefined;
+export function entry(argv, url, git, env, say, exit) {
+  if (!argv[1] || url !== pathToFileURL(argv[1]).href) return;
+  exit(main(git, env, say));
 }
 
-// Imported, entry gives undefined, and the importer's exit code stands.
-process.exitCode = entry(process.argv, import.meta.url, realGit, process.env, toStderr) ?? process.exitCode;
+/** The code the process exits with once the run ends. @param {number} code */
+export function setExitCode(code) {
+  process.exitCode = code;
+}
+
+await entry(process.argv, import.meta.url, realGit, process.env, toStderr, setExitCode);

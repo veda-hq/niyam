@@ -5,7 +5,7 @@ import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
-import { entry, main, problems } from './released-pins.mjs';
+import { entry, main, problems, setExitCode } from './released-pins.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'released-pins-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -201,26 +201,31 @@ describe('main', () => {
 describe('entry', () => {
   const url = new URL('./released-pins.mjs', import.meta.url).href;
 
-  test('run as the file, it checks the folder named', (t) => {
+  test('run as the file, it checks the folder named and exits with what main gives', (t) => {
     t.mock.method(console, 'error', () => {});
     const good = repo({ pins: { [DVARA]: '0.5.16' }, installed: { [DVARA]: '0.5.16' } });
-    assert.equal(entry(['node', fileURLToPath(url), '--root', good], url), 0);
-    assert.equal(entry(['node', fileURLToPath(url), '--root'], url), 2);
+    const exits = [];
+    entry(['node', fileURLToPath(url), '--root', good], url, (code) => exits.push(code));
+    entry(['node', fileURLToPath(url), '--root'], url, (code) => exits.push(code));
+    assert.deepEqual(exits, [0, 2]);
   });
 
-  test('imported, it checks nothing, and leaves the exit code as it was', async (t) => {
-    const cwd = t.mock.method(process, 'cwd', () => assert.fail('nothing runs on import'));
-    assert.equal(entry(['node', '/repo/scripts/other.mjs', '--root'], url), undefined);
-    assert.equal(entry(['node'], url), undefined);
-    assert.equal(cwd.mock.callCount(), 0);
-    cwd.mock.restore();
+  test('setExitCode sets the code the process exits with', () => {
     const before = process.exitCode;
-    process.exitCode = 7;
     try {
-      await import(`${url}?imported`);
-      assert.equal(process.exitCode, 7);
+      setExitCode(5);
+      assert.equal(process.exitCode, 5);
     } finally {
       process.exitCode = before;
     }
+  });
+
+  test('imported, it checks and exits nothing', (t) => {
+    assert.equal(process.exitCode, undefined, 'importing it set no exit code');
+    const cwd = t.mock.method(process, 'cwd', () => assert.fail('nothing runs on import'));
+    const never = () => assert.fail('nothing exits on import');
+    entry(['node', '/repo/scripts/other.mjs', '--root'], url, never);
+    entry(['node'], url, never);
+    assert.equal(cwd.mock.callCount(), 0);
   });
 });
