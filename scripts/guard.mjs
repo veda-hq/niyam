@@ -92,9 +92,9 @@ export const issueUrl = (repo, number) => `${WEB}/${repo}/issues/${number}`;
  * Whether `path` is a guard file: in the floor, or named by the repository's
  * own `paths`, in the **Guards:** syntax. package.json counts only for its
  * `scripts`, which the caller compares.
- * @param {string} path @param {string[]} [paths]
+ * @param {string} path @param {string[]} paths
  */
-export function isGuardFile(path, paths = []) {
+export function isGuardFile(path, paths) {
   return path === 'package.json' || GUARD_FILES.some((pattern) => pattern.test(path)) || named(paths, path);
 }
 
@@ -131,7 +131,8 @@ export function guardsNamed(text) {
   return [
     ...new Set(
       text
-        .split(/[\s,;`]+/)
+        // One separator at a time: the empty words between two go with the prose.
+        .split(/[\s,;`]/)
         .map((word) => word.replace(/^[-*(]+|[).:]+$/g, ''))
         .filter((word) => /[./]/.test(word)),
     ),
@@ -141,9 +142,8 @@ export function guardsNamed(text) {
 /** Whether one of `names` names `path`. @param {string[]} names @param {string} path */
 export function named(names, path) {
   return names.some((name) => {
-    if (name === path) return true;
     if (name.endsWith('/')) return path.startsWith(name);
-    if (!name.includes('*')) return false;
+    // A name with no `*` reads as itself alone.
     const glob = name
       .split(/(\*\*\/?|\*)/)
       .map((part) => (part.startsWith('**') ? '.*' : part === '*' ? '[^/]*' : part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')))
@@ -159,7 +159,8 @@ export function named(names, path) {
  * @param {string | undefined} body @param {string} repo @returns {{ repo: string, number: number } | undefined}
  */
 export function sliceOf(body, repo) {
-  const match = SLICE_LINE.exec(body ?? '');
+  // No body reads as the word undefined, which names no slice.
+  const match = SLICE_LINE.exec(String(body));
   if (!match) return undefined;
   const there = match[2] ?? match[4];
   return { repo: there === undefined || there.toLowerCase() === repo.toLowerCase() ? repo : there, number: Number(match[1] ?? match[3] ?? match[5]) };
@@ -204,9 +205,9 @@ export function testChange(runs) {
 
 /** Whether release `a` is newer than `b`, both X.Y.Z. */
 export function newer(a, b) {
-  const [x, y] = [a, b].map((v) => v.split('.').map(Number));
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
-  return false;
+  // Each part padded to one width, so the texts sort as the numbers do; no loop a mutant could make endless.
+  const key = (version) => version.split('.').map((part) => part.padStart(16, '0')).join();
+  return key(a) > key(b);
 }
 
 /**
@@ -271,8 +272,11 @@ export function jobNames(text) {
  * @param {string | undefined} text @returns {string[]}
  */
 export function pinsIn(text) {
-  return (workflowOf(text ?? '')?.jobs ?? [])
-    .map(({ job }) => (job && typeof job === 'object' ? /** @type {{ uses?: unknown }} */ (job).uses : undefined))
+  // No file reads as the word undefined, which is no workflow; a job that is no mapping has no uses:.
+  return [workflowOf(String(text))?.jobs]
+    .filter(Array.isArray)
+    .flat()
+    .map(({ job }) => /** @type {{ uses?: unknown }} */ (Object(job)).uses)
     .filter((uses) => typeof uses === 'string' && uses.startsWith(SHARED_WORKFLOW))
     .map((uses) => /** @type {string} */ (uses).slice(SHARED_WORKFLOW.length));
 }
@@ -287,14 +291,17 @@ export function workflowOf(text) {
   try {
     doc = parseYaml(text);
   } catch {
-    return undefined;
+    // Text that is not YAML leaves no document, which is no workflow below.
   }
   if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return undefined;
+  // A null jobs: reads as none.
   const jobs = doc.jobs ?? {};
-  if (typeof jobs !== 'object' || Array.isArray(jobs) || jobs === null) return undefined;
+  if (typeof jobs !== 'object' || Array.isArray(jobs)) return undefined;
   const on = doc.on;
-  const events = typeof on === 'string' ? [on] : Array.isArray(on) ? on.map(String) : on && typeof on === 'object' ? Object.keys(on) : [];
-  return { events, jobs: Object.entries(jobs).map(([id, job]) => ({ name: job && typeof job === 'object' && job.name !== undefined ? String(job.name) : id, job })) };
+  // An event list of another shape, null or a number, has no keys: no events.
+  const events = typeof on === 'string' ? [on] : Array.isArray(on) ? on.map(String) : Object.keys(Object(on));
+  // A job that is no mapping has no name: it reads as its id.
+  return { events, jobs: Object.entries(jobs).map(([id, job]) => ({ name: job?.name !== undefined ? String(job.name) : id, job })) };
 }
 
 /**
@@ -309,8 +316,8 @@ export function workflowOf(text) {
  */
 export function isCaller(events, job) {
   if (events.length !== 1 || events[0] !== 'pull_request_target') return false;
-  if (!job || typeof job !== 'object' || Array.isArray(job)) return false;
-  const { uses, steps } = /** @type {{ uses?: unknown, steps?: unknown }} */ (job);
+  // A job that is no mapping, null or a list, has no uses: and refuses below.
+  const { uses, steps } = /** @type {{ uses?: unknown, steps?: unknown }} */ (Object(job));
   if (typeof uses !== 'string' || !uses.startsWith(SHARED_WORKFLOW) || steps !== undefined) return false;
   return RELEASE_REF.test(uses.slice(SHARED_WORKFLOW.length));
 }
@@ -382,7 +389,8 @@ export function workRulesIn(text) {
 export function guardPathsIn(text) {
   const paths = JSON.parse(text).guard;
   if (paths === undefined) return [];
-  if (!Array.isArray(paths) || !paths.every((one) => typeof one === 'string' && guardsNamed(one).length === 1 && guardsNamed(one)[0] === one)) {
+  // A name that reads as itself alone is one word: guardsNamed gives no second.
+  if (!Array.isArray(paths) || !paths.every((one) => typeof one === 'string' && guardsNamed(one)[0] === one)) {
     throw new Error(`${SETTINGS}'s "guard" must be a list of paths, folders ending in / or patterns, such as ["scripts/*.mjs"]`);
   }
   return paths;
@@ -397,7 +405,8 @@ export function guardPathsIn(text) {
 export function approvalsIn(text) {
   const value = JSON.parse(text).approvals;
   if (value === undefined) return undefined;
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+  // Only a number is a safe integer.
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${SETTINGS}'s "approvals" must be the number of the repository's Approvals issue, such as 42`);
   }
   return value;
@@ -459,7 +468,7 @@ export function client(token, api = 'https://api.github.com', doFetch = fetch) {
     try {
       json = JSON.parse(text);
     } catch {
-      json = undefined;
+      // Text that is not JSON leaves json undefined.
     }
     return { status: response.status, json, text };
   };
@@ -503,7 +512,8 @@ async function textAt(gh, repo, path, ref) {
 
 /** package.json's `scripts`, as one comparable string; a file that is not JSON compares as itself. */
 function scriptsOf(text) {
-  if (text === undefined) return 'none';
+  // No file compares as nothing else does.
+  if (text === undefined) return undefined;
   try {
     return JSON.stringify(JSON.parse(text).scripts ?? null);
   } catch {
