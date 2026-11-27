@@ -22,7 +22,7 @@ import {
   settingsIn,
   tokenInfo,
 } from './agent.ts';
-import { setUpBoard } from './board.ts';
+import { type BoardSetUp, setUpBoard } from './board.ts';
 import { BOARD_SECRETS, boardAppSteps, setUpBoardApp } from './board-app.ts';
 import { agentSession } from './push-identity.ts';
 import { type TypesPlan, typesDetail, typesLines, typesPlan } from './issue-types.ts';
@@ -1259,39 +1259,36 @@ export function claudeSettings(
       } catch (error) {
         throw new Error(`${SARATHI_PATH}: ${(error as Error).message}`);
       }
-      try {
-        const own = (value: unknown): boolean => {
-          const found = (value as { command?: unknown } | null)?.command;
-          return typeof found === 'string' && (found === command || older.includes(found));
-        };
-        // A group of niyam's hooks alone goes whole; niyam's hook in a group beside others goes alone.
-        const groups = removeElements(text, ['hooks', event], (group) => {
-          const inner = (group as { hooks?: unknown } | null)?.hooks;
-          return Array.isArray(inner) && inner.length > 0 && inner.every(own);
-        });
-        const single = removeElements(groups.text, ['hooks', event, '*', 'hooks'], own);
-        if (groups.removed + single.removed > 0) {
-          text = single.text;
-          changes.push(`take out the ${name}, which ${SARATHI_PATH} now runs under sarathi`);
-          moved = true;
-        }
-        // Found again: taking niyam's groups out moves sarathi's.
-        const now = sarathiRunner(parsed(), event) as Runner;
-        const needed = handler.timeout ?? SARATHI_DEFAULT_TIMEOUT;
-        if (now.timeout === undefined || now.timeout < needed) {
-          text = setMember(text, ['hooks', event, String(now.group), 'hooks', String(now.hook)], 'timeout', needed);
-          changes.push(`give sarathi's ${event} hook ${needed} s, so niyam's handler under it has its time`);
-          timed = true;
-        }
-      } catch (error) {
-        throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
+      // No edit here can refuse: each array and object it walks is one the parse found, sarathi's entry among them.
+      // Only text is an older release's command.
+      const own = (value: unknown): boolean => {
+        const found = (value as { command?: unknown } | null)?.command;
+        return found === command || older.includes(found);
+      };
+      // A group of niyam's hooks alone goes whole; niyam's hook in a group beside others goes alone.
+      const groups = removeElements(text, ['hooks', event], (group) => {
+        const inner = (group as { hooks?: unknown } | null)?.hooks;
+        return Array.isArray(inner) && inner.length > 0 && inner.every(own);
+      });
+      const single = removeElements(groups.text, ['hooks', event, '*', 'hooks'], own);
+      if (groups.removed + single.removed > 0) {
+        text = single.text;
+        changes.push(`take out the ${name}, which ${SARATHI_PATH} now runs under sarathi`);
+        moved = true;
+      }
+      // Found again: taking niyam's groups out moves sarathi's.
+      const now = sarathiRunner(parsed(), event) as Runner;
+      const needed = handler.timeout ?? SARATHI_DEFAULT_TIMEOUT;
+      if (now.timeout === undefined || now.timeout < needed) {
+        text = setMember(text, ['hooks', event, String(now.group), 'hooks', String(now.hook)], 'timeout', needed);
+        changes.push(`give sarathi's ${event} hook ${needed} s, so niyam's handler under it has its time`);
+        timed = true;
       }
       continue;
     }
     try {
-      const swapped = replaceValues(text, ['hooks', event, '*', 'hooks', '*', 'command'], (value) =>
-        typeof value === 'string' && older.includes(value) ? command : undefined,
-      );
+      // Only text is an older release's command.
+      const swapped = replaceValues(text, ['hooks', event, '*', 'hooks', '*', 'command'], (value) => (older.includes(value) ? command : undefined));
       if (swapped.replaced > 0) {
         text = swapped.text;
         changes.push(`replace the older ${name} with this release's`);
@@ -1307,7 +1304,8 @@ export function claudeSettings(
   }
   try {
     const env = (parsed() as { env?: unknown }).env;
-    const current = typeof env === 'object' && env !== null ? (env as Record<string, unknown>) : {};
+    // A value of another shape has none of the lock's names: setMember refuses it below with the reason.
+    const current = Object(env) as Record<string, unknown>;
     const missing = Object.entries(BASE_ENV).filter(([name, value]) => current[name] !== value);
     for (const [name, value] of missing) text = setMember(text, ['env'], name, value);
     // A variable an older release set, such as its placeholder token or SSH refusal, is updated; one not there is set.
@@ -1323,14 +1321,15 @@ export function claudeSettings(
     // The rule under the old command becomes niyam's, in its place, unless niyam's is there already.
     const allow = (parsed() as { permissions?: { allow?: unknown } }).permissions?.allow;
     const has = Array.isArray(allow) && allow.includes(REVIEW_THREAD_RULE);
-    const renamed = has ? { text, replaced: 0 } : replaceValues(text, ['permissions', 'allow', '*'], (value) => (value === OLDER_REVIEW_THREAD_RULE ? REVIEW_THREAD_RULE : undefined));
-    const review = !has && renamed.replaced === 0;
-    if (renamed.replaced > 0) {
-      text = renamed.text;
-      changes.push(`replace ${OLDER_REVIEW_THREAD_RULE} with ${REVIEW_THREAD_RULE}, the CLI's own name`);
-    } else if (review) {
-      text = appendToArray(text, ['permissions'], 'allow', REVIEW_THREAD_RULE);
-      changes.push('allow niyam review-thread without a prompt, so agent sessions answer review threads on their own pull requests');
+    if (!has) {
+      const renamed = replaceValues(text, ['permissions', 'allow', '*'], (value) => (value === OLDER_REVIEW_THREAD_RULE ? REVIEW_THREAD_RULE : undefined));
+      if (renamed.replaced > 0) {
+        text = renamed.text;
+        changes.push(`replace ${OLDER_REVIEW_THREAD_RULE} with ${REVIEW_THREAD_RULE}, the CLI's own name`);
+      } else {
+        text = appendToArray(text, ['permissions'], 'allow', REVIEW_THREAD_RULE);
+        changes.push('allow niyam review-thread without a prompt, so agent sessions answer review threads on their own pull requests');
+      }
     }
     const autoFix = autoFixRuleNeeds(parsed());
     const lacking = autoFix.missing;
@@ -1347,7 +1346,7 @@ export function claudeSettings(
     // A rule the file denies is the owner's choice: an allow rule for it would do nothing, so the plan says so instead.
     denied.push(...deniedLines(autoFix, AUTO_FIX_RULES, 'Auto-fix rules'), ...deniedLines(artifacts, ARTIFACT_RULES, 'artifact rules'));
     // One group's own word, or one word for several, so the plan's line stays short.
-    const groups = [review || renamed.replaced > 0 ? 'review rule' : '', lacking.length > 0 ? 'Auto-fix rules' : '', unpublished.length > 0 ? 'artifact rules' : ''].filter(Boolean);
+    const groups = [has ? '' : 'review rule',lacking.length > 0 ? 'Auto-fix rules' : '', unpublished.length > 0 ? 'artifact rules' : ''].filter(Boolean);
     if (groups.length > 0) labels.push(groups.length === 1 ? groups[0]! : 'allow rules');
   } catch (error) {
     throw new Error(`${HOOKS_PATH}: ${(error as Error).message}`);
@@ -1363,11 +1362,11 @@ export function claudeSettings(
 
 /** The agents the checkout's settings name; none when it has none, or settings onboard refuses later with the reason. */
 function settingsAgents(sys: Sys, root: string): readonly string[] {
-  if (!sys.exists(`${root}/${SETTINGS_PATH}`)) return [];
   try {
     return loadSettings(sys, root).agents;
   } catch {
-    // fail-open: the settings branch reads them again and refuses them with the reason; here they only suggest a token.
+    // fail-open: settings not there name no agent; the settings branch reads them again and refuses them with the
+    // reason; here they only suggest a token.
     return [];
   }
 }
@@ -1381,6 +1380,14 @@ function storedToken(sys: Sys, agents: readonly string[]): string | undefined {
   return undefined;
 }
 
+/** The agent's token this Mac stores, where it acts as the agent and the agent's signing key is here; else why not. */
+async function readyToken(sys: Sys, agent: string): Promise<{ token: string } | { problem: string }> {
+  const token = readToken(sys, agent);
+  if (!token) return { problem: `no token stored for ${agent}` };
+  const problem = checkToken(token, await tokenInfo(sys, token), agent, sys.now()).problem ?? keyPairProblem(sys, pathsFor(sys.home, agent).key);
+  return problem === undefined ? { token } : { problem };
+}
+
 /** Who the run's sign-in is, the owner's likely login; undefined when it failed. */
 async function signedInLogin(signIn: () => Promise<OwnerToken | { problem: string }>): Promise<string | undefined> {
   const signed = await signIn().catch(() => undefined);
@@ -1391,43 +1398,44 @@ async function signedInLogin(signIn: () => Promise<OwnerToken | { problem: strin
  * Asks for an account, offering what this Mac suggests: Enter takes the
  * first suggestion. Undefined when there is none and nothing is typed.
  */
-async function choose(sys: Sys, io: Output, role: string, suggestions: (string | undefined)[]): Promise<string | undefined> {
-  const offered = suggestions.filter((login): login is string => !!login);
+async function choose(sys: Sys, io: Output, role: string, offered: readonly (string | undefined)[]): Promise<string | undefined> {
+  // Only a suggestion alone is ever undefined: the sign-in's login, when it failed.
   if (offered.length > 1) io.out(`Accounts set up here for the ${role.split(',')[0]}: ${offered.join(', ')}`);
   const typed = (await sys.ask(`The ${role}${offered[0] ? ` [${offered[0]}]` : ''}: `)).trim();
   return typed || offered[0];
 }
 
 /** onboard's arguments: up to two logins, then `--features a,b` (first time) or `--add <feature>`, `--yes` and `--dry-run`. */
-export function onboardArgs(args: readonly string[]): { named: string[]; features?: Feature[]; add?: Feature; yes?: true; dryRun?: true } {
-  const named: string[] = [];
-  let features: Feature[] | undefined;
-  let add: Feature | undefined;
-  let yes = false;
-  let dryRun = false;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] as string;
-    const value = args[i + 1];
-    if (arg === '--yes') yes = true;
-    else if (arg === '--dry-run') dryRun = true;
-    else if (arg === '--features' || arg === '--add') {
-      if (value === undefined) throw new Error(`${arg} needs a value`);
-      if (arg === '--features') features = parseFeatures(value);
-      else {
-        const [, feature] = parseFeatures(value);
-        if (!feature || value.includes(',')) throw new Error('--add takes one feature other than identity');
-        add = feature;
-      }
-      i++;
-    } else if (arg.startsWith('--')) {
-      throw new Error(`unknown option ${arg}`);
-    } else if (named.length < 2) {
-      named.push(arg);
-    } else {
-      throw new Error(`unexpected argument "${arg}"`);
-    }
+export function onboardArgs(args: readonly string[]): OnboardArgs {
+  return argsFrom(args, { named: [] });
+}
+
+/** What onboard's arguments say. */
+interface OnboardArgs {
+  named: string[];
+  features?: Feature[];
+  add?: Feature;
+  yes?: true;
+  dryRun?: true;
+}
+
+/** onboardArgs past what `read` holds: each argument in turn, by recursion, so no mutant of a counter reads forever. */
+function argsFrom(args: readonly string[], read: OnboardArgs): OnboardArgs {
+  const [arg, ...rest] = args;
+  if (arg === undefined) return read;
+  if (arg === '--yes') return argsFrom(rest, { ...read, yes: true });
+  if (arg === '--dry-run') return argsFrom(rest, { ...read, dryRun: true });
+  if (arg === '--features' || arg === '--add') {
+    const [value, ...after] = rest;
+    if (value === undefined) throw new Error(`${arg} needs a value`);
+    if (arg === '--features') return argsFrom(after, { ...read, features: parseFeatures(value) });
+    const [, feature] = parseFeatures(value);
+    if (!feature || value.includes(',')) throw new Error('--add takes one feature other than identity');
+    return argsFrom(after, { ...read, add: feature });
   }
-  return { named, ...(features ? { features } : {}), ...(add ? { add } : {}), ...(yes ? { yes: true as const } : {}), ...(dryRun ? { dryRun: true as const } : {}) };
+  if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`);
+  if (read.named.length < 2) return argsFrom(rest, { ...read, named: [...read.named, arg] });
+  throw new Error(`unexpected argument "${arg}"`);
 }
 
 /** A step the run takes after the yes, in order; `owner` when it acts as the owner, so the sign-in comes before its spinner. */
@@ -1439,7 +1447,7 @@ interface Step {
 
 /** What a workflow update changes, in a few words for the plan. */
 function workflowDetail(update: Exclude<WorkflowUpdate, { kind: 'same' }>, version: string, { figma, board }: Passed): string {
-  if (update.kind !== 'repin') return { write: 'new', replace: 'replaced' }[update.kind];
+  if (update.kind !== 'repin') return update.kind === 'write' ? 'new' : 'replaced';
   return (
     [
       ...(update.from ? [`pins → v${version}`] : []),
@@ -1529,7 +1537,8 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   // The token's item is under the login as the session file spells it, whatever case it was typed or written in.
   const setUp = agentsSetUp(sys);
   const known = named[1] ? [named[1]] : settingsAgents(sys, root);
-  const spelled = known.flatMap((login) => [login, ...setUp.filter((one) => one !== login && sameLogin(one, login))]);
+  // A login set up under the spelling it was named in comes twice, and reads the same token.
+  const spelled = known.flatMap((login) => [login, ...setUp.filter((one) => sameLogin(one, login))]);
   let readAs = storedToken(sys, known.length > 0 ? spelled : setUp);
   // Whether an organisation owns the repository, asked of GitHub once in this run.
   let organisation: Promise<boolean> | undefined;
@@ -1548,9 +1557,9 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     const before = held ? held.before : fileAt(path);
     changes.set(path, { path, before, text, what: held ? `${held.what}; ${what}` : what });
   };
-  // A file under its name before P-56, deleted where the pull request leaves the new one (MOVED_FILES).
+  // A file under its name before P-56, deleted where the pull request leaves the new one (MOVED_FILES); its caller
+  // finds it there first.
   const remove = (path: string, what: string): void => {
-    if (fileAt(path) === undefined) return;
     const held = changes.get(path);
     changes.set(path, { path, before: held ? held.before : fileAt(path), text: undefined, what });
   };
@@ -1582,13 +1591,14 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   const notes: string[] = [];
   const later: string[] = [];
   // The owner's sign-in for this run: one browser approval at the first step that needs it, never stored.
-  let scopes: string[] = [];
+  // The scopes beyond gh's own that the sign-in asks for, once it has: it runs once.
+  const scopes: string[] = [];
   let signedIn: Promise<OwnerToken | { problem: string }> | undefined;
   // `as` is who may sign in: the owner, the settings' owners while the run has not chosen one, or none yet known.
   const signIn = (as: readonly string[] = []): Promise<OwnerToken | { problem: string }> =>
     (signedIn ??= (async () => {
       // The features the run ends with: the sign-in can come before --add's feature is turned on.
-      scopes = ownerScopes(add ? [...features, add] : features, await byOrganisation());
+      scopes.push(...ownerScopes(add ? [...features, add] : features, await byOrganisation()));
       // Which access the approval grants: gh's own repo scope, and what the run's features add.
       io.out(`${paint.done('◇')}  Sign in to GitHub as ${as.length === 0 ? 'the owner' : either(as)}, for this run only: ${['repo', ...scopes].join(', ')}`);
       const signed = await signInOnce(sys, scopes, say);
@@ -1746,7 +1756,8 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   // hand or not, is written again; a file of that name onboard did not write is the repository's own: refused
   // before any plan, so nothing changes.
   const callerBefore = fileAt(GUARD_CALLER_PATH);
-  const callerHad = callerBefore === undefined ? undefined : await callerAt(callerBefore);
+  // No file reads as the word undefined, which is no caller.
+  const callerHad = await callerAt(String(callerBefore));
   if (callerBefore !== undefined && !(await callerIsOnboards(callerBefore))) {
     io.err(`onboard: ${GUARD_CALLER_PATH} is not the shared Guard's caller as onboard writes it, and onboard does not overwrite a workflow of the repository's own; nothing changed. Rename or delete it, then run onboard again.`);
     return 1;
@@ -1765,17 +1776,14 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
     change(SARATHI_PATH, claude.sarathi.text, claude.sarathi.changes.join('; '));
   }
 
-  const paths = pathsFor(sys.home, agent);
-  const token = readToken(sys, agent);
-  const ready = token && checkToken(token, await tokenInfo(sys, token), agent, sys.now());
-  const keyProblem = keyPairProblem(sys, paths.key);
-  if (!token || !ready || ready.problem !== undefined || keyProblem) {
+  const ready = await readyToken(sys, agent);
+  if ('problem' in ready) {
     // machine is the owner's to run, apart from onboard: it asks for the agent's token, hidden, and makes and
     // registers the agent's signing key, and a --yes or a run with no terminal can do neither (docs/decisions.md).
-    const why = !token || !ready ? `no token stored for ${agent}` : (ready.problem ?? keyProblem);
-    io.err(`onboard: this Mac is not set up for ${agent} (${why}); run niyam machine ${agent}, then onboard again`);
+    io.err(`onboard: this Mac is not set up for ${agent} (${ready.problem}); run niyam machine ${agent}, then onboard again`);
     return 1;
   }
+  const { token } = ready;
   const { id } = await account(sys, agent, token);
 
   let reach = await access(sys, slug, token);
@@ -1827,19 +1835,21 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
           reach = await access(sys, slug, token);
         }
         if (reach.kind === 'push') return true;
-        const why = {
-          none: `${agent} still cannot see ${slug}; check the invitation reached ${agent}`,
-          read: `${agent} can read ${slug} but still not push; check the invitation reached ${agent}, or give it the Write role`,
-          refused: reach.kind === 'refused' ? reach.reason : '',
-        };
-        out.err(`onboard: ${why[reach.kind]}`);
+        const why =
+          reach.kind === 'refused'
+            ? reach.reason
+            : reach.kind === 'none'
+              ? `${agent} still cannot see ${slug}; check the invitation reached ${agent}`
+              : `${agent} can read ${slug} but still not push; check the invitation reached ${agent}, or give it the Write role`;
+        out.err(`onboard: ${why}`);
         return false;
       },
     });
   }
 
   // The shared checks run only for features that need them.
-  const workflowFrom = workflowPins(fileAt(WORKFLOW_PATH) ?? '')[0];
+  // No workflow reads as the word undefined, which pins nothing.
+  const workflowFrom = workflowPins(String(fileAt(WORKFLOW_PATH)))[0];
   const passed: Passed = { figma: on('figma'), board: on('board') };
   const workflowFor = (branch: string): void => {
     const update = workflowUpdate(fileAt(WORKFLOW_PATH), branch, version, passed.figma, schedule, SETTINGS_PATH, passed.board);
@@ -1914,10 +1924,11 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
       async run(out, mine) {
         // The plan's one yes covers each step of the board but replacing a Project made before the template, which
         // moves its items and closes it: that is left to the owner, with what the template would have set.
-        const board = await setUpBoard(sys, out, (_, step) => Promise.resolve(step !== 'replace'), slug, owner, mine as string, typeof projectTitle === 'string' ? projectTitle : undefined, approved);
-        byHand.unshift(...(board?.byHand ?? []));
-        later.unshift(...(board?.byHand ?? []));
-        return board !== undefined;
+        // setUpBoard stops only at a no, and the one no here, to replacing the Project, it goes past.
+        const board = (await setUpBoard(sys, out, (_, step) => Promise.resolve(step !== 'replace'), slug, owner, mine as string, typeof projectTitle === 'string' ? projectTitle : undefined, approved)) as BoardSetUp;
+        byHand.unshift(...board.byHand);
+        later.unshift(...board.byHand);
+        return true;
       },
     });
   }
@@ -1953,10 +1964,10 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   // connection, so onboard cannot create one or check it; it sees one runs by the agent's verdicts on the repository.
   if (on('review')) {
     const routine = `${GITHUB_WEB}/${PRODUCT}/blob/v${version}/routines/review.md`;
-    const seen = await routineTrace(sys, slug, agent, token).catch(() => {
+    const seen = await routineTrace(sys, slug, agent, token).catch(
       // fail-open: comments GitHub does not give leave the routine by hand, which the owner skips if done.
-      return undefined;
-    });
+      () => undefined,
+    );
     if (seen) notes.push(`- review routine: ${agent} gave a verdict on #${seen.number} on ${seen.date}, so it runs`);
     else {
       byHand.push(`Once for ${slug}: in Claude Code, run /schedule and create a weekly routine on it, with claude.ai's GitHub connected as ${agent} and the prompt below the line in ${routine}; skip it if done.`);
@@ -1973,7 +1984,8 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   else {
     const text = cloudRepoScript(version, released.sha256);
     if (text !== cloudBefore) {
-      const from = cloudBefore === undefined ? undefined : cloudScriptVersion(cloudBefore);
+      // No file reads as the word undefined, which names no release.
+      const from = cloudScriptVersion(String(cloudBefore));
       pull.push({ label: 'cloud-setup.sh', detail: cloudBefore === undefined ? `new, installs v${version}` : from && from !== version ? `v${from} → v${version}` : 'written again' });
       change(CLOUD_SETUP_PATH, text, `installs niyam ${version} in Claude cloud sessions, its download checked against its sha256`);
     }
@@ -2023,62 +2035,55 @@ export async function onboard(sys: Sys, io: Output, args: readonly string[] = []
   const fresh = makeKey ? newKey() : undefined;
   if (!('problem' in cloudKeys)) {
     const keys = [...cloudKeys.keys.filter((one) => one.title === CLOUD_KEY_TITLE && one.key !== '').map((one) => one.key), ...(fresh ? [publicLine(fresh)] : [])];
-    const text = fileAt(SETTINGS_PATH);
-    let pins: Record<string, string[]> | undefined;
-    try {
-      pins = text === undefined ? undefined : { ...settingsIn(text).cloudSigningKeys };
-    } catch (error) {
-      // fail-open: the pin stays as it is, and the plan says why.
-      warnings.push(`cloud signing keys not pinned (${detail(error)})`);
-    }
-    if (text !== undefined && pins !== undefined) {
-      const name = Object.keys(pins).find((login) => sameLogin(login, agent)) ?? agent;
-      if (keys.join('\n') !== (pins[name] ?? []).join('\n')) {
-        if (keys.length > 0) pins[name] = keys;
-        else delete pins[name];
-        const what = keys.length > 0 ? `pin ${agent}'s cloud signing ${keys.length === 1 ? 'key' : 'keys'}, which cloud sessions check theirs against` : `drop ${agent}'s cloud signing keys, which GitHub no longer lists`;
-        // Written where it stands, the rest of the file as it is.
-        change(SETTINGS_PATH, setMember(text, [], CLOUD_SIGNING_KEYS, pins), what);
-        settingsItem(what);
-      }
+    // Each branch above leaves settings that read: the checkout's, which loadSettings read, as onboard edits them, or
+    // the new ones it writes.
+    const text = String(fileAt(SETTINGS_PATH));
+    const pins = { ...settingsIn(text).cloudSigningKeys };
+    const name = Object.keys(pins).find((login) => sameLogin(login, agent)) ?? agent;
+    if (keys.join('\n') !== (pins[name] ?? []).join('\n')) {
+      if (keys.length > 0) pins[name] = keys;
+      else delete pins[name];
+      const what = keys.length > 0 ? `pin ${agent}'s cloud signing ${keys.length === 1 ? 'key' : 'keys'}, which cloud sessions check theirs against` : `drop ${agent}'s cloud signing keys, which GitHub no longer lists`;
+      // Written where it stands, the rest of the file as it is.
+      change(SETTINGS_PATH, setMember(text, [], CLOUD_SIGNING_KEYS, pins), what);
+      settingsItem(what);
     }
   }
   let pullUrl: string | undefined;
-  // Whether the pull request merges itself once its checks pass.
-  let merging = false;
+  // Whether the pull request merges itself once its checks pass: said once it is open.
+  let merging: boolean | undefined;
   // A Mergify merge queue that takes pull requests by itself merges it, so GitHub's auto-merge is neither turned on
   // nor asked for. Read from the default branch; where the agent cannot push yet, worked out again once it can.
   let queue = planned === undefined ? undefined : await mergeQueue(sys, slug, planned, token);
   steps.push({
     label: 'pull request',
     async run(out) {
-      if (reach.kind !== 'push') return false;
-      if (workflowNeeded) workflowFor(reach.branch);
-      callerFor(reach.branch);
+      // The access step before this one, where the agent could not push, stops the run unless it now can.
+      const pushing = reach as Extract<Access, { kind: 'push' }>;
+      if (workflowNeeded) workflowFor(pushing.branch);
+      callerFor(pushing.branch);
       // From 2026-12-02 GitHub runs pull_request_target in a public repository only where a policy allows it.
-      if (reach.public) {
+      if (pushing.public) {
         const policy = policySteps(slug);
         byHand.push(policy.byHand);
         later.push(policy.later);
       }
       // From the workflow the pull request leaves, worked out only now that GitHub has said the branch.
-      const text = fileAt(WORKFLOW_PATH);
-      const unpassed = workflowNeeded && on('figma') && text !== undefined ? jobsWithoutLibrary(text) : [];
+      // figma needs the workflow, which the pull request leaves.
+      const unpassed = on('figma') ? jobsWithoutLibrary(String(fileAt(WORKFLOW_PATH))) : [];
       if (unpassed.length > 0) {
         byHand.unshift(`Once for ${slug}: in ${WORKFLOW_PATH}, add FIGMA_LIBRARY: \${{ secrets.FIGMA_LIBRARY }} under the secrets of ${unpassed.join(', ')}, so the design check runs there.`);
         later.unshift(`In ${WORKFLOW_PATH}, ${unpassed.join(', ')} pass the shared checks no FIGMA_LIBRARY secret, so the design check stays off there; add \`FIGMA_LIBRARY: \${{ secrets.FIGMA_LIBRARY }}\` under their secrets.`);
       }
-      // A change that puts a file back as it was is no change.
-      const changed = [...changes.values()].filter((one) => one.text !== one.before);
+      // Each change is held only where it changes the file.
+      const changed = [...changes.values()];
       if (changed.length === 0) return true;
-      const described = [
-        ...(notes.length > 0 ? ['Done at the terminal, outside this pull request:', '', ...notes, ''] : []),
-        ...(later.length > 0 ? ['Left to do by hand:', '', ...later.map((line) => `- ${line}`)] : []),
-      ];
-      const opened = await openPull(sys, out, { agent, id, token, slug, branch: reach.branch, version }, changed, described);
+      // The test commit, a step before this one, always says what it did.
+      const described = ['Done at the terminal, outside this pull request:', '', ...notes, '', ...(later.length > 0 ? ['Left to do by hand:', '', ...later.map((line) => `- ${line}`)] : [])];
+      const opened = await openPull(sys, out, { agent, id, token, slug, branch: pushing.branch, version }, changed, described);
       if (opened === 1) return false;
       pullUrl = opened.url;
-      if (planned === undefined) queue = await mergeQueue(sys, slug, reach.branch, token);
+      if (planned === undefined) queue = await mergeQueue(sys, slug, pushing.branch, token);
       if (queue !== undefined) {
         merging = true;
         return true;
@@ -2172,19 +2177,19 @@ export const COMMIT_ATTEMPTS = 5;
  * error from GitHub is asked again, since a commit can take a moment to
  * show and the network can fail for a moment; the last failure otherwise.
  */
-async function commitInfo(sys: Sys, slug: string, sha: string, token: string): Promise<unknown> {
-  let failure = new Error('not asked');
-  for (let attempt = 1; attempt <= COMMIT_ATTEMPTS; attempt++) {
-    try {
-      const { status, json } = await sys.http(`${API}/repos/${slug}/commits/${sha}`, { token });
-      if (status === 200) return json;
-      failure = new Error(`HTTP ${status}`);
-    } catch (error) {
-      failure = error instanceof Error ? error : new Error(String(error));
-    }
-    if (attempt < COMMIT_ATTEMPTS) await sys.sleep(attempt * 2000);
+async function commitInfo(sys: Sys, slug: string, sha: string, token: string, attempt = 1): Promise<unknown> {
+  let failure: Error;
+  try {
+    const { status, json } = await sys.http(`${API}/repos/${slug}/commits/${sha}`, { token });
+    if (status === 200) return json;
+    failure = new Error(`HTTP ${status}`);
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error(String(error));
   }
-  return failure;
+  if (attempt === COMMIT_ATTEMPTS) return failure;
+  await sys.sleep(attempt * 2000);
+  // Asked again by recursion, so no mutant of the count asks forever.
+  return commitInfo(sys, slug, sha, token, attempt + 1);
 }
 
 interface Target {

@@ -557,6 +557,27 @@ describe('onboard', () => {
       assert.ok(out.some((line) => /^│ {4}issue types {2,}org-wide, read once signed in$/.test(line)), out.join('\n'));
       assert.equal(board.issues[0]?.type, 'Task');
     });
+
+    it('reads them as the owner before the plan when the agent cannot, and says why in the pull request', async () => {
+      const { sys } = settled();
+      const types = sys.routes.get('GET https://api.github.com/orgs/example-org/issue-types?per_page=100&page=1') as () => HttpResult;
+      sys.route('GET', '/orgs/example-org/issue-types?per_page=100&page=1', () => (sys.requests.at(-1)?.token === OWNER_TOKEN ? types() : { status: 403, json: null }));
+      const { code, out } = await run(sys, []);
+      assert.equal(code, 0, out.join('\n'));
+      assert.ok(out.includes('│      example-app#12  Task → Brief'), out.join('\n'));
+      assert.ok(!out.some((line) => line.includes('read once signed in')), out.join('\n'));
+      assert.match(
+        opened(sys)?.body ?? '',
+        /^- onboard signed in before showing its plan: the organisation has issue types outside the work model or open issues with no type, and only the owner sees every repository that holds them\.$/m,
+      );
+    });
+
+    it('takes a Project title that is not text as none', async () => {
+      const { sys } = settled();
+      sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, project: 7 }));
+      const { code, err } = await run(sys, []);
+      assert.deepEqual({ code, err }, { code: 0, err: [] });
+    });
   });
 
   it('keeps the cloud setup file at the pin, asking for the Setup script paste only the first time', async () => {
@@ -575,6 +596,7 @@ describe('onboard', () => {
     assert.deepEqual(planned(upgraded.out, 'Pull request'), [`cloud-setup.sh: v0.5.2 → v${packageVersion()}`, 'auto-merge: when checks pass']);
     assert.deepEqual(planned(upgraded.out, 'Claude cloud — by hand, once'), [], 'onboarded before: nothing by hand');
     assert.deepEqual(byHand(upgraded.out), []);
+    assert.match(opened(older)?.body ?? '', /\n- test commit Verified as ExampleBot:\n(?: {2}- .*\n)+\n\nMerge it to finish onboarding;/, 'nothing left by hand: no list of it');
     assert.equal(older.committed.get(CLOUD_SETUP_PATH), CLOUD_FILE);
 
     const edited = fresh();
@@ -681,6 +703,10 @@ describe('onboard', () => {
     it('refuses accounts the lists do not hold, and an agent it cannot tell', async () => {
       const outside = team();
       assert.deepEqual((await run(outside, ['someone', AGENT])).err, [
+        'onboard: .github/niyam.json already names owner example-owner or Second-Owner and agent OtherBot or ExampleBot; edit or delete it to change them',
+      ]);
+      const agentOutside = team();
+      assert.deepEqual((await run(agentOutside, ['example-owner', 'SomeBot'])).err, [
         'onboard: .github/niyam.json already names owner example-owner or Second-Owner and agent OtherBot or ExampleBot; edit or delete it to change them',
       ]);
       const unset = team();
@@ -1598,6 +1624,62 @@ describe('onboard', () => {
       assert.equal(JSON.parse(repo(sys).get(SETTINGS) ?? '').agent, AGENT);
     });
 
+    it('asks for both accounts when run with no arguments at all', async () => {
+      const sys = setUp([AGENT]);
+      sys.answers = ['', '', 'y'];
+      const { io, err } = capture();
+      assert.equal(await onboard(sys, io), 0, err.join('\n'));
+      assert.deepEqual(sys.asked.slice(0, 2), ['The owner, who approves [example-owner]: ', 'The agent, which builds [ExampleBot]: ']);
+    });
+
+    it("names why this Mac is not set up for the agent: a token GitHub answers for someone else, or no signing key", async () => {
+      const someone = fresh();
+      someone.acceptToken(TOKEN, 'someone');
+      const wrong = await run(someone);
+      assert.deepEqual({ code: wrong.code, err: wrong.err }, { code: 1, err: ['onboard: this Mac is not set up for ExampleBot (the token acts as someone, not ExampleBot); run niyam machine ExampleBot, then onboard again'] });
+      const keyless = fresh();
+      const { key } = pathsFor(HOME, AGENT);
+      keyless.files.delete(key);
+      const missing = await run(keyless);
+      assert.deepEqual({ code: missing.code, err: missing.err }, { code: 1, err: [`onboard: this Mac is not set up for ExampleBot (${key} is missing); run niyam machine ExampleBot, then onboard again`] });
+    });
+
+    it("reads with no other agent's token for an agent named that has none here", async () => {
+      const sys = setUp([AGENT]);
+      sys.route('GET', '/users/OtherBot', { status: 200, json: { id: 7, login: 'OtherBot' } });
+      const { code, err } = await run(sys, ['example-owner', 'OtherBot']);
+      assert.equal(code, 1);
+      assert.deepEqual(err, ['onboard: this Mac is not set up for OtherBot (no token stored for OtherBot); run niyam machine OtherBot, then onboard again']);
+      const release = sys.requests.filter((request) => request.url.includes('/compare/refs/tags/'));
+      assert.ok(release.length > 0 && release.every((request) => request.token === undefined), JSON.stringify(release));
+    });
+
+    it('lists no accounts for one suggestion, and reads an answer of spaces as Enter and one in spaces as typed', async () => {
+      const sys = setUp([AGENT]);
+      sys.answers = ['   ', ' examplebot ', 'y'];
+      const { code, out } = await run(sys, []);
+      assert.equal(code, 0);
+      assert.ok(!out.some((line) => line.startsWith('Accounts set up here')), out.join('\n'));
+      assert.deepEqual(sys.asked.slice(0, 2), ['The owner, who approves [example-owner]: ', 'The agent, which builds [ExampleBot]: ']);
+      assert.deepEqual(JSON.parse(repo(sys).get(SETTINGS) ?? ''), { owner: 'example-owner', agent: AGENT, features: [...FEATURES] });
+    });
+
+    it('refuses to ask for the agent with no terminal to ask in', async () => {
+      const sys = setUp([AGENT]);
+      sys.tty = false;
+      const { code, err } = await run(sys, ['example-owner', '--yes']);
+      assert.deepEqual({ code, err }, { code: 1, err: ['onboard: name the owner and the agent account: niyam onboard <owner> <agent>'] });
+      assert.deepEqual(sys.asked, []);
+    });
+
+    it('warns an organisation of no feature that needs issue types', async () => {
+      const sys = fresh();
+      sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: [...FEATURES] }));
+      const { code, out } = await run(sys, []);
+      assert.equal(code, 0);
+      assert.ok(!out.some((line) => line.includes('organisations only')), out.join('\n'));
+    });
+
     it('suggests no owner when the sign-in fails or GitHub will not answer', async () => {
       const sys = setUp([AGENT]);
       sys.ghToken = 'gho_unknown';
@@ -1660,6 +1742,16 @@ describe('onboard', () => {
       assert.deepEqual(sys.removed, sys.temps);
     });
 
+    it('says it signed in as no one when the sign-in is turned down', async () => {
+      const sys = fresh();
+      sys.ghToken = undefined;
+      const { code, out } = await run(sys);
+      assert.equal(code, 1);
+      // Guard reads the word before a colon as a test marked skip, only or todo, so the line is matched by its start.
+      assert.ok(out.some((line) => line.startsWith('◇  Sign in to GitHub as example-owner, for this run')), out.join('\n'));
+      assert.ok(!out.some((line) => line.startsWith('◇  Signed in as')), out.join('\n'));
+    });
+
     for (const [name, change, message] of [
       ['a sign-in as someone else', (sys: FakeSys) => sys.acceptToken(OWNER_TOKEN, 'someone'), 'onboard: the browser signed in to GitHub as someone, not the owner example-owner; sign in to github.com there as example-owner and run it again'],
       ['a sign-in turned down', (sys: FakeSys) => (sys.ghToken = undefined), 'onboard: the GitHub sign-in in the browser did not finish'],
@@ -1693,6 +1785,7 @@ describe('onboard', () => {
       const { code, out } = await run(sys);
       assert.equal(code, 0);
       assert.equal(out[2], '│  ! personal account: work-rules, figma, decisions left off');
+      assert.ok(!planned(out, 'GitHub').some((item) => item.startsWith('issue types')), 'GitHub has issue types for organisations only');
       assert.deepEqual(JSON.parse(repo(sys).get(SETTINGS) ?? '').features, ['identity', 'pr-identity', 'board', 'review']);
       assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false, undefined, undefined, true));
     });
@@ -1739,6 +1832,30 @@ describe('onboard', () => {
       const { code, out } = await run(sys, []);
       assert.equal(code, 0);
       assert.equal(out[2], '│  ! decisions: organisations only; take it out of features');
+    });
+
+    it('takes --add of a feature already on, or of one that needs no issue types', async () => {
+      for (const [features, add] of [
+        [['identity', 'work-rules'], 'work-rules'],
+        [['identity'], 'review'],
+      ] as const) {
+        const sys = personal();
+        sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features }));
+        const { code, err } = await run(sys, ['--add', add]);
+        assert.deepEqual({ code, err }, { code: 0, err: [] }, add);
+      }
+    });
+
+    it('warns of no feature its settings list that runs there, and names several that cannot', async () => {
+      const none = personal();
+      none.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'board'] }));
+      const fine = await run(none, []);
+      assert.equal(fine.code, 0);
+      assert.ok(!fine.out.some((line) => line.includes('organisations only')), fine.out.join('\n'));
+      const several = personal();
+      several.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules', 'decisions'] }));
+      const { out } = await run(several, []);
+      assert.equal(out[2], '│  ! work-rules, decisions: organisations only; take them out of features');
     });
 
     it('asks GitHub once whether an organisation owns it', async () => {
@@ -1821,6 +1938,19 @@ describe('onboard', () => {
       const { text, changes } = claudeSettings(JSON.stringify(settings), JSON.stringify(HANDLERS));
       assert.deepEqual(JSON.parse(text).hooks.SessionStart, [{ hooks: [{ type: 'command', command: 'echo hi' }] }, runner('SessionStart', 600)]);
       assert.deepEqual(changes, [`take out the SessionStart hook that runs niyam session-start, which ${SARATHI_PATH} now runs under sarathi`]);
+    });
+
+    it("takes out niyam's hooks past groups that are not hooks, and times a sarathi entry that gives no time", () => {
+      const untimed = { hooks: [{ type: 'command', command: `"$CLAUDE_PROJECT_DIR"/.claude/hooks/sarathi.sh SessionStart` }] };
+      const odd = [null, { hooks: [] }, { hooks: 'x' }, { hooks: [null, { type: 'command', command: HOOK_COMMAND }] }];
+      const settings = { ...UNDER_SARATHI, hooks: { ...UNDER_SARATHI.hooks, SessionStart: [...odd, untimed] } };
+      const { text, changes, labels } = claudeSettings(JSON.stringify(settings), JSON.stringify(HANDLERS));
+      assert.deepEqual(JSON.parse(text).hooks.SessionStart, [null, { hooks: [] }, { hooks: 'x' }, { hooks: [null] }, runner('SessionStart', 600)]);
+      assert.deepEqual(changes, [
+        `take out the SessionStart hook that runs niyam session-start, which ${SARATHI_PATH} now runs under sarathi`,
+        "give sarathi's SessionStart hook 600 s, so niyam's handler under it has its time",
+      ]);
+      assert.deepEqual(labels, ['hooks moved to sarathi.json', 'sarathi timeout']);
     });
 
     it("gives a handler moved there by hand session-start's 600 s, and sarathi's PreToolUse entry the guard's 60 s", () => {
@@ -1911,6 +2041,15 @@ describe('onboard', () => {
       assert.throws(() => claudeSettings(settings, JSON.stringify({ hooks: { PreToolUse: { command: GUARD_COMMAND } } })), /^Error: \.claude\/sarathi\.json: hooks\.PreToolUse is not an array$/);
     });
 
+    it("plans each change to sarathi.json, a handler added and one given its time", async () => {
+      const sys = fresh();
+      sys.files.set(HOOKS, `${JSON.stringify(UNDER_SARATHI, null, 2)}\n`);
+      sys.files.set(SARATHI, JSON.stringify({ hooks: { SessionStart: [{ command: HOOK_COMMAND, timeout: 60 }] } }));
+      const { code, out } = await run(sys);
+      assert.equal(code, 0, out.join('\n'));
+      assert.ok(planned(out, 'Pull request').includes('sarathi.json: hooks added, timeout'), out.join('\n'));
+    });
+
     it("opens a pull request that changes both files, and runs again changing nothing", async () => {
       const sys = fresh();
       sys.files.set(HOOKS, `${JSON.stringify(VEDA, null, 2)}\n`);
@@ -1980,11 +2119,28 @@ describe('onboard', () => {
         added = true;
         return { status: 204, json: null };
       });
-      const { code } = await run(sys);
+      const { code, out } = await run(sys);
       assert.equal(code, 0);
       const put = sys.requests.find((r) => r.method === 'PUT');
       assert.deepEqual([put?.token, put?.body], [OWNER_TOKEN, { permission: 'push' }]);
       assert.equal(signIns(sys), 1, 'one sign-in for the access and the board');
+      assert.ok(!sys.requests.some((r) => r.url.includes('/pulls?state=open')), 'an agent that cannot see the repository has no onboard pull request open on it');
+      assert.equal(sys.requests.filter((r) => r.url.includes('/user/repository_invitations')).length, 1, 'a member given access has no invitation to read again');
+      assert.ok(planned(out, 'Pull request').includes('workflow: new'), out.join('\n'));
+      assert.ok(opened(sys)?.body.includes('\n- ExampleBot can push:\n  - gave ExampleBot, which cannot see example-org/example-app, write access, as example-owner\n'), opened(sys)?.body);
+    });
+
+    it('stops when GitHub refuses the agent once given access', async () => {
+      const sys = fresh();
+      let added = false;
+      sys.route('GET', REPO, () => (added ? { status: 401, json: null } : { status: 404, json: null }));
+      sys.route('GET', '/user/repository_invitations?per_page=100&page=1', { status: 200, json: [] });
+      sys.route('PUT', COLLABORATOR, () => {
+        added = true;
+        return { status: 204, json: null };
+      });
+      const { code, err } = await run(sys);
+      assert.deepEqual({ code, err }, { code: 1, err: ['onboard: GitHub refused (HTTP 401)', 'onboard: stopped at "ExampleBot can push"; nothing after it was changed, and no pull request was opened'] });
     });
 
     it('plans either merge until the agent can push, then asks the default branch for a merge queue', async () => {
@@ -2046,8 +2202,9 @@ describe('onboard', () => {
         invited = true;
         return { status: 201, json: {} };
       });
-      const { code } = await run(sys);
+      const { code, out } = await run(sys);
       assert.equal(code, 0);
+      assert.ok(planned(out, 'Pull request').includes('auto-merge or merge queue: when checks pass'), 'an agent that cannot push is told no default branch yet');
       assert.ok(invited, 'grants write access');
       const body = opened(sys)?.body ?? '';
       assert.ok(body.includes('\n- ExampleBot can push:\n  - gave ExampleBot, which can read but not push to example-org/example-app, write access, as example-owner\n'), body);
@@ -2124,6 +2281,15 @@ describe('onboard', () => {
           sys.route('PUT', COLLABORATOR, { status: 403, json: { message: 'Must have admin rights to Repository.' } });
         },
         ['onboard: GitHub did not add ExampleBot (HTTP 403: Must have admin rights to Repository.)', '  Add it yourself: example-org/example-app → Settings → Collaborators → Add people → ExampleBot, role Write.'],
+      ],
+      [
+        'GitHub refusing to add the agent, saying nothing more',
+        (sys: FakeSys) => {
+          sys.route('GET', REPO, { status: 404, json: null });
+          sys.route('GET', '/user/repository_invitations?per_page=100&page=1', { status: 200, json: [] });
+          sys.route('PUT', COLLABORATOR, { status: 403, json: null });
+        },
+        ['onboard: GitHub did not add ExampleBot (HTTP 403)', '  Add it yourself: example-org/example-app → Settings → Collaborators → Add people → ExampleBot, role Write.'],
       ],
       [
         'an invitation GitHub will not accept',
@@ -2218,6 +2384,7 @@ describe('onboard', () => {
       assert.ok(out.includes('│  Test commit https://github.com/example-org/example-app/commit/abc123'), out.join('\n'));
       assert.ok(out.includes('│  Deleted the throwaway branch niyam/verify-examplebot-1793361600000.'));
       assert.deepEqual(sys.slept, [2000, 4000, 6000, 8000]);
+      assert.equal(sys.requests.filter((r) => r.url.endsWith(`${REPO}/commits/abc123`)).length, 5, 'asked five times');
       assert.equal(sys.calls.at(-1)?.command, 'rm');
     });
 
@@ -2236,6 +2403,54 @@ describe('onboard', () => {
       assert.ok(out.includes('◇  test commit Verified as ExampleBot'));
       assert.ok(opened(sys)?.body.includes('\n  - GitHub shows the test commit Verified by ExampleBot\n'));
       assert.deepEqual(sys.slept, [2000, 4000]);
+    });
+
+    it('makes the test commit in a folder of its own, with git told exactly what to do', async () => {
+      const sys = fresh();
+      assert.equal((await run(sys)).code, 0);
+      assert.deepEqual(sys.calls.filter((c) => c.command === 'mktemp').map((c) => c.args), [['-d']]);
+      const url = 'https://github.com/example-org/example-app.git';
+      const branch = 'refs/heads/niyam/verify-examplebot-1793361600000';
+      assert.deepEqual(sys.calls.filter((c) => c.command === 'git' && c.cwd === '/tmp/verify').map((c) => c.args), [
+        ['ls-remote', url, 'HEAD'],
+        ['init', '-q'],
+        ['fetch', '-q', '--depth=1', '--filter=blob:none', url, 'HEAD'],
+        ['commit-tree', '-S', 'FETCH_HEAD^{tree}', '-p', 'FETCH_HEAD', '-m', 'niyam: signing check for ExampleBot'],
+        ['push', '-q', url, `abc123:${branch}`],
+        ['push', '-q', url, `:${branch}`],
+      ]);
+      assert.ok(sys.calls.some((c) => c.command === 'rm' && c.args.join(' ') === '-rf /tmp/verify'));
+    });
+
+    it('refuses a repository with no commits, even when git prints a blank line for it, and goes past a failed look', async () => {
+      const blank = fresh();
+      blank.execOverride = (call) => (call.command === 'git' && call.args[0] === 'ls-remote' ? { code: 0, stdout: '\n', stderr: '' } : undefined);
+      const empty = await run(blank);
+      assert.deepEqual({ code: empty.code, err: empty.err }, { code: 1, err: ['onboard: example-org/example-app has no commits yet; push a first commit to it, then onboard again', 'onboard: stopped at "test commit Verified as ExampleBot"; nothing after it was changed, and no pull request was opened'] });
+      // ls-remote failing says nothing about commits: fetch, which needs them, says the rest.
+      const failed = fresh();
+      failed.execOverride = (call) => (call.command === 'git' && call.args[0] === 'ls-remote' ? { code: 2, stdout: '', stderr: 'no route\n' } : undefined);
+      const { code, err } = await run(failed);
+      assert.deepEqual({ code, err }, { code: 0, err: [] });
+    });
+
+    it('fails a signing that gives no commit id, or that fails whatever it printed', async () => {
+      for (const [code, stdout] of [
+        [0, '\n'],
+        [1, 'abc123\n'],
+      ] as const) {
+        const sys = fresh();
+        sys.execOverride = (call) => (call.command === 'git' && call.args[0] === 'commit-tree' && call.cwd === '/tmp/verify' ? { code, stdout, stderr: 'no key\n' } : undefined);
+        const ran = await run(sys);
+        assert.deepEqual({ code: ran.code, err: ran.err }, { code: 1, err: ['onboard: signing the test commit failed: no key', 'onboard: stopped at "test commit Verified as ExampleBot"; nothing after it was changed, and no pull request was opened'] }, stdout);
+      }
+    });
+
+    it("says GitHub's reason as GitHub gives it, dashes and all", async () => {
+      const sys = fresh();
+      sys.route('GET', `${REPO}/commits/abc123`, { status: 200, json: { committer: { login: AGENT }, commit: { verification: { verified: true, reason: 'valid - by key' } } } });
+      assert.equal((await run(sys)).code, 0);
+      assert.ok(opened(sys)?.body.includes('\n  - committer: ExampleBot; verified: true (valid - by key)\n'), opened(sys)?.body);
     });
 
     it('names the last answer when GitHub keeps refusing', async () => {
@@ -2274,6 +2489,7 @@ describe('onboard', () => {
       ['unverified', { committer: { login: AGENT }, commit: { verification: { verified: false, reason: 'unknown_key' } } }, `committer: ${AGENT}; verified: false (unknown_key)`],
       ['committed by someone else', { committer: { login: 'example-owner' }, commit: { verification: { verified: true, reason: 'valid' } } }, 'committer: example-owner; verified: true (valid)'],
       ['unreadable', null, 'committer: none; verified: undefined (no reason)'],
+      ['of no commit and no committer', { committer: null }, 'committer: none; verified: undefined (no reason)'],
     ] as const) {
       it(`fails a test commit that is ${name}`, async () => {
         const sys = fresh();
@@ -2350,6 +2566,7 @@ describe('staged adoption', () => {
       opened(sys)?.body ?? '',
       /^- `\.github\/niyam\.json`: rename the design feature to figma and take out "figma" and set its library key as the FIGMA_LIBRARY Actions secret$/m,
     );
+    assert.ok(opened(sys)?.body.includes('\n- FIGMA_LIBRARY secret:\n  - set the FIGMA_LIBRARY Actions secret to the library key taken out of the settings\n'), opened(sys)?.body);
     assert.deepEqual(JSON.parse(repo(sys).get(SETTINGS) ?? ''), { owner: 'example-owner', agent: AGENT, features: ['identity', 'figma'] });
     const sent = sealedValue(sys, pair);
     assert.deepEqual([sent.value, sent.keyId, sent.token], ['LibKey0123abc', 'key-1', OWNER_TOKEN], "sealed with the repository's key, as the owner for this run");
@@ -2394,6 +2611,10 @@ describe('staged adoption', () => {
     assert.ok(planned(out, 'Pull request').includes('niyam.json: design → figma'), out.join('\n'));
     assert.deepEqual(JSON.parse(repo(sys).get(SETTINGS) ?? '').features, ['identity', 'design']);
     assert.ok(changedNothing(sys));
+    const yes = fresh();
+    yes.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'design'] }));
+    assert.equal((await run(yes)).code, 0);
+    assert.match(opened(yes)?.body ?? '', /^- `\.github\/niyam\.json`: rename the design feature to figma$/m);
   });
 
   it('takes out a library key from settings that list no features', async () => {
@@ -2402,6 +2623,20 @@ describe('staged adoption', () => {
     const { out } = await run(sys);
     assert.deepEqual(JSON.parse(repo(sys).get(SETTINGS) ?? ''), { owner: 'example-owner', agent: AGENT });
     assert.ok(!out.some((line) => line.includes('gh secret set')));
+    assert.ok(planned(out, 'Pull request').includes('niyam.json: figma key out'), out.join('\n'));
+    assert.match(opened(sys)?.body ?? '', /^- `\.github\/niyam\.json`: take out "figma", since the library key belongs in the FIGMA_LIBRARY Actions secret$/m);
+    // With no library there is no key to set by hand.
+    assert.ok(!byHand(out).some((line) => line.includes('FIGMA_LIBRARY')), out.join('\n'));
+    assert.ok(!(opened(sys)?.body ?? '').includes('figma.library'));
+  });
+
+  it('stores no library key that is not text', async () => {
+    const sys = fresh();
+    sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity'], figma: { library: 123 } }));
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.deepEqual(planned(out, 'GitHub'), []);
+    assert.ok(!sys.requests.some((r) => r.url.includes('/actions/secrets')), 'nothing that is not a file key is stored as one');
   });
 
   it('says when a workflow of its own passes no FIGMA_LIBRARY with figma on', async () => {
@@ -2415,6 +2650,17 @@ describe('staged adoption', () => {
     assert.equal(repo(sys).get(WORKFLOW), own);
     assert.ok(byHand(out).includes('Once for example-org/example-app: in .github/workflows/niyam.yml, add FIGMA_LIBRARY: ${{ secrets.FIGMA_LIBRARY }} under the secrets of niyam, niyam-weekly, niyam-merged, niyam-asks, so the design check runs there.'), out.join('\n'));
     assert.ok(opened(sys) === undefined || opened(sys)?.body.includes('pass the shared checks no FIGMA_LIBRARY secret'));
+    // With a change to open, the pull request says the same.
+    const opening = fresh();
+    opening.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'figma'] }));
+    opening.files.set(WORKFLOW, own);
+    assert.equal((await run(opening)).code, 0);
+    assert.ok(
+      opened(opening)?.body.includes(
+        '\n- In .github/workflows/niyam.yml, niyam, niyam-weekly, niyam-merged, niyam-asks pass the shared checks no FIGMA_LIBRARY secret, so the design check stays off there; add `FIGMA_LIBRARY: ${{ secrets.FIGMA_LIBRARY }}` under their secrets.\n',
+      ),
+      opened(opening)?.body,
+    );
     // A workflow the pull request replaces passes it: nothing to do by hand then, though the plan was made without the branch.
     const replaced = fresh();
     replaced.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'figma'] }));
@@ -2428,6 +2674,7 @@ describe('staged adoption', () => {
     });
     const after = await run(replaced, []);
     assert.equal(after.code, 0, after.err.join('\n'));
+    assert.ok(planned(after.out, 'Pull request').includes('workflow: write or update'), 'until the agent can push, the plan cannot say which');
     assert.ok(!byHand(after.out).some((line) => line.includes('FIGMA_LIBRARY')), after.out.join('\n'));
   });
 
@@ -2449,6 +2696,23 @@ describe('staged adoption', () => {
     assert.deepEqual(planned(out, 'GitHub'), []);
     assert.ok(!out.some((line) => line.includes('gh secret set')));
     assert.ok(!sys.requests.some((r) => r.url.includes('/actions/secrets')), 'nothing that is not a file key is stored as one');
+    assert.ok(
+      opened(sys)?.body.includes(
+        `\n- The "figma.library" taken out was not a Figma file key; set the FIGMA_LIBRARY Actions secret to the design library's file key under example-org/example-app → Settings → Secrets and variables → Actions.`,
+      ),
+      opened(sys)?.body,
+    );
+  });
+
+  it('writes the workflow for each feature that runs the shared checks, and none for identity alone', async () => {
+    for (const feature of ['pr-identity', 'board', 'work-rules', 'figma', 'decisions', 'review']) {
+      const sys = fresh();
+      await run(sys, ['example-owner', AGENT, '--features', feature]);
+      assert.ok(repo(sys).has(WORKFLOW), feature);
+    }
+    const alone = fresh();
+    assert.equal((await run(alone, ['example-owner', AGENT, '--features', 'identity'])).code, 0);
+    assert.ok(!repo(alone).has(WORKFLOW));
   });
 
   it('writes the workflow and pre-push hook once work rules are on', async () => {
@@ -2762,6 +3026,19 @@ describe("onboard's pull request", () => {
     const sys = moving();
     assert.equal((await run(sys)).code, 0);
     assert.ok(sys.calls.some((c) => c.cwd === '/tmp/niyam-2' && c.args.join(' ') === `update-index --force-remove ${LEFTOVER_CLOUD_SETUP_PATH}`));
+    assert.ok(!(opened(sys)?.body ?? '').includes('a Setup script pasted before niyam 0.6.10'), 'a first cloud setup file asks for no Setup script change');
+    // Beside the new file, a Setup script pasted before 0.6.10 may run the old one.
+    const both = moving();
+    both.files.set(CLOUD, CLOUD_FILE);
+    const beside = await run(both);
+    assert.equal(beside.code, 0);
+    assert.ok(planned(beside.out, 'Pull request').includes(`cloud-setup.sh: ${LEFTOVER_CLOUD_SETUP_PATH.slice('.github/'.length)} deleted`), planned(beside.out, 'Pull request').join('\n'));
+    assert.ok(opened(both)?.body.includes(`\n- Claude cloud sessions: a Setup script pasted before niyam 0.6.10 runs ${LEFTOVER_CLOUD_SETUP_PATH}, which this pull request deletes;`), opened(both)?.body);
+    // Where no new file is written, the old one stays.
+    const unreleased = moving();
+    unreleased.route('GET', `/repos/veda-hq/niyam/releases/tags/v${packageVersion()}`, { status: 404, json: { message: 'Not Found' } });
+    assert.equal((await run(unreleased)).code, 0);
+    assert.ok(!unreleased.deleted.has(LEFTOVER_CLOUD_SETUP_PATH));
     const failed = moving();
     failing(failed, 'update-index --force-remove');
     const { code, err } = await run(failed);
@@ -2821,6 +3098,31 @@ describe("onboard's pull request", () => {
     });
   }
 
+  it('describes a new workflow as written, and one it does not know as replaced', async () => {
+    const path = WORKFLOW_PATH.replaceAll('.', '\\.');
+    const sys = fresh();
+    assert.equal((await run(sys)).code, 0);
+    assert.match(opened(sys)?.body ?? '', new RegExp(`^- \`${path}\`: write ${path}, which runs the shared niyam checks$`, 'm'));
+    assert.equal(sys.requests.filter((r) => r.url.includes('/contents/.mergify.yml')).length, 1, 'the merge queue is asked about once, where the agent could push from the start');
+    const own = fresh();
+    own.files.set(WORKFLOW, 'name: ours\n');
+    const replaced = await run(own);
+    assert.equal(replaced.code, 0);
+    assert.ok(planned(replaced.out, 'Pull request').includes('workflow: replaced'), replaced.out.join('\n'));
+    assert.match(opened(own)?.body ?? '', new RegExp(`^- \`${path}\`: replace ${path}, which runs the shared niyam checks$`, 'm'));
+  });
+
+  it("adds a settings change to the settings file's own line in the plan", async () => {
+    const sys = fresh();
+    sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity'] }));
+    sys.route('GET', '/user/ssh_signing_keys?per_page=100', { status: 200, json: [{ id: 3, title: 'niyam cloud signing', key: 'ssh-ed25519 AAAAcloud', created_at: '2026-11-16T00:00:00Z' }] });
+    const { code, out } = await run(sys);
+    assert.equal(code, 0, out.join('\n'));
+    const pull = planned(out, 'Pull request');
+    assert.equal(pull[0], 'settings.json: new', pull.join('\n'));
+    assert.ok(pull.includes("niyam.json: pin ExampleBot's cloud signing key, which cloud sessions check theirs against"), pull.join('\n'));
+  });
+
   it('commits each file once, with every change to it described', async () => {
     const sys = fresh();
     sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity'], figma: { library: 'abc' } }));
@@ -2829,11 +3131,12 @@ describe("onboard's pull request", () => {
     sys.files.set(CLOUD, CLOUD_FILE);
     new Board(sys);
     await actionsKey(sys);
-    const { code } = await run(sys, ['--add', 'board']);
+    const { code, out } = await run(sys, ['--add', 'board']);
     assert.equal(code, 0);
     assert.deepEqual([...sys.committed.keys()], ['.github/niyam.json', WORKFLOW_PATH, GUARD_CALLER_PATH]);
     const { body } = sys.requests.find((r) => r.method === 'POST' && r.url.endsWith('/pulls'))?.body as { body: string };
     assert.match(body, /^- `\.github\/niyam\.json`: take out "figma" .*; turn board on$/m);
+    assert.ok(planned(out, 'Pull request').includes('niyam.json: figma key out, turn board on'), out.join('\n'));
     assert.equal(signIns(sys), 1, 'one sign-in, for the secret and the board');
     const login = sys.calls.find((call) => call.command === 'gh' && call.args[1] === 'login')?.args ?? [];
     assert.equal(login[login.indexOf('-s') + 1], 'project,admin:org', "the sign-in for the secret asks for the board's scopes too");
@@ -3045,6 +3348,12 @@ describe('workflowUpdate', () => {
       if (steps !== undefined) assert.ok(opened(sys)?.body.includes(`\n- ${steps}`), 'and in the pull request, left to do by hand');
     }
     assert.ok(boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_KEY']).includes('and set its private key as NIYAM_BOARD_APP_KEY, Actions secrets'));
+    // Secrets GitHub will not list may be set already, which the step says.
+    const unread = fresh();
+    unread.tty = false;
+    unread.route('GET', `${REPO}/actions/secrets?per_page=100&page=1`, { status: 403, json: { message: 'Must have admin rights' } });
+    const { out: unreadOut } = await run(unread, ['example-owner', AGENT, '--yes']);
+    assert.deepEqual(byHand(unreadOut).filter((line) => line.includes('GitHub App')), [boardAppSteps('example-org/example-app', BOTH, true)]);
     // Board off, or a personal repository, whose checks skip the work rules: no app to set up.
     const off = fresh();
     off.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
@@ -3059,6 +3368,7 @@ describe('workflowUpdate', () => {
     assert.ok(planned(out, 'GitHub').includes('board app: two clicks in the browser, if it is new'), out.join('\n'));
     const left = `${boardAppSteps('example-org/example-app', ['NIYAM_BOARD_APP_ID', 'NIYAM_BOARD_APP_KEY'])} onboard did not: GitHub would not list example-org's Actions secrets.`;
     assert.ok(out.includes('◇  board app'), 'the step passes: the run goes on');
+    assert.ok(!opened(sys)?.body.includes('\n- board app:'), 'a step that said nothing is not listed as done at the terminal');
     assert.ok(byHand(out).includes(left), out.join('\n'));
     assert.ok(opened(sys)?.body.includes(`\n- ${left}`), 'and in the pull request, left to do by hand');
     // An agent's or a cloud session cannot click in the owner's browser.
@@ -3078,6 +3388,7 @@ describe('workflowUpdate', () => {
     sys.files.set(CLOUD, CLOUD_FILE);
     sys.files.set(WORKFLOW, workflow('main', packageVersion(), false));
     const on = await run(sys);
+    assert.equal(on.out[0], `◆  niyam onboard   v${packageVersion()}`, 'a workflow at this release moves from none');
     assert.ok(planned(on.out, 'Pull request').includes('workflow: board app secrets'), on.out.join('\n'));
     assert.ok(
       opened(sys)?.body.includes(
@@ -3085,6 +3396,29 @@ describe('workflowUpdate', () => {
       ),
     );
     assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false, undefined, undefined, true));
+    merge(sys);
+    sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
+    sys.requests.length = 0;
+    sys.answers = ['y'];
+    const off = await run(sys);
+    assert.deepEqual(planned(off.out, 'Pull request'), ['workflow: no board app secrets', 'auto-merge: when checks pass']);
+    assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, stop passing the board app secrets, with board off, leaving the rest as it is\n`), opened(sys)?.body);
+    assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false));
+  });
+
+  it("sets the header's version alone where only the header names an older release", async () => {
+    const v = packageVersion();
+    const sys = fresh();
+    sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: AGENT, features: ['identity', 'work-rules'] }));
+    sys.files.set(HOOKS, JSON.stringify(CLAUDE));
+    sys.files.set(PRE_PUSH, PRE_PUSH_HOOK);
+    sys.files.set(CLOUD, CLOUD_FILE).set(CALLER, CALLER_FILE);
+    sys.files.set(WORKFLOW, workflow('main', v, false).replace(`checks at v${v}`, 'checks at v0.5.0'));
+    const { code, out } = await run(sys);
+    assert.equal(code, 0, out.join('\n'));
+    assert.deepEqual(planned(out, 'Pull request'), [`workflow: header → v${v}`, 'auto-merge: when checks pass']);
+    assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, set the version in its header comment to v${v}, leaving the rest as it is\n`), opened(sys)?.body);
+    assert.equal(repo(sys).get(WORKFLOW), workflow('main', v, false));
   });
 
   it('asks to pass, or stop passing, the Figma secrets', async () => {
@@ -3096,6 +3430,7 @@ describe('workflowUpdate', () => {
     sys.files.set(WORKFLOW, workflow('main', packageVersion(), true));
     const off = await run(sys);
     assert.deepEqual(planned(off.out, 'Pull request'), ['workflow: no Figma secrets', 'auto-merge: when checks pass']);
+    assert.ok(!byHand(off.out).some((line) => line.includes('FIGMA_LIBRARY')), 'with figma off no job needs the library');
     assert.ok(opened(sys)?.body.includes(`\n- \`${WORKFLOW_PATH}\`: in ${WORKFLOW_PATH}, stop passing Figma secrets, with figma off, leaving the rest as it is\n`));
     assert.equal(repo(sys).get(WORKFLOW), workflow('main', packageVersion(), false));
     merge(sys);
@@ -3927,6 +4262,29 @@ describe("the agent's cloud signing key (#417)", () => {
     assert.ok(!keyMade(sys), 'where cloud-key would refuse, none is made, so none is pinned');
   });
 
+  it('pins no cloud signing key GitHub lists with no key text', async () => {
+    const sys = fresh();
+    sys.route('GET', `${KEYS}?per_page=100`, {
+      status: 200,
+      json: [
+        { id: 3, title: 'niyam cloud signing', key: 'ssh-ed25519 AAAAcloud', created_at: '2026-11-16T00:00:00Z' },
+        { id: 5, title: 'niyam cloud signing', key: 7, created_at: '2026-11-17T00:00:00Z' },
+      ],
+    });
+    assert.equal((await run(sys)).code, 0);
+    assert.deepEqual(pins(sys), { ExampleBot: ['ssh-ed25519 AAAAcloud'] });
+  });
+
+  it('warns that it did not check the keys when asking GitHub for them fails, and makes none', async () => {
+    const sys = keyless();
+    const http = sys.http.bind(sys);
+    sys.http = (url, options): Promise<HttpResult> => (url.endsWith(`${KEYS}?per_page=100`) ? Promise.reject(new Error('fetch failed')) : http(url, options));
+    const { code, out } = await run(sys);
+    assert.equal(code, 0);
+    assert.ok(out.includes('│  ! cloud signing key not checked (fetch failed); niyam cloud-key ExampleBot makes one'), out.join('\n'));
+    assert.ok(!keyMade(sys));
+  });
+
   it('leaves the pin as it is when GitHub does not list the keys (#447)', async () => {
     const sys = fresh();
     sys.files.set(SETTINGS, `${JSON.stringify({ owner: 'example-owner', agent: AGENT, cloudSigningKeys: { ExampleBot: ['ssh-ed25519 AAAAcloud'] } }, null, 2)}\n`);
@@ -4095,6 +4453,37 @@ describe('onboard on a Mac with no requests left that need no token (#546)', () 
     const { code, err } = await run(sys, []);
     assert.equal(code, 1);
     assert.match(err[0] ?? '', /^onboard: GitHub could not say whether the v[\d.]+ tag is on main: GitHub's limit for requests with no token/);
+  });
+
+  it("asks as the agent once it is known, not as another agent the settings list first", async () => {
+    const sys = fresh();
+    sys.files.set(SETTINGS, JSON.stringify({ owner: 'example-owner', agent: ['OtherBot', AGENT], features: [...FEATURES] }));
+    sys.files.set(pathsFor(HOME, AGENT).session, sessionScript(AGENT, AGENT_ID, pathsFor(HOME, AGENT)));
+    sys.setToken('OtherBot', 'gho_other');
+    const { code, err } = await run(sys, []);
+    assert.equal(code, 0, err.join('\n'));
+    assert.deepEqual(sys.requests.filter((request) => request.url.endsWith('/users/example-org')).map((request) => request.token), [TOKEN]);
+  });
+
+  it('asks as the agent chosen at the prompt, not as another agent set up here first', async () => {
+    const sys = fresh();
+    for (const agent of ['OtherBot', AGENT]) sys.files.set(pathsFor(HOME, agent).session, sessionScript(agent, AGENT_ID, pathsFor(HOME, agent)));
+    sys.setToken('OtherBot', 'gho_other');
+    sys.answers = [AGENT, 'y'];
+    const { code, err } = await run(sys, ['example-owner']);
+    assert.equal(code, 0, err.join('\n'));
+    assert.ok(sys.requests.some((request) => request.token === 'gho_other'), 'the first read is as the agent set up first');
+    assert.deepEqual(sys.requests.filter((request) => request.url.endsWith('/users/example-org')).map((request) => request.token), [TOKEN]);
+  });
+
+  it('with settings it cannot read, asks with the token of the agent set up here', async () => {
+    const sys = limited(fresh());
+    sys.files.set(SETTINGS, '{');
+    sys.files.set(`${sys.home}/.config/niyam/${AGENT.toLowerCase()}/session.sh`, sessionScript(AGENT, 42, pathsFor(sys.home, AGENT)));
+    // Past the release check, the settings branch refuses them with the parse's own reason.
+    await assert.rejects(run(sys, []), SyntaxError);
+    assert.ok(sys.requests.some((request) => request.url.includes('/compare/refs/tags/') && request.token === TOKEN), JSON.stringify(sys.requests));
+    assert.deepEqual(sys.refused, [], 'no read went out with no token');
   });
 
   it('names the rate limit and its reset when this Mac holds no token to ask with', async () => {
