@@ -222,7 +222,13 @@ function stillToDo(facts: Facts, pr: PullRequest | null, pushed: boolean): strin
     );
   }
   else if (pushed && pr.isDraft) left.push(`PR ${pr.number} is a draft: finish the work, push, mark it ready`);
-  else if (pushed) left.push(`PR ${pr.number} is open: carry it to merge, polling checks and review threads with foreground waits`);
+  else if (pushed) {
+    left.push(
+      facts.print
+        ? `PR ${pr.number} is open: carry it to merge. In print mode a background task dies with this turn, so run \`niyam pr-signals ${pr.number} --wait --timeout 9\` in the foreground, inside the Bash tool's ten-minute limit, and again until it ends`
+        : `PR ${pr.number} is open: carry it to merge. Run \`niyam pr-signals ${pr.number} --wait\` as a background task, whose exit wakes you once CI settles`,
+    );
+  }
   return left;
 }
 

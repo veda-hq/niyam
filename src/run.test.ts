@@ -211,6 +211,10 @@ describe('run', () => {
     assert.deepEqual(await capture(['pr-signals']), { code: 2, out: [], err: ['niyam: pr-signals needs a pull request number', USAGE] });
     assert.deepEqual(await capture(['pr-signals', '7', '--all']), { code: 2, out: [], err: ['niyam: unexpected argument "--all"', USAGE] });
     assert.equal((await capture(['pr-signals', '7', '--ci-only', 'more'])).code, 2);
+    const waits = await capture(['pr-signals', '7', '--ci-only', '--wait', '--timeout', '9'], () => new FakeSys());
+    assert.deepEqual(waits, { code: 1, out: [], err: ['✗ this session has no token; run niyam doctor'] });
+    assert.deepEqual(await capture(['pr-signals', '7', '--ci-only', '--wait', '--timeout', '9', 'x']), { code: 2, out: [], err: ['niyam: unexpected argument "x"', USAGE] });
+    assert.deepEqual(await capture(['pre-push', 'origin', 'url', 'more']), { code: 2, out: [], err: ['niyam: unexpected argument "more"', USAGE] });
   });
 
   it('runs handoff and brief, whose arguments are checked first', async () => {

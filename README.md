@@ -1047,6 +1047,39 @@ so a `green` verdict beside a listed failure explains itself. Standard
 error gets one line for any verdict but `green`, naming what failed, is
 missing or still runs. The exit code is 0 whatever the verdict.
 
+**Waiting for CI to settle.** `niyam pr-signals <pr> --wait [--timeout
+<minutes>]` polls every 30 s until CI settles, then reads the pull request
+in full as above, prints the JSON once, and exits with the verdict. Each
+poll is a light read: the pull request, its head's check runs and
+statuses, and the base's rules, with no logs, threads or findings. A green
+wait ends at two polls in a row that are both settled and agree. Settled
+means every run `completed`, no status `pending`, and a `mergeable_state`
+GitHub has worked out. Agree means the same head, the same set of
+check-run ids and the same verdict. So a workflow that starts once others
+finish, on `workflow_run` or as a bot's late check, is caught by the
+second poll. `failed`, `conflicted` and `unjudged` end early, at two polls
+in a row with the same head and verdict, whatever still runs. Waiting
+changes no conflicted head, and a failure can be fixed at once. A push
+that moves the head starts the count again, and standard error says so. A
+`short` head is polled on until the timeout, since a required check that
+starts late looks missing at first. `--ci-only --wait` skips the threads
+in the full read too.
+
+| Exit | When |
+|---|---|
+| 0 | `green` |
+| 3 | merged, also while waiting |
+| 4 | closed, also while waiting |
+| 5 | `failed` |
+| 6 | `conflicted` |
+| 7 | `unjudged`, or still `short` when `--timeout` runs out |
+| 8 | still `pending` when `--timeout` runs out (default 60 minutes) |
+
+At the timeout it prints the last poll's `ci` under
+`{ "ok": false, "reason": "ci-not-settled" }`, with no signals. With
+auto-merge on, a wait often ends at 3: the merge is the ruleset's, so that
+is a pass.
+
 A repository with a local review, one that runs before a push and writes its
 findings to a file, names it in `.github/niyam.json`, with the logins of its
 review bots (and `minCheckRuns` beside them, where it needs one):
@@ -1229,7 +1262,11 @@ or a list that cannot be read, gets the instruction as above.
 sends a session back while its branch has commits the base lacks and its
 pull request has not merged at this commit, saying what is left (push, open
 the pull request, mark it ready, carry it to merge) and the count ("1 of
-5"). It lets the session stop for a subagent; on the base, another trunk or
+5"). For an open pull request it names `niyam pr-signals <n> --wait` as a
+background task, whose exit wakes the session; in print mode, where that
+task would die with the turn, it names the same in the foreground with
+`--timeout 9`, inside the Bash tool's ten-minute limit, run again until it
+ends. It lets the session stop for a subagent; on the base, another trunk or
 a detached HEAD; when another remote branch carries the commits; while a
 background task, `git commit` or `git push` runs (its exit wakes the
 session), except in print mode (`NIYAM_PRINT_MODE=1`), where the task dies
