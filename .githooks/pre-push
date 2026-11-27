@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # niyam's pre-push, under the released dvara package.json pins
 # (.dvara.json): the records and frozen gates on what the branch changes,
-# that every @veda-hq/* pin is a registry release, then niyam's own check
+# that every @veda-hq/* pin is a registry release, the mutation gate on the
+# files the branch changes, then niyam's own check
 # that an agent session pushes as the agent and keeps the work rules.
 # Dormant until the main checkout's install points core.hooksPath here.
 root="$(git rev-parse --show-toplevel)" || exit 1
@@ -26,6 +27,16 @@ node "$dvara/dist/cli.js" frozen --base "$base" || exit 1
 
 dvara_stage pins
 node "$root/scripts/released-pins.mjs" --root "$root" || exit 1
+
+# agnipariksha's mutation gate (agnipariksha.json, #706) on the tracked files
+# the branch changes: a Survived or NoCoverage mutant in one refuses the push.
+# A lane whose changed files hold more lines than its maxLines is left to CI's
+# Lane job, since the run names no lane; released-pins checked the pin above.
+# With git's ref lines on stdin (--pushed-refs), it refuses a push of anything
+# but the checked-out HEAD from a clean tracked tree, and judges nothing for a
+# deletion or an up-to-date push.
+dvara_stage mutation
+"$root/node_modules/.bin/agnipariksha" --tracked-only --pushed-refs --base "$base" <<< "$refs" || exit 1
 
 # niyam's own hook, as `niyam onboard` writes it: anyone else's push goes
 # ahead; an agent session's push is refused without the CLI. onboard reads

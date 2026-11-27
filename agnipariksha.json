@@ -1,5 +1,6 @@
 {
   "upstream": "origin/main",
+  "maxLines": 1500,
   "ignore": ["\\.test\\.ts$", "\\.test\\.mjs$", "\\.d\\.m?ts$", "(^|/)fixtures?/"],
   "unsetEnv": [
     "GIT_DIR",
@@ -26,6 +27,7 @@
       "reuse": false,
       "include": ["^src/[^/]+\\.ts$"],
       "extensions": [".ts"],
+      "maxLines": 1000,
       "env": { "AGNIPARIKSHA_SUITES": "{suites}" }
     },
     {
