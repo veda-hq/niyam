@@ -605,7 +605,8 @@ export function pushTarget(command: string, cwd: string, home: string, parse: (l
     if (refspecs.length === 0) return { dir, resolvable: true };
     if (refspecs.length > 1) return { dir, resolvable: false };
     const spec = (refspecs[0] as string).replace(/^\+/, '');
-    let destination = spec.includes(':') ? spec.slice(spec.indexOf(':') + 1) : spec;
+    // With no colon, indexOf is -1 and the whole spec is the destination.
+    let destination = spec.slice(spec.indexOf(':') + 1);
     if (destination === '' || destination === 'HEAD') return { dir, resolvable: true };
     if (destination.startsWith('refs/heads/')) destination = destination.slice('refs/heads/'.length);
     else if (destination.startsWith('refs/')) return { dir, resolvable: false };
@@ -738,12 +739,13 @@ export function autofixState(sys: Sys, session: string | undefined, url: string)
 
 /** A row of sarathi's Auto-fix list, as its `readRows` keeps one: `pr` and `event` strings; undefined for any other line. */
 function listRow(line: string): { pr: string; event: string } | undefined {
+  let value: unknown = null;
   try {
-    return ListRowSchema.parse(JSON.parse(line));
+    value = JSON.parse(line);
   } catch {
-    // fail-open: a line that is not JSON is no row
-    return undefined;
+    // fail-open: a line that is not JSON reads as null, which is no row
   }
+  return ListRowSchema.parse(value);
 }
 
 const ListRowSchema = schema((value): { pr: string; event: string } | undefined => {
@@ -758,14 +760,14 @@ function editHint(settings: AutocreateSettings, pulls: Pulls, number: number): s
 }
 
 /** The instruction for the record's open pull request, once per session and pull request; empty when there is nothing to say. */
-async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettings, state: State, session: unknown, pulls: Pulls, listed: boolean): Promise<string | { problem: string }> {
+async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettings, state: State, session: string | undefined, pulls: Pulls, listed: boolean): Promise<string | { problem: string }> {
   const pr = state.pr;
   if (!pr || pr.state !== 'OPEN' || !pr.url) return '';
-  const who = String(session ?? 'nosession').replace(/[^A-Za-z0-9._-]/g, '_');
+  const who = (session ?? 'nosession').replace(/[^A-Za-z0-9._-]/g, '_');
   const ack = `${stateDir(root)}/acks/${who}-${pr.number}`;
   if (sys.exists(ack)) return '';
   // sarathi's list shows Auto-fix on already: nothing to say, and no ack, so an `off` later is told at a later Stop.
-  if (listed && settings.autofixList && autofixState(sys, typeof session === 'string' ? session : undefined, pr.url) === 'on') return '';
+  if (listed && settings.autofixList && autofixState(sys, session, pr.url) === 'on') return '';
   try {
     sys.confine(root, ack);
     sys.mkdir(dirname(ack));

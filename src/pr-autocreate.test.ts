@@ -691,7 +691,7 @@ describe('pr-autocreate hooks, in-process', () => {
 
   it('puts a pull request on the list once, by its name in any case', () => {
     const sys = clocked();
-    const row = `\n${JSON.stringify({ at: sys.now().toISOString(), pr: 'example-org/example-app#100', url: PR_URL, event: 'opened', source: AUTOFIX_SOURCE })}\n`;
+    const row = `\n${JSON.stringify({ at: sys.now().toISOString(), pr: 'example-org/example-app#100', url: PR_URL, event: 'opened', source: 'niyam pr-autocreate' })}\n`;
     assert.equal(listForAutofix(sys, 's1', `${PR_URL}/files`), true);
     assert.equal(sys.files.get(`${LIST}/s1.jsonl`), row);
     assert.ok(sys.dirs.includes(LIST));
@@ -764,6 +764,14 @@ describe('pr-autocreate hooks, in-process', () => {
       sys.calls.filter((call) => call.command === 'gh').map((call) => [call.args, call.cwd, call.timeoutMs]),
       [[['auth', 'token', '-h', 'github.com'], ROOT, 30_000]],
     );
+    assert.deepEqual(
+      sys.calls.filter((call) => call.command === 'git').map((call) => [call.args, call.cwd]),
+      [[['config', '--get', 'remote.origin.url'], ROOT]],
+    );
+    sys.execOverride = (call) => (call.command === 'git' ? { code: 0, stdout: `${URL_OF}\n`, stderr: '' } : { code: 1, stdout: 'ghp_stale\n', stderr: 'not logged in' });
+    const failed = pullsFor(sys, ROOT, undefined);
+    assert.ok(failed instanceof Pulls);
+    assert.equal(await failed.list('feature'), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
     sys.execOverride = () => ({ code: 1, stdout: '', stderr: 'no remote' });
     assert.deepEqual(pullsFor(sys, ROOT, undefined), { problem: 'origin is not a github.com repository' });
   });
@@ -832,8 +840,15 @@ describe('pr-autocreate hooks, in-process', () => {
 
   it('opens the pull request after a push, lists it for Auto-fix and tells the session once', async () => {
     const at = hooking();
+    const write = at.sys.write.bind(at.sys);
+    let saves = 0;
+    at.sys.write = (path, data, mode) => {
+      if (path === statePath(ROOT, 'feature')) saves++;
+      write(path, data, mode);
+    };
     const told = await at.run(pushed());
     assert.deepEqual(told, { code: 0, out: [JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: reminder(OPEN, placeholderSaid(), true, false) } })], err: [] });
+    assert.equal(saves, 1, 'a record with no notes is saved once');
     assert.deepEqual(at.sessions, ['s1']);
     assert.equal(at.sys.files.get(`${ACKS}/s1-100`), '');
     assert.ok(at.sys.dirs.includes(ACKS));
@@ -898,6 +913,23 @@ describe('pr-autocreate hooks, in-process', () => {
     const off = hooking();
     off.sys.files.set(`${LIST}/s3.jsonl`, `${JSON.stringify({ pr: 'example-org/example-app#100', event: 'on' })}\n`);
     assert.equal((await off.run(stopped({ session_id: 's3' }))).code, 2, 'the setting off tells the whole instruction');
+    const cloud = hooking({}, { CLAUDE_CODE_REMOTE: 'true' });
+    cloud.sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { autofixList: true } }));
+    cloud.sys.files.set(`${LIST}/s3.jsonl`, `${JSON.stringify({ pr: 'example-org/example-app#100', event: 'on' })}\n`);
+    const said = reminder(OPEN, placeholderSaid(`gh api -X PATCH repos/${SLUG}/pulls/100 -F body=@FILE`), true, true);
+    assert.deepEqual(await cloud.run(stopped({ session_id: 's3' })), { code: 0, out: [JSON.stringify({ systemMessage: said })], err: [] }, 'a cloud session lists nothing, so is told');
+  });
+
+  it('says nothing of a recorded pull request that is not open, or has no link', async () => {
+    for (const pr of [
+      { number: 100, url: PR_URL, state: 'CLOSED' },
+      { number: 100, url: '', state: 'OPEN' },
+    ]) {
+      const at = hooking();
+      at.sys.files.set(statePath(ROOT, 'feature'), JSON.stringify({ remoteSha: SHA, branch: 'feature', pr, created: true, notes: [] }));
+      assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: [] }, JSON.stringify(pr));
+      assert.equal(at.sys.exists(`${ACKS}/s1-100`), false, JSON.stringify(pr));
+    }
   });
 
   it('says no instruction when its ack cannot be written', async () => {
@@ -960,6 +992,7 @@ describe('pr-autocreate hooks, in-process', () => {
       pushed({}, { command: 'git push', run_in_background: true }),
       pushed({}, { command: 5 }),
       pushed({ tool_input: null }),
+      input('PostToolUse', { cwd: ROOT, tool_name: 'Bash' }),
       pushed({}, { command: 'ls' }),
       stopped({ stop_hook_active: true }),
       input('SessionStart', { cwd: ROOT }),
@@ -992,7 +1025,8 @@ describe('pr-autocreate hooks, in-process', () => {
     assert.ok(other.gitAsked().includes('rev-parse --verify --quiet refs/remotes/origin/other'));
     const none = hooking({ 'rev-parse --abbrev-ref --symbolic-full-name @{u}': null });
     assert.equal((await none.run(stopped())).code, 2);
-    for (const over of [{ 'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'fork/feature' }, { 'symbolic-ref --quiet --short HEAD': null }, { 'rev-parse --show-toplevel': null }]) {
+    // mirror/ is as long as origin/: what follows it is a branch origin has.
+    for (const over of [{ 'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'fork/feature' }, { 'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'mirror/feature' }, { 'symbolic-ref --quiet --short HEAD': null }, { 'rev-parse --show-toplevel': null }]) {
       const at = hooking(over);
       assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: [] }, JSON.stringify(over));
       assert.deepEqual(at.sessions, []);
@@ -1014,6 +1048,9 @@ describe('pr-autocreate hooks, in-process', () => {
       assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: [] }, JSON.stringify(over));
       assert.deepEqual(at.sessions, [], JSON.stringify(over));
     }
+    const unlanded = hooking({ 'rev-parse --verify --quiet refs/remotes/origin/feature': null });
+    await unlanded.run(stopped());
+    assert.equal(unlanded.gitAsked().at(-1), 'rev-parse --verify --quiet refs/remotes/origin/feature', 'no tracking ref, nothing more asked');
   });
 
   it('says why when its settings, GitHub or the check fail', async () => {
