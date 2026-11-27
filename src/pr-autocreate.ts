@@ -605,7 +605,8 @@ export function pushTarget(command: string, cwd: string, home: string, parse: (l
     if (refspecs.length === 0) return { dir, resolvable: true };
     if (refspecs.length > 1) return { dir, resolvable: false };
     const spec = (refspecs[0] as string).replace(/^\+/, '');
-    let destination = spec.includes(':') ? spec.slice(spec.indexOf(':') + 1) : spec;
+    // With no colon, indexOf is -1 and the whole spec is the destination.
+    let destination = spec.slice(spec.indexOf(':') + 1);
     if (destination === '' || destination === 'HEAD') return { dir, resolvable: true };
     if (destination.startsWith('refs/heads/')) destination = destination.slice('refs/heads/'.length);
     else if (destination.startsWith('refs/')) return { dir, resolvable: false };
@@ -652,7 +653,8 @@ export function reminder(pr: Pull, opened: string, created: boolean, cloud: bool
 
 /** A Claude session id sarathi lets name a list file (its `SESSION`). */
 const SARATHI_SESSION = /^[\w.-]{1,128}$/;
-const NAME = /^[\w.-]+$/;
+/** /<owner>/<repo>/pull/<N>, and anything after a further slash. */
+const PULL_PATH = /^\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:\/|$)/;
 export const AUTOFIX_SOURCE = 'niyam pr-autocreate';
 
 /** owner/repo#N and the bare URL of https://<host>/<owner>/<repo>/pull/<N>, as sarathi's `fromUrl` reads one. */
@@ -664,8 +666,12 @@ function pullOf(url: string): { pr: string; url: string } | undefined {
     // fail-open: what is not a URL names no pull request, and the whole instruction goes out
     return undefined;
   }
-  const [, owner = '', repo = '', kind, number = ''] = parsed.pathname.split('/');
-  if (parsed.protocol !== 'https:' || kind !== 'pull' || !NAME.test(owner) || !NAME.test(repo) || !/^\d+$/.test(number)) return undefined;
+  const path = PULL_PATH.exec(parsed.pathname);
+  if (parsed.protocol !== 'https:' || !path) return undefined;
+  // All three groups take part in every match.
+  const owner = path[1] as string;
+  const repo = path[2] as string;
+  const number = path[3] as string;
   return { pr: `${owner}/${repo}#${number}`, url: `https://${parsed.host}/${owner}/${repo}/pull/${number}` };
 }
 
@@ -723,24 +729,29 @@ export function autofixState(sys: Sys, session: string | undefined, url: string)
   const key = pull.pr.toLowerCase();
   let state: string | undefined;
   for (const line of text.split('\n')) {
-    let row: { pr: string; event: string };
-    try {
-      row = ListRowSchema.parse(JSON.parse(line));
-    } catch {
-      // fail-open: a blank or partial line, or one that is no row, as sarathi skips it
-      continue;
-    }
-    if (row.pr.toLowerCase() !== key || row.event === 'warned') continue;
+    const row = listRow(line);
+    // A blank or partial line, or one that is no row, as sarathi skips it.
+    if (row === undefined || row.pr.toLowerCase() !== key || row.event === 'warned') continue;
     if (row.event !== 'opened' || state === undefined) state = row.event;
   }
   return state;
 }
 
-/** A row of sarathi's Auto-fix list, as its `readRows` keeps one: `pr` and `event` strings. */
-const ListRowSchema = schema((value): { pr: string; event: string } => {
-  const { pr, event } = (typeof value === 'object' && value !== null ? value : {}) as { pr?: unknown; event?: unknown };
-  if (typeof pr !== 'string' || typeof event !== 'string') throw new Error('not a list row');
-  return { pr, event };
+/** A row of sarathi's Auto-fix list, as its `readRows` keeps one: `pr` and `event` strings; undefined for any other line. */
+function listRow(line: string): { pr: string; event: string } | undefined {
+  let value: unknown = null;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    // fail-open: a line that is not JSON reads as null, which is no row
+  }
+  return ListRowSchema.parse(value);
+}
+
+const ListRowSchema = schema((value): { pr: string; event: string } | undefined => {
+  // Text or a number has no pr; only null cannot be read for one.
+  const { pr, event } = (value ?? {}) as { pr?: unknown; event?: unknown };
+  return typeof pr === 'string' && typeof event === 'string' ? { pr, event } : undefined;
 });
 
 /** How the session replaces the placeholder body. */
@@ -749,14 +760,14 @@ function editHint(settings: AutocreateSettings, pulls: Pulls, number: number): s
 }
 
 /** The instruction for the record's open pull request, once per session and pull request; empty when there is nothing to say. */
-async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettings, state: State, session: unknown, pulls: Pulls, listed: boolean): Promise<string | { problem: string }> {
+async function autofixMessage(sys: Sys, root: string, settings: AutocreateSettings, state: State, session: string | undefined, pulls: Pulls, listed: boolean): Promise<string | { problem: string }> {
   const pr = state.pr;
   if (!pr || pr.state !== 'OPEN' || !pr.url) return '';
-  const who = String(session ?? 'nosession').replace(/[^A-Za-z0-9._-]/g, '_');
+  const who = (session ?? 'nosession').replace(/[^A-Za-z0-9._-]/g, '_');
   const ack = `${stateDir(root)}/acks/${who}-${pr.number}`;
   if (sys.exists(ack)) return '';
   // sarathi's list shows Auto-fix on already: nothing to say, and no ack, so an `off` later is told at a later Stop.
-  if (listed && settings.autofixList && autofixState(sys, typeof session === 'string' ? session : undefined, pr.url) === 'on') return '';
+  if (listed && settings.autofixList && autofixState(sys, session, pr.url) === 'on') return '';
   try {
     sys.confine(root, ack);
     sys.mkdir(dirname(ack));
@@ -785,7 +796,8 @@ export type PullsOf = (sys: Sys, root: string, session: string | undefined) => P
  * GH_TOKEN, or gh's signed-in account.
  */
 export function pullsFor(sys: Sys, root: string, session: string | undefined): Pulls | { problem: string } {
-  const slug = githubSlug(git(sys, root, ['config', '--get', `remote.${REMOTE}.url`]) ?? '');
+  const url = git(sys, root, ['config', '--get', `remote.${REMOTE}.url`]);
+  const slug = url === undefined ? undefined : githubSlug(url);
   if (!slug) return { problem: `${REMOTE} is not a ${GITHUB_HOST} repository` };
   const cloud = sys.env.CLAUDE_CODE_REMOTE === 'true';
   return new Pulls(sys, slug, () => tokenFor(sys, root, session), cloud);
@@ -836,10 +848,10 @@ export async function claudeHook(sys: Sys, io: Output, stdin: string, pullsOf: P
   if (event === 'PostToolUse') {
     if (input.tool_name !== 'Bash') return 0;
     const tool = typeof input.tool_input === 'object' && input.tool_input !== null ? (input.tool_input as Record<string, unknown>) : {};
-    const command = typeof tool.command === 'string' ? tool.command : '';
     // A background push is still running; the Stop half catches it.
     if (tool.run_in_background) return 0;
-    const target = pushTarget(command, cwd, sys.home);
+    // A command that is not text reads as words with no git push in them.
+    const target = pushTarget(String(tool.command), cwd, sys.home);
     if (!target?.resolvable) return 0;
     dir = target.dir;
     named = target.branch;
@@ -915,11 +927,14 @@ function flags(args: readonly string[], names: readonly string[]): Map<string, s
   const found = new Map<string, string>();
   for (let at = 0; at < args.length; at++) {
     const arg = args[at] as string;
-    const eq = arg.startsWith('--') ? arg.indexOf('=') : -1;
-    const name = eq > 0 ? arg.slice(0, eq) : arg;
+    // Every name starts with --, so `x=y` names none.
+    const parts = arg.split('=');
+    const name = parts[0] as string;
+    const after = parts.slice(1);
     if (!names.includes(name)) throw new Error(`unexpected argument "${arg}"`);
-    const value = eq > 0 ? arg.slice(eq + 1) : args[++at];
-    if (value === undefined || (eq < 0 && value.startsWith('--'))) throw new Error(`${name} needs a value`);
+    const inline = after.length > 0 ? after.join('=') : undefined;
+    const value = inline ?? args[++at];
+    if (value === undefined || (inline === undefined && value.startsWith('--'))) throw new Error(`${name} needs a value`);
     if (found.has(name)) throw new Error(`${name} is given twice`);
     found.set(name, value);
   }
@@ -963,13 +978,14 @@ export async function refuseRetired(sys: Sys, io: Output, args: readonly string[
     return RETIRED_UNCHECKED;
   };
   let root: string;
-  let remote: string;
+  let remote: string | undefined;
   try {
     const given = flags(args, ['--root', '--remote']);
     const named = given.get('--root');
     if (!named) throw new Error('refuse-retired needs --root <repository>');
     root = named;
-    remote = given.get('--remote') ?? '';
+    // No --remote is not origin.
+    remote = given.get('--remote');
   } catch (error) {
     return unchecked(error instanceof Error ? error.message : String(error));
   }
@@ -1020,13 +1036,14 @@ export async function refuseRetired(sys: Sys, io: Output, args: readonly string[
  */
 export async function spawnWatchers(sys: Sys, io: Output, args: readonly string[], stdin: string): Promise<number> {
   let root: string;
-  let remote: string;
+  let remote: string | undefined;
   try {
     const given = flags(args, ['--root', '--remote']);
     const named = given.get('--root');
     if (!named) throw new Error('spawn-watchers needs --root <repository>');
     root = named;
-    remote = given.get('--remote') ?? '';
+    // No --remote is not origin.
+    remote = given.get('--remote');
   } catch (error) {
     io.err(`pr-autocreate: ${error instanceof Error ? error.message : String(error)}; no PR watcher started`);
     return 0;
@@ -1057,8 +1074,8 @@ export async function spawnWatchers(sys: Sys, io: Output, args: readonly string[
     }
     if (opted) continue;
     try {
+      // recordOptout's lock made the state folder the log goes in, or failed where this would.
       sys.confine(root, `${stateDir(root)}/watch.log`);
-      sys.mkdir(stateDir(root));
       // Its own session and no inherited descriptors: git, the hook's
       // supervisor and a closing terminal neither wait on it nor end it.
       sys.detach(sys.runtime.node, [sys.runtime.cli, 'pr-autocreate', 'watch', '--root', root, '--branch', branch, '--sha', localSha], { cwd: root, log: `${stateDir(root)}/watch.log` });
@@ -1117,7 +1134,8 @@ export async function watch(sys: Sys, io: Output, args: readonly string[], pulls
   const deadline = sys.now().getTime() + parsed.timeout * 1000;
   for (;;) {
     const heads = sys.exec('git', ['ls-remote', REMOTE, ref], { cwd: root, timeoutMs: 30_000 });
-    if (heads.code === 0 && heads.stdout.trim().split(/\s+/)[0] === sha) break;
+    // ls-remote prints each ref as its sha, a tab, and its name.
+    if (heads.code === 0 && heads.stdout.startsWith(`${sha}\t`)) break;
     if (sys.now().getTime() >= deadline) {
       log(`${branch}: gave up: ${sha.slice(0, 8)} never reached ${ref} within ${parsed.timeout}s; no PR opened`);
       return 0;
@@ -1142,7 +1160,7 @@ export async function watch(sys: Sys, io: Output, args: readonly string[], pulls
     }
     if (!('problem' in state)) {
       const pr = state.pr;
-      log(`${branch}: ${[pr ? `PR #${pr.number} ${state.created ? 'created' : 'exists'} (${pr.url})` : '', ...state.notes].filter(Boolean).join(' ') || 'no PR'}`);
+      log(`${branch}: ${[...(pr ? [`PR #${pr.number} ${state.created ? 'created' : 'exists'} (${pr.url})`] : []), ...state.notes].join(' ') || 'no PR'}`);
       return 0;
     }
     if (sys.now().getTime() >= retryDeadline) {

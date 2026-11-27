@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 
-import { NO_TOKEN, sessionRecord } from './agent.ts';
+import { NO_TOKEN, pathsFor, sessionRecord, sessionScript } from './agent.ts';
 import { PROXY_TOKEN } from './cloud.ts';
-import { FakeSys, HOME, ROOT, capture } from './fake.test.ts';
+import { AGENT_ID, FakeSys, HOME, ROOT, capture } from './fake.test.ts';
 import { GITHUB_API } from './host.ts';
 import {
   AUTOFIX_SOURCE,
@@ -621,6 +621,695 @@ describe('pr-autocreate, in-process', () => {
       assert.deepEqual(pushTarget(`git push ${option} value origin feature`, cwd, HOME), { dir: cwd, branch: 'feature', resolvable: true }, option);
     }
     for (const option of ['--all', '--repo=x', '--prune', '-d']) assert.deepEqual(pushTarget(`git push ${option} origin feature`, cwd, HOME), { dir: cwd, resolvable: false }, option);
+  });
+});
+
+// Part 2's code in process too, so a mutant there dies here rather than in the slow real-git suites.
+describe('pr-autocreate hooks, in-process', () => {
+  const PR_URL = `https://github.com/${SLUG}/pull/100`;
+  const OPEN: Pull = { number: 100, url: PR_URL, state: 'OPEN' };
+  const LIST = `${HOME}/.local/state/sarathi/autofix`;
+  const ACKS = `${ROOT}/${STATE_DIR}/acks`;
+
+  it('reads the branch a refspec pushes', () => {
+    const cwd = '/w';
+    for (const [spec, want] of [
+      ['+feature', { dir: cwd, branch: 'feature', resolvable: true }],
+      ['a+b', { dir: cwd, branch: 'a+b', resolvable: true }],
+      ['HEAD:topic', { dir: cwd, branch: 'topic', resolvable: true }],
+      ['x:a:b', { dir: cwd, branch: 'a:b', resolvable: true }],
+      ['HEAD:refs/heads/topic', { dir: cwd, branch: 'topic', resolvable: true }],
+      ['feature:', { dir: cwd, resolvable: true }],
+      ['x:HEAD', { dir: cwd, resolvable: true }],
+      ['HEAD:refs/tags/v1', { dir: cwd, resolvable: false }],
+      ['x:refs/headsy', { dir: cwd, resolvable: false }],
+      ['a b', { dir: cwd, resolvable: false }],
+    ] as const) {
+      assert.deepEqual(pushTarget(`git push origin ${spec}`, cwd, HOME), want, spec);
+    }
+  });
+
+  it('words the instruction for a cloud session, a pull request on the Auto-fix list, and the rest', () => {
+    assert.equal(
+      reminder(OPEN, 'is open.', true, true),
+      `PR #100 (${PR_URL}) is open.\nThis cloud session has no Autofix: CI, conflicts and review comments reach no one until a session reads them (gh api; GraphQL is refused here).`,
+    );
+    const whole = reminder(OPEN, 'is open.', true, false);
+    const listed = reminder(OPEN, 'is open.', false, false, true);
+    const why = "tell the user in one line that Autofix could not be enabled and why, quoting the app's reason (the tag counts only within 15 minutes of the PR's creation, from the PR's own branch, and when the app's gh login authored it) — never fail silently and leave it off unreported.";
+    for (const said of [whole, listed]) {
+      assert.ok(said.includes('\n1. If mcp__ccd_pr__get_status is not yet a callable tool, it may only be deferred: run ToolSearch with query "select:mcp__ccd_pr__get_status,mcp__ccd_pr__bind_pr,mcp__ccd_pr__set_monitor" to load its schema before concluding it is unavailable.\n2. '), said);
+      assert.ok(said.includes(`this line in your reply text, exactly: <pr-created>${PR_URL}</pr-created>\nThe app lets a session turn Autofix on only for a PR it is sure the session opened, and it learns that only from a FOREGROUND \`gh pr create\` result or this tag; a PR opened by this hook or inside a background command has neither. Never write the tag for a PR this session did not open.\n3. Call mcp__ccd_pr__get_status. If it reports no bound PR, call mcp__ccd_pr__bind_pr with url ${PR_URL}.\n`), said);
+      assert.ok(said.endsWith(why), said);
+    }
+    assert.ok(whole.startsWith(`PR #100 (${PR_URL}) is open.\nStanding instruction from the user: Autofix must be ON for every PR a session pushes. Do this now, before anything else:\n1. `), whole);
+    assert.ok(whole.includes('\n2. Write this line'), whole);
+    assert.ok(
+      whole.includes(`.\n4. If auto_fix is not true, call mcp__ccd_pr__set_monitor with {"auto_fix": true, "address_comments": true, "url": "${PR_URL}"}. If it says the app is not sure this session opened the PR, or has not read it yet, call get_status once more and retry set_monitor once.\nIf ToolSearch cannot find mcp__ccd_pr__* at all (truly not the desktop app), or get_status/bind_pr/set_monitor still fails, ${why}`),
+      whole,
+    );
+    assert.ok(
+      listed.startsWith(`PR #100 (${PR_URL}) is open.\nStanding instruction from the user: Autofix must be ON for every PR a session pushes. This PR is on this session's sarathi Auto-fix list, and sarathi's warning gives the mcp__ccd_pr__set_monitor call that switches it on. Do this now, before anything else, so that call is not refused:\n1. `),
+      listed,
+    );
+    assert.ok(listed.includes('\n2. Only if this session itself ran the `gh pr create` that opened this PR (in a background command, say), write this line'), listed);
+    assert.ok(listed.includes(`.\nIf ToolSearch cannot find mcp__ccd_pr__* at all (truly not the desktop app), or get_status/bind_pr still fails, ${why}`), listed);
+    assert.ok(!listed.includes('\n4.'), listed);
+  });
+
+  it('finds the Auto-fix list where sarathi does', () => {
+    const sys = clocked();
+    sys.env = { SARATHI_AUTOFIX_DIR: '/x/list', XDG_STATE_HOME: '/state' };
+    assert.equal(autofixDir(sys), '/x/list');
+    sys.env = { SARATHI_AUTOFIX_DIR: '', XDG_STATE_HOME: '/state' };
+    assert.equal(autofixDir(sys), '/state/sarathi/autofix');
+    sys.env = { XDG_STATE_HOME: '' };
+    assert.equal(autofixDir(sys), LIST);
+    sys.env = {};
+    assert.equal(autofixDir(sys), LIST);
+  });
+
+  it('puts a pull request on the list once, by its name in any case', () => {
+    const sys = clocked();
+    const row = `\n${JSON.stringify({ at: sys.now().toISOString(), pr: 'example-org/example-app#100', url: PR_URL, event: 'opened', source: 'niyam pr-autocreate' })}\n`;
+    assert.equal(listForAutofix(sys, 's1', `${PR_URL}/files`), true);
+    assert.equal(sys.files.get(`${LIST}/s1.jsonl`), row);
+    assert.ok(sys.dirs.includes(LIST));
+    assert.equal(listForAutofix(sys, 's1', PR_URL), true);
+    assert.equal(sys.files.get(`${LIST}/s1.jsonl`), row, 'no second row');
+    sys.files.set(`${LIST}/s2.jsonl`, '{"pr":"EXAMPLE-ORG/example-app#100","event":"on"}\n');
+    assert.equal(listForAutofix(sys, 's2', PR_URL), true);
+    assert.equal(sys.files.get(`${LIST}/s2.jsonl`), '{"pr":"EXAMPLE-ORG/example-app#100","event":"on"}\n');
+    sys.files.set(`${LIST}/s3.jsonl`, '{"pr":"example-org/example-app#1000","event":"on"}\n');
+    assert.equal(listForAutofix(sys, 's3', PR_URL), true);
+    assert.equal(sys.files.get(`${LIST}/s3.jsonl`), `{"pr":"example-org/example-app#1000","event":"on"}\n${row}`);
+  });
+
+  it('lists nothing for a session or link it cannot name, and fails open when the list cannot be written', () => {
+    const sys = clocked();
+    for (const [session, url] of [
+      [undefined, PR_URL],
+      ['', PR_URL],
+      ['a/b', PR_URL],
+      ['x'.repeat(129), PR_URL],
+      ['s1', 'not a url'],
+      ['s1', 'http://github.com/a/b/pull/1'],
+      ['s1', 'https://github.com/a/b/issues/1'],
+      ['s1', 'https://github.com/a/b/pull/1x'],
+      ['s1', 'https://github.com/x/a/b/pull/1'],
+      ['s1', 'https://github.com/a/b%20c/pull/1'],
+    ] as const) {
+      assert.equal(listForAutofix(sys, session, url), false, `${session} ${url}`);
+    }
+    assert.equal(listForAutofix(sys, 'x'.repeat(128), PR_URL), true);
+    sys.append = () => {
+      throw new Error('EACCES');
+    };
+    assert.equal(listForAutofix(sys, 's9', PR_URL), false);
+  });
+
+  it("reads the pull request's state as sarathi's fold does", () => {
+    const sys = clocked();
+    const rows = (session: string, ...lines: unknown[]): void => {
+      sys.files.set(`${LIST}/${session}.jsonl`, lines.map((line) => (typeof line === 'string' ? line : JSON.stringify(line))).join('\n'));
+    };
+    const pr = 'example-org/example-app#100';
+    rows('s1', { pr, event: 'opened' }, { pr, event: 'on' }, { pr, event: 'opened' }, { pr, event: 'warned' }, { pr: 'example-org/example-app#10', event: 'off' });
+    assert.equal(autofixState(sys, 's1', PR_URL), 'on');
+    rows('s2', { pr: 'Example-Org/Example-App#100', event: 'opened' }, 'null', '"text"', '5', '{"pr":', { pr: 5, event: 'off' }, { pr, event: 7 }, '');
+    assert.equal(autofixState(sys, 's2', PR_URL), 'opened');
+    rows('s3', { pr, event: 'warned' });
+    assert.equal(autofixState(sys, 's3', PR_URL), undefined);
+    assert.equal(autofixState(sys, 's4', PR_URL), undefined, 'no list');
+    rows('a/b', { pr, event: 'on' });
+    rows('x'.repeat(129), { pr, event: 'on' });
+    for (const [session, url] of [[undefined, PR_URL], ['', PR_URL], ['a/b', PR_URL], ['x'.repeat(129), PR_URL], ['s1', 'not a url']] as const) {
+      assert.equal(autofixState(sys, session, url), undefined, `${session} ${url}`);
+    }
+  });
+
+  it('asks GitHub as gh is signed in, read once with its timeout, or says why it cannot', async () => {
+    const sys = clocked().ready();
+    sys.env = { CLAUDE_CODE_REMOTE: 'false' };
+    sys.execOverride = (call) => {
+      if (call.command === 'git') return { code: 0, stdout: `${URL_OF}\n`, stderr: '' };
+      if (call.command === 'gh') return { code: 0, stdout: ' ghp_gh \n', stderr: '' };
+      return undefined;
+    };
+    const pulls = pullsFor(sys, ROOT, undefined);
+    assert.ok(pulls instanceof Pulls && !pulls.cloud && pulls.slug === SLUG);
+    await pulls.list('feature');
+    assert.equal(sys.requests.at(-1)?.token, 'ghp_gh');
+    assert.deepEqual(
+      sys.calls.filter((call) => call.command === 'gh').map((call) => [call.args, call.cwd, call.timeoutMs]),
+      [[['auth', 'token', '-h', 'github.com'], ROOT, 30_000]],
+    );
+    assert.deepEqual(
+      sys.calls.filter((call) => call.command === 'git').map((call) => [call.args, call.cwd]),
+      [[['config', '--get', 'remote.origin.url'], ROOT]],
+    );
+    sys.execOverride = (call) => (call.command === 'git' ? { code: 0, stdout: `${URL_OF}\n`, stderr: '' } : { code: 1, stdout: 'ghp_stale\n', stderr: 'not logged in' });
+    const failed = pullsFor(sys, ROOT, undefined);
+    assert.ok(failed instanceof Pulls);
+    assert.equal(await failed.list('feature'), 'no GitHub token: GH_TOKEN is unset and gh is signed in to no account');
+    sys.execOverride = () => ({ code: 1, stdout: '', stderr: 'no remote' });
+    assert.deepEqual(pullsFor(sys, ROOT, undefined), { problem: 'origin is not a github.com repository' });
+  });
+
+  it("refuses the lock's placeholder as the agent's token", async () => {
+    const sys = clocked().ready();
+    sys.execOverride = (call) => (call.command === 'git' && call.args[0] === 'config' ? { code: 0, stdout: `${URL_OF}\n`, stderr: '' } : undefined);
+    sys.files.set(sessionRecord(HOME, 'abc-123') as string, `${JSON.stringify({ agent: 'ExampleBot' })}\n`);
+    sys.files.set(pathsFor(HOME, 'ExampleBot').session, sessionScript('ExampleBot', AGENT_ID, pathsFor(HOME, 'ExampleBot')));
+    const asAgent = pullsFor(sys, ROOT, 'abc-123');
+    assert.ok(asAgent instanceof Pulls);
+    const listed = await asAgent.list('feature');
+    assert.equal(sys.requests.at(-1)?.token, 'ghp_good', JSON.stringify(listed));
+    for (const item of sys.keychain.keys()) sys.keychain.set(item, NO_TOKEN);
+    const locked = pullsFor(sys, ROOT, 'abc-123');
+    assert.ok(locked instanceof Pulls);
+    assert.equal(await locked.list('feature'), 'niyam gave the agent no token; run `niyam doctor`');
+  });
+
+  /** git as the hook asks it of a clone whose `feature` was pushed at SHA, one commit ahead of main naming slice #7. */
+  const GIT: Record<string, string> = {
+    'rev-parse --show-toplevel': ROOT,
+    'symbolic-ref --quiet --short HEAD': 'feature',
+    'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'origin/feature',
+    'rev-parse --verify --quiet refs/remotes/origin/feature': SHA,
+    [`merge-base --is-ancestor ${SHA} HEAD`]: '',
+    'rev-parse --verify --quiet refs/remotes/origin/main': 'f00d',
+    [`rev-list --count refs/remotes/origin/main..${SHA}`]: '1',
+    [`log --no-merges --reverse --format=%h %s refs/remotes/origin/main..${SHA}`]: 'abc1234 ✨ feat: the change',
+    [`log --no-merges --reverse --format=%B refs/remotes/origin/main..${SHA}`]: '✨ feat: the change\n\nSlice: #7\n',
+  };
+
+  /** A machine whose git answers from GIT and `over` (null: git fails), with GitHub faked. */
+  function hooking(over: Record<string, string | null> = {}, env: Record<string, string> = {}) {
+    const sys = clocked();
+    sys.env = env;
+    sys.files.delete(`${ROOT}/.github/niyam.json`);
+    const answers: Record<string, string | null> = { ...GIT, ...over };
+    sys.execOverride = (call) => {
+      if (call.command !== 'git') return undefined;
+      const out = answers[call.args.join(' ')];
+      return out === undefined || out === null ? { code: 1, stdout: '', stderr: 'no' } : { code: 0, stdout: `${out}\n`, stderr: '' };
+    };
+    const github = new FakeGitHub();
+    sys.http = github.http as FakeSys['http'];
+    const sessions: (string | undefined)[] = [];
+    let problem: string | undefined;
+    const pullsOf: PullsOf = (on, root, session) => {
+      sessions.push(session);
+      assert.equal(root, ROOT);
+      return problem === undefined ? new Pulls(on, SLUG, 't', on.env.CLAUDE_CODE_REMOTE === 'true') : { problem };
+    };
+    const run = async (stdin: string): Promise<{ code: number; out: string[]; err: string[] }> => {
+      const seen = capture();
+      const code = await claudeHook(sys, seen.io, stdin, pullsOf);
+      return { code, out: seen.out, err: seen.err };
+    };
+    const gitAsked = (): string[] => sys.calls.filter((call) => call.command === 'git').map((call) => call.args.join(' '));
+    return { sys, github, sessions, run, gitAsked, refuse: (why: string) => (problem = why) };
+  }
+  const stored = (sys: FakeSys): Record<string, unknown> => JSON.parse(sys.read(statePath(ROOT, 'feature'))) as Record<string, unknown>;
+  const pushed = (extra: Record<string, unknown> = {}, tool: Record<string, unknown> = { command: 'git push' }): string => input('PostToolUse', { cwd: ROOT, tool_name: 'Bash', tool_input: tool, ...extra });
+  const stopped = (extra: Record<string, unknown> = {}): string => input('Stop', { cwd: ROOT, ...extra });
+  const placeholderSaid = (hint = '`gh pr edit --body-file`'): string =>
+    `was opened automatically for branch feature after the push landed. Its body is still the automatic placeholder: replace it with the real description (${hint}) before asking anyone to review it.`;
+
+  it('opens the pull request after a push, lists it for Auto-fix and tells the session once', async () => {
+    const at = hooking();
+    const write = at.sys.write.bind(at.sys);
+    let saves = 0;
+    at.sys.write = (path, data, mode) => {
+      if (path === statePath(ROOT, 'feature')) saves++;
+      write(path, data, mode);
+    };
+    const told = await at.run(pushed());
+    assert.deepEqual(told, { code: 0, out: [JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: reminder(OPEN, placeholderSaid(), true, false) } })], err: [] });
+    assert.equal(saves, 1, 'a record with no notes is saved once');
+    assert.deepEqual(at.sessions, ['s1']);
+    assert.equal(at.sys.files.get(`${ACKS}/s1-100`), '');
+    assert.ok(at.sys.dirs.includes(ACKS));
+    assert.match(at.sys.files.get(`${LIST}/s1.jsonl`) ?? '', /"event":"opened"/);
+    assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: [] });
+  });
+
+  it('holds a Stop for the instruction, and in a cloud session says it as a system message', async () => {
+    const at = hooking();
+    assert.deepEqual(await at.run(stopped()), { code: 2, out: [], err: [reminder(OPEN, placeholderSaid(), true, false)] });
+    const cloud = hooking({}, { CLAUDE_CODE_REMOTE: 'true' });
+    const said = reminder(OPEN, placeholderSaid(`gh api -X PATCH repos/${SLUG}/pulls/100 -F body=@FILE`), true, true);
+    assert.deepEqual(await cloud.run(stopped()), { code: 0, out: [JSON.stringify({ systemMessage: said })], err: [] });
+    assert.equal(cloud.sys.exists(`${LIST}/s1.jsonl`), false, 'no list in a cloud session');
+  });
+
+  it('acks a session with no usable id as nosession, and one with odd characters by a safe name', async () => {
+    for (const [id, ack] of [
+      [undefined, 'nosession'],
+      ['', 'nosession'],
+      [5, 'nosession'],
+      ['a b/c', 'a_b_c'],
+    ] as const) {
+      const at = hooking();
+      await at.run(input('Stop', { cwd: ROOT, session_id: id }));
+      assert.deepEqual(at.sessions, [typeof id === 'string' && id ? id : undefined]);
+      assert.equal(at.sys.exists(`${ACKS}/${ack}-100`), true, String(id));
+    }
+  });
+
+  it('says the body may still be the placeholder when GitHub cannot show it, and nothing of it once replaced', async () => {
+    const unread = hooking();
+    unread.github.bodyStatus = 500;
+    const replace = 'replace it with the real description (`gh pr edit --body-file`) before asking anyone to review it.';
+    const opened = `was opened automatically for branch feature after the push landed. If its body is still the automatic placeholder, ${replace}`;
+    assert.deepEqual((await unread.run(stopped())).err, [reminder(OPEN, opened, true, false)]);
+    const real = hooking();
+    const base = real.sys.http;
+    real.sys.http = async (url, options) => {
+      const got = await base(url, options);
+      return url.endsWith('/pulls/100') ? { ...got, json: { ...(got.json as object), body: 'Real.' } } : got;
+    };
+    assert.deepEqual((await real.run(stopped())).err, [reminder(OPEN, 'was opened automatically for branch feature after the push landed.', true, false)]);
+  });
+
+  it('tells of a pull request found open on the branch without claiming it', async () => {
+    const at = hooking();
+    at.github.pulls.push({ number: 7, head: 'feature', state: 'open', merged_at: null, body: 'Real.' });
+    const found: Pull = { number: 7, url: `https://github.com/${SLUG}/pull/7`, state: 'OPEN' };
+    assert.deepEqual((await at.run(stopped())).err, [reminder(found, 'is open for branch feature.', false, false)]);
+  });
+
+  it('with "autofixList" says the list variant, and nothing once the list shows Auto-fix on', async () => {
+    const at = hooking();
+    at.sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { autofixList: true } }));
+    assert.deepEqual((await at.run(stopped({ session_id: 's2' }))).err, [reminder(OPEN, placeholderSaid(), true, false, true)]);
+    const on = hooking();
+    on.sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { autofixList: true } }));
+    on.sys.files.set(`${LIST}/s3.jsonl`, `${JSON.stringify({ pr: 'example-org/example-app#100', event: 'on' })}\n`);
+    assert.deepEqual(await on.run(stopped({ session_id: 's3' })), { code: 0, out: [], err: [] });
+    assert.equal(on.sys.exists(`${ACKS}/s3-100`), false);
+    const off = hooking();
+    off.sys.files.set(`${LIST}/s3.jsonl`, `${JSON.stringify({ pr: 'example-org/example-app#100', event: 'on' })}\n`);
+    assert.equal((await off.run(stopped({ session_id: 's3' }))).code, 2, 'the setting off tells the whole instruction');
+    const cloud = hooking({}, { CLAUDE_CODE_REMOTE: 'true' });
+    cloud.sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { autofixList: true } }));
+    cloud.sys.files.set(`${LIST}/s3.jsonl`, `${JSON.stringify({ pr: 'example-org/example-app#100', event: 'on' })}\n`);
+    const said = reminder(OPEN, placeholderSaid(`gh api -X PATCH repos/${SLUG}/pulls/100 -F body=@FILE`), true, true);
+    assert.deepEqual(await cloud.run(stopped({ session_id: 's3' })), { code: 0, out: [JSON.stringify({ systemMessage: said })], err: [] }, 'a cloud session lists nothing, so is told');
+  });
+
+  it('says nothing of a recorded pull request that is not open, or has no link', async () => {
+    for (const pr of [
+      { number: 100, url: PR_URL, state: 'CLOSED' },
+      { number: 100, url: '', state: 'OPEN' },
+    ]) {
+      const at = hooking();
+      at.sys.files.set(statePath(ROOT, 'feature'), JSON.stringify({ remoteSha: SHA, branch: 'feature', pr, created: true, notes: [] }));
+      assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: [] }, JSON.stringify(pr));
+      assert.equal(at.sys.exists(`${ACKS}/s1-100`), false, JSON.stringify(pr));
+    }
+  });
+
+  it('says no instruction when its ack cannot be written', async () => {
+    const at = hooking();
+    const write = at.sys.write.bind(at.sys);
+    at.sys.write = (path, data, mode) => {
+      if (path.startsWith(ACKS)) throw new Error('EROFS');
+      write(path, data, mode);
+    };
+    assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: ['pr-autocreate: could not record the Autofix ack (EROFS); not instructing, to avoid a loop'] });
+  });
+
+  it("gives a note alone after a push, and keeps it at a Stop that has nothing else to say", async () => {
+    const merged = (): ReturnType<typeof hooking> => {
+      const at = hooking();
+      at.github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+      return at;
+    };
+    const note = 'Branch feature already has MERGED PR #7, so no new PR was opened: a merged PR retires its branch.';
+    const after = merged();
+    assert.deepEqual(await after.run(pushed()), { code: 0, out: [JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: note } })], err: [] });
+    assert.deepEqual(stored(after.sys).notes, []);
+    const stop = merged();
+    assert.deepEqual(await stop.run(stopped()), { code: 0, out: [], err: [] });
+    assert.deepEqual(stored(stop.sys).notes, [note]);
+  });
+
+  it('says a note with the instruction, and still tells when the note cannot be cleared', async () => {
+    const at = hooking({ [`log --no-merges --reverse --format=%B refs/remotes/origin/main..${SHA}`]: 'no trailer\n' });
+    const held = 'PR #100 was opened as a draft: its own commits name no slice in a `Slice:` trailer, so it may carry another slice\'s work. Once its description is written, mark it ready with `gh pr ready 100`.';
+    const write = at.sys.write.bind(at.sys);
+    let writes = 0;
+    at.sys.write = (path, data, mode) => {
+      if (path === statePath(ROOT, 'feature') && writes++ > 0) throw new Error('EROFS');
+      write(path, data, mode);
+    };
+    const told = await at.run(stopped());
+    assert.equal(told.code, 2);
+    assert.equal(told.err.length, 1);
+    assert.ok((told.err[0] as string).endsWith(`\n${held}`), told.err[0]);
+  });
+
+  for (const [name, stdin, err] of [
+    ['empty input', '', 'pr-autocreate: hook input is not a JSON object; nothing done'],
+    ['a list', '[]', 'pr-autocreate: hook input is not a JSON object; nothing done'],
+    ['a number', '5', 'pr-autocreate: hook input is not a JSON object; nothing done'],
+    ['text that is not JSON', 'x', 'pr-autocreate: hook input is not valid JSON; nothing done'],
+  ] as const) {
+    it(`does nothing with ${name}`, async () => {
+      const at = hooking();
+      assert.deepEqual(await at.run(stdin), { code: 0, out: [], err: [err] });
+      assert.deepEqual(at.gitAsked(), []);
+    });
+  }
+
+  it("asks git nothing for a subagent's turn, another tool, a background push, a held Stop or another event", async () => {
+    for (const stdin of [
+      pushed({ agent_id: 'sub' }),
+      pushed({ tool_name: 'Read' }),
+      pushed({}, { command: 'git push', run_in_background: true }),
+      pushed({}, { command: 5 }),
+      pushed({ tool_input: null }),
+      input('PostToolUse', { cwd: ROOT, tool_name: 'Bash' }),
+      pushed({}, { command: 'ls' }),
+      stopped({ stop_hook_active: true }),
+      input('SessionStart', { cwd: ROOT }),
+    ]) {
+      const at = hooking();
+      assert.deepEqual(await at.run(stdin), { code: 0, out: [], err: [] }, stdin);
+      assert.deepEqual(at.gitAsked(), [], stdin);
+    }
+  });
+
+  it("works in the hook's folder, else the project's, else nowhere", async () => {
+    for (const [cwd, project, at] of [
+      ['/w', '/p', '/w'],
+      ['', '/p', '/p'],
+      [5, '/p', '/p'],
+      [undefined, '/p', '/p'],
+    ] as const) {
+      const hook = hooking({}, { CLAUDE_PROJECT_DIR: project });
+      await hook.run(JSON.stringify({ hook_event_name: 'Stop', session_id: 's1', ...(cwd === undefined ? {} : { cwd }) }));
+      assert.equal(hook.sys.calls[0]?.cwd, at, String(cwd));
+    }
+    const nowhere = hooking();
+    assert.deepEqual(await nowhere.run(JSON.stringify({ hook_event_name: 'Stop', session_id: 's1' })), { code: 0, out: [], err: [] });
+    assert.deepEqual(nowhere.gitAsked(), []);
+  });
+
+  it('reads the branch from its upstream on origin, else the checked-out one, and none from another remote', async () => {
+    const other = hooking({ 'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'origin/other', 'rev-parse --verify --quiet refs/remotes/origin/other': null });
+    assert.equal((await other.run(stopped())).code, 0);
+    assert.ok(other.gitAsked().includes('rev-parse --verify --quiet refs/remotes/origin/other'));
+    const none = hooking({ 'rev-parse --abbrev-ref --symbolic-full-name @{u}': null });
+    assert.equal((await none.run(stopped())).code, 2);
+    // mirror/ is as long as origin/: what follows it is a branch origin has.
+    for (const over of [{ 'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'fork/feature' }, { 'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'mirror/feature' }, { 'symbolic-ref --quiet --short HEAD': null }, { 'rev-parse --show-toplevel': null }]) {
+      const at = hooking(over);
+      assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: [] }, JSON.stringify(over));
+      assert.deepEqual(at.sessions, []);
+    }
+    const named = hooking({ 'rev-parse --verify --quiet refs/remotes/origin/topic': null });
+    await named.run(pushed({}, { command: 'git push origin HEAD:topic' }));
+    assert.ok(!named.gitAsked().some((asked) => asked.startsWith('symbolic-ref')));
+    assert.ok(named.gitAsked().includes('rev-parse --verify --quiet refs/remotes/origin/topic'));
+  });
+
+  it("opens nothing for a branch it may not, a push that did not land, or nothing ahead", async () => {
+    for (const over of [
+      { 'symbolic-ref --quiet --short HEAD': 'main', 'rev-parse --abbrev-ref --symbolic-full-name @{u}': 'origin/main' },
+      { 'rev-parse --verify --quiet refs/remotes/origin/feature': null },
+      { [`merge-base --is-ancestor ${SHA} HEAD`]: null },
+      { [`rev-list --count refs/remotes/origin/main..${SHA}`]: '0' },
+    ]) {
+      const at = hooking(over);
+      assert.deepEqual(await at.run(stopped()), { code: 0, out: [], err: [] }, JSON.stringify(over));
+      assert.deepEqual(at.sessions, [], JSON.stringify(over));
+    }
+    const unlanded = hooking({ 'rev-parse --verify --quiet refs/remotes/origin/feature': null });
+    await unlanded.run(stopped());
+    assert.equal(unlanded.gitAsked().at(-1), 'rev-parse --verify --quiet refs/remotes/origin/feature', 'no tracking ref, nothing more asked');
+  });
+
+  it('says why when its settings, GitHub or the check fail', async () => {
+    const torn = hooking();
+    torn.sys.files.set(`${ROOT}/.github/niyam.json`, '{');
+    const said = await torn.run(stopped());
+    assert.equal(said.code, 0);
+    assert.match(said.err.join(''), /^pr-autocreate: \.github\/niyam\.json cannot be read: .*; nothing done$/);
+    const refused = hooking();
+    refused.refuse('origin is not a github.com repository');
+    assert.deepEqual(await refused.run(stopped()), { code: 0, out: [], err: ['pr-autocreate: origin is not a github.com repository'] });
+    const down = hooking();
+    down.github.queued.push({ status: 502, json: null });
+    assert.deepEqual(await down.run(stopped()), { code: 0, out: [], err: ['pr-autocreate: could not list PRs for feature (GitHub answered 502 listing pull requests); will retry'] });
+    const broken = hooking();
+    broken.sys.claim = () => {
+      throw new Error('EIO');
+    };
+    assert.deepEqual(await broken.run(stopped()), { code: 0, out: [], err: ['pr-autocreate: PR check failed for feature (EIO)'] });
+    const plain = hooking();
+    plain.sys.claim = () => {
+      throw 'plain';
+    };
+    assert.deepEqual((await plain.run(stopped())).err, ['pr-autocreate: PR check failed for feature (plain)']);
+  });
+
+  /** spawn-watchers on a machine with these settings. */
+  async function spawn(sys: FakeSys, stdin: string, args: string[] = ['--root', ROOT, '--remote', 'origin']): Promise<{ code: number; out: string[]; err: string[] }> {
+    const seen = capture();
+    const code = await spawnWatchers(sys, seen.io, args, stdin);
+    return { code, out: seen.out, err: seen.err };
+  }
+  const refLine = (branch: string, local = SHA): string => `refs/heads/${branch} ${local} refs/heads/${branch} ${OTHER}`;
+  const WATCH_LOG = `${ROOT}/${STATE_DIR}/watch.log`;
+
+  it('records the opt-out, then starts one watcher per branch it may open a pull request for', async () => {
+    const sys = clocked();
+    const got = await spawn(sys, [refLine('feature'), refLine('main'), refLine('second', OTHER)].join('\n'));
+    assert.deepEqual(got, { code: 0, out: ['→ PR watcher started for feature, second: a ready PR opens, or a draft where its own commits name no slice or more than one, once the push lands.'], err: [] });
+    assert.deepEqual(sys.detached, [
+      { command: sys.runtime.node, args: [sys.runtime.cli, 'pr-autocreate', 'watch', '--root', ROOT, '--branch', 'feature', '--sha', SHA], cwd: ROOT, log: WATCH_LOG },
+      { command: sys.runtime.node, args: [sys.runtime.cli, 'pr-autocreate', 'watch', '--root', ROOT, '--branch', 'second', '--sha', OTHER], cwd: ROOT, log: WATCH_LOG },
+    ]);
+    assert.equal(sys.files.get(optoutPath(ROOT, 'feature')), `${SHA} 0\n`);
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { draft: true } }));
+    assert.deepEqual((await spawn(sys, refLine('feature'))).out, ['→ PR watcher started for feature: a draft PR opens once the push lands.']);
+  });
+
+  it('starts none for an opted-out push, and refuses the push when its opt-out cannot be recorded', async () => {
+    const sys = clocked();
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { optOut: ['OLD_VAR'] } }));
+    sys.env = { OLD_VAR: '0' };
+    assert.deepEqual(await spawn(sys, refLine('feature')), { code: 0, out: [], err: [] });
+    assert.deepEqual(sys.detached, []);
+    assert.equal(sys.files.get(optoutPath(ROOT, 'feature')), `${SHA} 1\n`);
+    sys.claim = () => {
+      throw new Error('ENOSPC');
+    };
+    assert.deepEqual(await spawn(sys, refLine('feature')), {
+      code: 3,
+      out: ['❌ Could not record NIYAM_PR_AUTOCREATE or OLD_VAR=0 for feature (ENOSPC), so a PR could open for it at turn end; push refused. Fix the cause, or push without the variable.'],
+      err: [],
+    });
+    sys.env = {};
+    assert.deepEqual(await spawn(sys, refLine('feature')), {
+      code: 0,
+      out: [
+        "⚠️  Could not record feature's push for the PR opt-out (ENOSPC); if an earlier push of this commit said NIYAM_PR_AUTOCREATE or OLD_VAR=0, no PR opens for it automatically: open one yourself.",
+        '→ PR watcher started for feature: a ready PR opens, or a draft where its own commits name no slice or more than one, once the push lands.',
+      ],
+      err: [],
+    });
+    sys.claim = () => {
+      throw 'plain';
+    };
+    sys.env = { OLD_VAR: '0' };
+    assert.match((await spawn(sys, refLine('feature'))).out[0] as string, /for feature \(plain\), so a PR could open/);
+  });
+
+  it('says so when a watcher cannot start, and starts none for CI, another remote or arguments it cannot read', async () => {
+    const sys = clocked();
+    sys.detach = () => {
+      throw new Error('EAGAIN');
+    };
+    assert.deepEqual(await spawn(sys, refLine('feature')), { code: 0, out: ['⚠️  Could not start the PR watcher for feature (EAGAIN); open its PR yourself.'], err: [] });
+    sys.detach = () => {
+      throw 'plain';
+    };
+    assert.deepEqual((await spawn(sys, refLine('feature'))).out, ['⚠️  Could not start the PR watcher for feature (plain); open its PR yourself.']);
+    const quiet = clocked();
+    assert.deepEqual(await spawn(quiet, refLine('feature'), ['--root', ROOT]), { code: 0, out: [], err: [] });
+    assert.deepEqual(await spawn(quiet, refLine('feature'), ['--root', ROOT, '--remote', 'fork']), { code: 0, out: [], err: [] });
+    quiet.env = { CI: 'true' };
+    assert.deepEqual(await spawn(quiet, refLine('feature')), { code: 0, out: [], err: [] });
+    assert.deepEqual(quiet.detached, []);
+    assert.deepEqual(await spawn(quiet, refLine('feature'), ['--remote', 'origin']), { code: 0, out: [], err: ['pr-autocreate: spawn-watchers needs --root <repository>; no PR watcher started'] });
+    assert.deepEqual((await spawn(quiet, refLine('feature'), ['--root=/repo', '--remote=origin', '--x'])).err, ['pr-autocreate: unexpected argument "--x"; no PR watcher started']);
+    const torn = clocked();
+    torn.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: [] }));
+    assert.deepEqual(await spawn(torn, refLine('feature')), { code: 0, out: [], err: ['pr-autocreate: .github/niyam.json "prAutocreate" must be an object; no PR watcher started'] });
+  });
+
+  it('reads flags as --name value or --name=value, once each', () => {
+    const sys = clocked();
+    const read = (args: string[]): ReturnType<typeof watchArgs> => watchArgs(sys, args);
+    assert.deepEqual(read(['--root=/r', '--branch', 'b', '--sha=a=b']), { root: '/r', branch: 'b', sha: 'a=b', timeout: 900, interval: 5, retryWindow: 600, retryInterval: 30 });
+    assert.equal(read(['--root=--x', '--branch', 'b', '--sha', 's']).root, '--x');
+    for (const [args, message] of [
+      [['--root', '--x'], '--root needs a value'],
+      [['--root'], '--root needs a value'],
+      [['--root', 'a', '--root', 'b'], '--root is given twice'],
+      [['root=x'], 'unexpected argument "root=x"'],
+      [['--root=', '--branch', 'b', '--sha', 's'], 'watch needs --root'],
+      [['--branch', 'b', '--sha', 's'], 'watch needs --root'],
+      [['--root', 'r', '--sha', 's'], 'watch needs --branch'],
+      [['--root', 'r', '--branch', 'b'], 'watch needs --sha'],
+    ] as const) {
+      assert.throws(() => read([...args]), { message }, JSON.stringify(args));
+    }
+  });
+
+  it('takes timings from flags, then NIYAM_PR_* variables, then defaults, as whole or fractional seconds', () => {
+    const sys = clocked();
+    const base = ['--root', 'r', '--branch', 'b', '--sha', 's'];
+    sys.env = { NIYAM_PR_WATCH_TIMEOUT: '7', NIYAM_PR_WATCH_INTERVAL: ' ', NIYAM_PR_RETRY_WINDOW: '0', NIYAM_PR_RETRY_INTERVAL: '1.5' };
+    assert.deepEqual(watchArgs(sys, [...base, '--timeout', '3']), { root: 'r', branch: 'b', sha: 's', timeout: 3, interval: 5, retryWindow: 0, retryInterval: 1.5 });
+    for (const [flag, value] of [['--timeout', 'abc'], ['--interval', '-1'], ['--retry-window', 'Infinity'], ['--retry-interval', 'x']] as const) {
+      assert.throws(() => watchArgs(sys, [...base, `${flag}=${value}`]), { message: `${flag} must be a number of seconds` });
+    }
+  });
+
+  it("reads git's ref lines whatever the spaces around and between them", () => {
+    assert.deepEqual(pushedRefs(`  refs/heads/a ${SHA}  refs/heads/b\t${OTHER}  \n`), [{ localSha: SHA, branch: 'b', remoteSha: OTHER }]);
+  });
+
+  /** refuse-retired on a FakeSys, GitHub faked. */
+  async function refuse(sys: FakeSys, github: FakeGitHub, stdin: string, args: string[] = ['--root', ROOT, '--remote', 'origin']) {
+    const seen = capture();
+    let asked = 0;
+    const code = await refuseRetired(sys, seen.io, args, stdin, (on) => {
+      asked++;
+      sys.http = github.http as FakeSys['http'];
+      return new Pulls(on, SLUG, 't', false);
+    });
+    return { code, out: seen.out, err: seen.err, asked };
+  }
+
+  it('refuses a push to a retired branch, naming the way out, and asks nothing with no branch to judge', async () => {
+    const sys = clocked();
+    const github = new FakeGitHub();
+    github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' });
+    assert.deepEqual(await refuse(sys, github, refLine('feature'), ['--root=/repo', '--remote=origin']), {
+      code: RETIRED_REFUSAL,
+      out: [
+        '❌ Error: feature already has MERGED PR #7 and no open PR. Pushing it',
+        '   recreates a branch the merge retired, and the commits after the merge land in no PR.',
+        '   Move the commits missing from the PR head to a fresh branch, then push that.',
+      ],
+      err: [],
+      asked: 1,
+    });
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { retire: 'tool retire --pr {number} # {number}' } }));
+    assert.deepEqual((await refuse(sys, github, refLine('feature'))).out.slice(2), ['   Retire it: move the commits missing from the PR head to a fresh branch, then push that:', '     tool retire --pr 7 # 7']);
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: { retired: 'https://x.invalid/r' } }));
+    assert.deepEqual((await refuse(sys, github, refLine('feature'))).out.slice(2), ['   Move the commits missing from the PR head to a fresh branch, then push that (https://x.invalid/r).']);
+    assert.deepEqual(await refuse(sys, github, refLine('main')), { code: 0, out: [], err: [], asked: 0 });
+    assert.deepEqual(await refuse(sys, github, refLine('feature'), ['--root', ROOT]), { code: 0, out: [], err: [], asked: 0 });
+  });
+
+  /** watch on a FakeSys whose ls-remote answers `heads` in turn, the last again and again, GitHub faked. */
+  async function watching(heads: { code: number; stdout: string }[], over: Record<string, string> = {}, setUp: (sys: FakeSys, github: FakeGitHub) => void = () => undefined) {
+    const sys = clocked();
+    sys.files.delete(`${ROOT}/.github/niyam.json`);
+    const github = new FakeGitHub();
+    sys.http = github.http as FakeSys['http'];
+    let at = 0;
+    sys.execOverride = (call) => {
+      if (call.command !== 'git') return undefined;
+      if (call.args[0] === 'ls-remote') {
+        assert.deepEqual([call.args, call.cwd, call.timeoutMs], [['ls-remote', 'origin', 'refs/heads/feature'], ROOT, 30_000]);
+        const answer = heads[Math.min(at++, heads.length - 1)] as { code: number; stdout: string };
+        return { ...answer, stderr: '' };
+      }
+      const out = GIT[call.args.join(' ')];
+      return out === undefined ? { code: 1, stdout: '', stderr: 'no' } : { code: 0, stdout: `${out}\n`, stderr: '' };
+    };
+    setUp(sys, github);
+    const seen = capture();
+    const flags = Object.entries({ '--root': ROOT, '--branch': 'feature', '--sha': SHA, '--interval': '5', '--timeout': '12', '--retry-window': '60', '--retry-interval': '30', ...over });
+    const code = await watch(sys, seen.io, flags.flat(), (on) => new Pulls(on, SLUG, 't', false));
+    const lines = seen.out.map((line) => line.slice(20));
+    return { code, out: seen.out, lines, sys, github };
+  }
+  const LANDED = { code: 0, stdout: `${SHA}\trefs/heads/feature\n` };
+
+  it('waits for the push to land, then opens the pull request and logs it', async () => {
+    const got = await watching([{ code: 0, stdout: '' }, { code: 2, stdout: `${SHA}\trefs/heads/feature\n` }, { code: 0, stdout: `${OTHER}\trefs/heads/feature\n` }, LANDED]);
+    assert.deepEqual(got.lines, [`feature: PR #100 created (${PR_URL})`]);
+    assert.deepEqual(got.sys.slept, [5000, 5000, 5000]);
+    assert.match(got.out[0] as string, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d feature: /);
+  });
+
+  it('gives up when the push never lands within its time', async () => {
+    const got = await watching([{ code: 0, stdout: '' }]);
+    assert.deepEqual(got.lines, ['feature: gave up: aaaaaaaa never reached refs/heads/feature within 12s; no PR opened']);
+    assert.deepEqual(got.sys.slept, [5000, 5000, 5000]);
+  });
+
+  it('logs a pull request found, or none for an opted-out push, with its notes', async () => {
+    const found = await watching([LANDED], {}, (_, github) => github.pulls.push({ number: 7, head: 'feature', state: 'open', merged_at: null, body: 'Real.' }));
+    assert.deepEqual(found.lines, [`feature: PR #7 exists (https://github.com/${SLUG}/pull/7)`]);
+    const opted = await watching([LANDED], {}, (sys) => sys.files.set(optoutPath(ROOT, 'feature'), `${SHA} 1\n`));
+    assert.deepEqual(opted.lines, ['feature: no PR']);
+    const merged = await watching([LANDED], {}, (_, github) => github.pulls.push({ number: 7, head: 'feature', state: 'closed', merged_at: '2026-11-14T00:00:00Z', body: '' }));
+    assert.deepEqual(merged.lines, ['feature: Branch feature already has MERGED PR #7, so no new PR was opened: a merged PR retires its branch.']);
+  });
+
+  it('retries GitHub within its window, then gives up', async () => {
+    const got = await watching([LANDED], {}, (_, github) => {
+      for (let n = 0; n < 5; n++) github.queued.push({ status: 502, json: null });
+    });
+    const retrying = 'feature: could not list PRs for feature (GitHub answered 502 listing pull requests); will retry; retrying';
+    assert.deepEqual(got.lines, [retrying, retrying, 'feature: gave up: could not list PRs for feature (GitHub answered 502 listing pull requests); will retry, after 60s of retries']);
+    assert.deepEqual(got.sys.slept, [30_000, 30_000]);
+    const crashed = await watching([LANDED], { '--retry-window': '0' }, (sys) => {
+      sys.claim = () => {
+        throw new Error('EIO');
+      };
+    });
+    assert.deepEqual(crashed.lines, ['feature: gave up: EIO, after 0s of retries']);
+    const plain = await watching([LANDED], { '--retry-window': '0' }, (sys) => {
+      sys.claim = () => {
+        throw 'plain';
+      };
+    });
+    assert.deepEqual(plain.lines, ['feature: gave up: plain, after 0s of retries']);
+  });
+
+  it('gives up on settings it cannot read, and on arguments, opening nothing', async () => {
+    const torn = await watching([LANDED], {}, (sys) => sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ prAutocreate: [] })));
+    assert.deepEqual(torn.lines, ['feature: gave up: .github/niyam.json "prAutocreate" must be an object; no PR opened']);
+    assert.equal(torn.github.calls.length, 0);
+    const seen = capture();
+    assert.equal(await watch(clocked(), seen.io, ['--root', ROOT]), 0);
+    assert.deepEqual(seen.out.map((line) => line.slice(20)), ['watch: watch needs --branch; no PR opened']);
+  });
+
+  it('runs each mode from the CLI, saying nothing of a mode it knows', async () => {
+    const sys = clocked();
+    sys.files.delete(`${ROOT}/.github/niyam.json`);
+    sys.stdin = refLine('feature');
+    const spawned = capture();
+    assert.equal(await prAutocreate(sys, spawned.io, ['spawn-watchers', '--root', ROOT, '--remote', 'origin']), 0);
+    assert.deepEqual(spawned.err, []);
+    assert.equal(sys.detached.length, 1);
+    sys.stdin = '{}';
+    const hooked = capture();
+    assert.equal(await prAutocreate(sys, hooked.io, ['claude-hook']), 0);
+    assert.deepEqual([hooked.out, hooked.err], [[], []]);
   });
 });
 
