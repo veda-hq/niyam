@@ -73,6 +73,8 @@ describe('signalArgs', () => {
     [['7', '--wait', '--timeout', '9m'], /^Error: --timeout takes whole minutes from 1/],
     [['7', '--wait', '--timeout', 'x9'], /^Error: --timeout takes whole minutes from 1/],
     [['7', '--wait', '--timeout', '9'.repeat(20)], /^Error: --timeout takes whole minutes from 1/],
+    [['7', '--wait', '--timeout', ' 9'], /^Error: --timeout takes whole minutes from 1/],
+    [['7', '--wait', '--timeout', '9 '], /^Error: --timeout takes whole minutes from 1/],
   ] as const) {
     it(`refuses ${JSON.stringify(args)}`, () => assert.throws(() => signalArgs(args), message));
   }
@@ -1537,6 +1539,10 @@ describe('pr-signals --wait', () => {
     assert.equal((await run(unjudged, ['7', '--wait', '--timeout', '1'])).code, 7);
     const failing = waiting([[done(1, 'ci', 'failure'), going(2, 'lane')]]);
     assert.equal((await run(failing, ['7', '--wait', '--timeout', '1'])).code, 8);
+    // Green on the last poll alone, with no second poll to agree: still pending, with only the timeout's line.
+    const late = waiting([[going(1)], [going(1)], [done(1)]]);
+    const lateResult = await run(late, ['7', '--wait', '--timeout', '1']);
+    assert.deepEqual([lateResult.code, (parsed(lateResult).ci as { verdict: string }).verdict, lateResult.err], [8, 'green', ['⚠ CI on #7 did not settle within 1 minute(s); the last poll read it as green']]);
   });
 
   it('says when a push moves the head, and counts again on the new one', async () => {
