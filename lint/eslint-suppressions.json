@@ -290,7 +290,7 @@
   },
   "src/onboard.ts": {
     "shuddhi/no-raw-error-string": {
-      "count": 7
+      "count": 6
     },
     "shuddhi/no-swallowed-catch": {
       "count": 5
