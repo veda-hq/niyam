@@ -805,7 +805,7 @@ export function agreed(last: Poll | undefined, now: Poll): boolean {
  * logs, threads or findings) until two polls in a row agree, then returns the pull request as the last poll read it,
  * for the full read. Returns the exit
  * instead when the pull request merged or closed meanwhile (3 or 4), or when `minutes` ran out, after printing the
- * last poll: 7 still short or unjudged, else 8.
+ * last poll: 7 still short, else 8.
  */
 async function waitForCi(sys: Sys, io: Output, token: string, slug: string, pr: number, first: Pull, minutes: number, minCheckRuns: number | undefined): Promise<{ exit: number } | { pull: Pull }> {
   const deadline = sys.now().getTime() + minutes * 60_000;
@@ -819,7 +819,7 @@ async function waitForCi(sys: Sys, io: Output, token: string, slug: string, pr: 
     if (agreed(last, now)) return { pull };
     last = now;
     if (sys.now().getTime() >= deadline) {
-      const exit = judged.verdict === 'short' || judged.verdict === 'unjudged' ? WAIT_EXIT.short : WAIT_EXIT.pending;
+      const exit = judged.verdict === 'short' ? WAIT_EXIT.short : WAIT_EXIT.pending;
       io.err(`⚠ CI on #${pr} did not settle within ${minutes} minute(s); the last poll read it as ${judged.verdict}`);
       const line = verdictLine(pr, pull.head, judged);
       if (line) io.err(line);

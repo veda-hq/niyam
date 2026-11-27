@@ -1541,14 +1541,14 @@ describe('pr-signals --wait', () => {
     assert.equal(reads(sys, '/graphql'), 0);
   });
 
-  it('at the timeout, exits 8 while pending, and 7 while unjudged', async () => {
+  it('at the timeout, exits 8 while pending; unjudged ends before it, whatever still runs', async () => {
     const pending = waiting([[going(1)]]);
     const result = await run(pending, ['7', '--wait', '--timeout', '2']);
     assert.deepEqual([result.code, pending.slept.length, (parsed(result).ci as { verdict: string }).verdict], [8, 4, 'pending']);
     assert.equal(result.err[0], '⚠ CI on #7 did not settle within 2 minute(s); the last poll read it as pending');
     const unjudged = waiting([[going(1)]]);
     unjudged.route('GET', `${RULES}?per_page=100&page=1`, { status: 403, json: null });
-    assert.equal((await run(unjudged, ['7', '--wait', '--timeout', '1'])).code, 7);
+    assert.deepEqual([(await run(unjudged, ['7', '--wait', '--timeout', '1'])).code, unjudged.slept.length], [7, 1]);
     // A failure that a newer run replaced, still going, is pending, not failed.
     const rerun = waiting([[done(1, 'ci', 'failure'), going(2)]]);
     assert.equal((await run(rerun, ['7', '--wait', '--timeout', '1'])).code, 8);
