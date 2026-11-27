@@ -48,7 +48,7 @@
     "@veda-hq/agnipariksha": "0.8.8",
     "@veda-hq/dvara": "0.8.1",
     "@veda-hq/pariksha": "0.7.20",
-    "@veda-hq/sarathi": "0.8.9",
+    "@veda-hq/sarathi": "0.8.17",
     "typescript": "7.0.2"
   },
   "dependencies": {
