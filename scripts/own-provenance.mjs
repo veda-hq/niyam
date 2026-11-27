@@ -48,6 +48,9 @@ export const signingPolicy = version => ({
   extensions: { issuer: ISSUER },
 });
 
+/** How many Rekor entries, certificate timestamps and timestamps a bundle must carry: one of each. */
+export const THRESHOLDS = Object.freeze({ tlogThreshold: 1, ctlogThreshold: 1, timestampThreshold: 1 });
+
 /**
  * A function that verifies a Sigstore bundle against a policy and throws when
  * it does not verify, trusting only the trusted root in `rootText`.
@@ -55,11 +58,7 @@ export const signingPolicy = version => ({
  * @returns {(bundle: unknown, policy: ReturnType<typeof signingPolicy>) => void}
  */
 export function bundleVerifier(rootText) {
-  const verifier = new Verifier(toTrustMaterial(TrustedRoot.fromJSON(JSON.parse(rootText))), {
-    tlogThreshold: 1,
-    ctlogThreshold: 1,
-    timestampThreshold: 1,
-  });
+  const verifier = new Verifier(toTrustMaterial(TrustedRoot.fromJSON(JSON.parse(rootText))), THRESHOLDS);
   return (bundle, policy) => {
     verifier.verify(toSignedEntity(bundleFromJSON(bundle)), policy);
   };
@@ -131,8 +130,8 @@ export function provenanceFailures(pkg, document, verifyBundle) {
     if (workflow[key] !== value) failures.push(`${at}: built with workflow ${key} ${JSON.stringify(workflow[key] ?? null)}, not ${JSON.stringify(value)}`);
   }
   const digest = Buffer.from(pkg.integrity.slice('sha512-'.length), 'base64').toString('hex');
-  const subjects = Array.isArray(statement?.subject) ? statement.subject : [];
-  if (!subjects.some(s => s?.digest?.sha512 === digest)) failures.push(`${at}: the attested tarball is not the one the lockfile installs`);
+  const attested = Array.isArray(statement?.subject) && statement.subject.some(s => s?.digest?.sha512 === digest);
+  if (!attested) failures.push(`${at}: the attested tarball is not the one the lockfile installs`);
   return failures;
 }
 
@@ -160,21 +159,62 @@ export async function check(lockText, fetchJson, verifyBundle) {
   return { packages, failures };
 }
 
-/* node:coverage disable */
-/** @param {string} url */
-async function fetchJson(url) {
-  const response = await fetch(url);
+/**
+ * The JSON `doFetch` answers for `url`, or a failure naming the status.
+ * @param {string} url @param {(url: string) => Promise<{ ok: boolean, status: number, json: () => Promise<unknown> }>} doFetch
+ */
+export async function fetchJson(url, doFetch) {
+  const response = await doFetch(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const { packages, failures } = await check(readFileSync('pnpm-lock.yaml', 'utf8'), fetchJson, bundleVerifier(readFileSync(TRUSTED_ROOT, 'utf8')));
-  for (const failure of failures) console.error(`own-provenance: ${failure}`);
+/**
+ * @typedef {{ readText: (path: string) => string, getJson: (url: string) => Promise<unknown>, log: (line: string) => void, error: (line: string) => void }} Io
+ */
+
+/** The machine's own: files read as text, the registry over fetch, and the console. @type {Io} */
+export const IO = {
+  readText: path => readFileSync(path, 'utf8'),
+  getJson: url => fetchJson(url, fetch),
+  log: line => console.log(line),
+  error: line => console.error(line),
+};
+
+/**
+ * Checks the lockfile in the working directory: 0 when every own package is veda's release, else 1, each failure said.
+ * @param {Io} io
+ * @returns {Promise<number>}
+ */
+export async function main(io) {
+  const { packages, failures } = await check(io.readText('pnpm-lock.yaml'), io.getJson, bundleVerifier(io.readText(TRUSTED_ROOT)));
+  for (const failure of failures) io.error(`own-provenance: ${failure}`);
   if (failures.length > 0) {
-    console.error(`own-provenance: ${SCOPE}* skips the release age only when veda's release built it.`);
-    process.exit(1);
+    io.error(`own-provenance: ${SCOPE}* skips the release age only when veda's release built it.`);
+    return 1;
   }
-  console.log(`own-provenance: ${packages.map(p => `${p.name}@${p.version}`).join(', ')} built and signed by ${REPOSITORY} ${WORKFLOW}`);
+  io.log(passed(packages));
+  return 0;
 }
-/* node:coverage enable */
+
+/**
+ * What a pass says: each package checked, and who built and signed it.
+ * @param {{ name: string, version: string }[]} packages
+ */
+export const passed = packages => `own-provenance: ${packages.map(p => `${p.name}@${p.version}`).join(', ')} built and signed by ${REPOSITORY} ${WORKFLOW}`;
+
+/**
+ * Exits with main's code where `argv` runs the file at `url`; does nothing where something imported it.
+ * @param {string[]} argv @param {string} url @param {Io} io @param {(code: number) => void} exit
+ */
+export async function entry(argv, url, io, exit) {
+  if (!argv[1] || url !== pathToFileURL(argv[1]).href) return;
+  exit(await main(io));
+}
+
+/** The code the process exits with once the run ends. @param {number} code */
+export function setExitCode(code) {
+  process.exitCode = code;
+}
+
+await entry(process.argv, import.meta.url, IO, setExitCode);

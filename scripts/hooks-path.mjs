@@ -7,7 +7,7 @@
 // and the hooks stay dormant until the main checkout installs. CI sets
 // nothing. A hooksPath someone else set is theirs: it is left as it is, with
 // a note saying what to add.
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -41,13 +41,15 @@ export function decide(git, env) {
   return { set: true, say: `hooks-path: git now runs the hooks in ${HOOKS}/ (dvara's gates, then niyam's pre-push)` };
 }
 
-/** @type {Git} */
+/**
+ * Git's stdout, trimmed, or undefined when it fails, cannot start or runs
+ * past 10 s; its stderr is read and dropped, as `pnpm install` should not
+ * print git's complaints about a checkout that is no git repository.
+ * @type {Git}
+ */
 export function realGit(args) {
-  try {
-    return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim();
-  } catch {
-    return undefined;
-  }
+  const run = spawnSync('git', args, { encoding: 'utf8', timeout: 10_000 });
+  return run.status === 0 ? run.stdout.trim() : undefined;
 }
 
 /**
@@ -71,4 +73,20 @@ export function toStderr(line) {
   console.error(line);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) process.exit(main(realGit, process.env, toStderr));
+/**
+ * Exits with main's code where `argv` runs the file at `url`, as `pnpm
+ * install` does; does nothing where something imported it.
+ * @param {string[]} argv @param {string} url @param {Git} git
+ * @param {Record<string, string | undefined>} env @param {(line: string) => void} say @param {(code: number) => void} exit
+ */
+export function entry(argv, url, git, env, say, exit) {
+  if (!argv[1] || url !== pathToFileURL(argv[1]).href) return;
+  exit(main(git, env, say));
+}
+
+/** The code the process exits with once the run ends. @param {number} code */
+export function setExitCode(code) {
+  process.exitCode = code;
+}
+
+await entry(process.argv, import.meta.url, realGit, process.env, toStderr, setExitCode);

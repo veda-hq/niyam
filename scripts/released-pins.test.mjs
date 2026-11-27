@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 
-import { main, problems } from './released-pins.mjs';
+import { entry, main, problems, setExitCode } from './released-pins.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'released-pins-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -135,6 +136,39 @@ describe('problems', () => {
     writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: "9.0"\n');
     assert.match(problems(root)[0], /is not in pnpm-lock.yaml/);
   });
+
+  test('takes an exact pin of any width, and nothing more', () => {
+    for (const pin of ['10.20.30', '0.10.0']) assert.deepEqual(problems(repo({ pins: { [DVARA]: pin }, installed: { [DVARA]: pin } })), [], pin);
+    assert.deepEqual(problems(repo({ pins: { [DVARA]: '0.5.16-rc.1' } })), [`${DVARA} is pinned as "0.5.16-rc.1", not as an exact released version`]);
+  });
+
+  test('reads past documents that hold no project: an empty one, or one with no project importer', () => {
+    const project = PROJECT({ [DVARA]: { specifier: '0.5.16', version: '0.5.16' } }, { [`${DVARA}@0.5.16`]: { integrity: 'sha512-abc' } });
+    for (const first of ['', 'importers: {}']) {
+      const root = repo({ pins: { [DVARA]: '0.5.16' }, installed: { [DVARA]: '0.5.16' } });
+      writeFileSync(join(root, 'pnpm-lock.yaml'), ['---', first, '---', project, ''].join('\n'));
+      assert.deepEqual(problems(root), [], JSON.stringify(first));
+    }
+  });
+
+  test('finds no integrity hash where the lockfile holds other packages but not the pin', () => {
+    const lock = { deps: { [DVARA]: { specifier: '0.5.16', version: '0.5.16' } }, packages: { '@veda-hq/other@1.0.0': { integrity: 'sha512-abc' } } };
+    assert.match(problems(repo({ pins: { [DVARA]: '0.5.16' }, lock }))[0], /no integrity hash for @veda-hq\/dvara@0.5.16/);
+  });
+
+  test('takes a registry version whose peer suffix names a link', () => {
+    const lock = { deps: { [DVARA]: { specifier: '0.5.16', version: '0.5.16(peer@link:../x)' } }, packages: { [`${DVARA}@0.5.16`]: { integrity: 'sha512-abc' } } };
+    assert.deepEqual(problems(repo({ pins: { [DVARA]: '0.5.16' }, lock, installed: { [DVARA]: '0.5.16' } })), []);
+  });
+
+  test("refuses a package laid out in node_modules outside pnpm's store, and a folder there with no package.json", () => {
+    const loose = repo({ pins: { [DVARA]: '0.5.16' } });
+    const dir = join(loose, 'node_modules', '@veda-hq', 'dvara');
+    mkdirSync(dir, { recursive: true });
+    assert.deepEqual(problems(loose), [`${DVARA} 0.5.16 is not installed in ${loose}; run pnpm install there`]);
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: DVARA, version: '0.5.16' }));
+    assert.deepEqual(problems(loose), [`${DVARA} resolves to ${join('node_modules', '@veda-hq', 'dvara')}, a folder of this checkout, not the released 0.5.16`]);
+  });
 });
 
 describe('main', () => {
@@ -153,5 +187,45 @@ describe('main', () => {
   test('reads the current directory by default', (t) => {
     t.mock.method(process, 'cwd', () => repo({ pins: { [DVARA]: '0.5.16' }, installed: { [DVARA]: '0.5.16' } }));
     assert.equal(main([]), 0);
+  });
+
+  test('checks only the packages named, before or after --root', (t) => {
+    const errors = [];
+    t.mock.method(console, 'error', (line) => errors.push(line));
+    const good = repo({ pins: { [DVARA]: '0.5.16' }, installed: { [DVARA]: '0.5.16' } });
+    assert.equal(main(['@veda-hq/sarathi', '--root', good, '@veda-hq/kavach']), 1);
+    assert.deepEqual(errors, ['released-pins: @veda-hq/sarathi is not a devDependency of package.json', 'released-pins: @veda-hq/kavach is not a devDependency of package.json']);
+  });
+});
+
+describe('entry', () => {
+  const url = new URL('./released-pins.mjs', import.meta.url).href;
+
+  test('run as the file, it checks the folder named and exits with what main gives', (t) => {
+    t.mock.method(console, 'error', () => {});
+    const good = repo({ pins: { [DVARA]: '0.5.16' }, installed: { [DVARA]: '0.5.16' } });
+    const exits = [];
+    entry(['node', fileURLToPath(url), '--root', good], url, (code) => exits.push(code));
+    entry(['node', fileURLToPath(url), '--root'], url, (code) => exits.push(code));
+    assert.deepEqual(exits, [0, 2]);
+  });
+
+  test('setExitCode sets the code the process exits with', () => {
+    const before = process.exitCode;
+    try {
+      setExitCode(5);
+      assert.equal(process.exitCode, 5);
+    } finally {
+      process.exitCode = before;
+    }
+  });
+
+  test('imported, it checks and exits nothing', (t) => {
+    assert.equal(process.exitCode, undefined, 'importing it set no exit code');
+    const cwd = t.mock.method(process, 'cwd', () => assert.fail('nothing runs on import'));
+    const never = () => assert.fail('nothing exits on import');
+    entry(['node', '/repo/scripts/other.mjs', '--root'], url, never);
+    entry(['node'], url, never);
+    assert.equal(cwd.mock.callCount(), 0);
   });
 });

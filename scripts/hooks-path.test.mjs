@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decide, HOOKS, main, realGit, toStderr } from './hooks-path.mjs';
+import { fileURLToPath } from 'node:url';
+
+import { decide, entry, HOOKS, main, realGit, setExitCode, toStderr } from './hooks-path.mjs';
 
 /** A git that answers from `config`, recording each call. */
 function fakeGit({ gitDir = '/repo/.git', commonDir = '/repo/.git', hooksPath, setFails = false } = {}) {
@@ -39,6 +41,12 @@ describe('decide', () => {
     ]) {
       assert.deepEqual(decide(git, env), { set: false, say: '' });
     }
+  });
+
+  test('asks git where the checkout keeps its folders, then for the hooks path, to the letter', () => {
+    const { git, calls } = fakeGit();
+    decide(git, {});
+    assert.deepEqual(calls, ['rev-parse --path-format=absolute --git-dir', 'rev-parse --path-format=absolute --git-common-dir', 'config --local --get core.hooksPath']);
   });
 
   test("leaves someone else's hooks folder alone, saying what to add", () => {
@@ -102,6 +110,37 @@ describe('realGit', () => {
     process.chdir(main_);
     assert.equal(main(realGit, {}, () => {}), 0);
     assert.equal(realGit(['config', '--local', '--get', 'core.hooksPath']), HOOKS);
+  });
+});
+
+describe('entry', () => {
+  const url = new URL('./hooks-path.mjs', import.meta.url).href;
+
+  test('run as the file, as pnpm install runs it, it exits with what main gives', () => {
+    const { git, calls } = fakeGit();
+    const said = [];
+    const exits = [];
+    entry(['node', fileURLToPath(url)], url, git, {}, (line) => said.push(line), (code) => exits.push(code));
+    assert.deepEqual(exits, [0]);
+    assert.ok(calls.includes(`config --local core.hooksPath ${HOOKS}`));
+    assert.equal(said.length, 1);
+  });
+
+  test('imported, it asks, says and exits nothing', () => {
+    assert.equal(process.exitCode, undefined, 'importing it set no exit code');
+    const never = () => assert.fail('nothing runs on import');
+    entry(['node', '/repo/scripts/other.mjs'], url, never, {}, never, never);
+    entry(['node'], url, never, {}, never, never);
+  });
+
+  test('setExitCode sets the code the process exits with', () => {
+    const before = process.exitCode;
+    try {
+      setExitCode(5);
+      assert.equal(process.exitCode, 5);
+    } finally {
+      process.exitCode = before;
+    }
   });
 });
 
