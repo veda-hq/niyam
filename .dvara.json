@@ -3,7 +3,7 @@
   "quietHooks": ["pre-commit"],
   "stages": {
     "pre-commit": ["records", "frozen"],
-    "pre-push": ["records", "frozen", "pins", "niyam"]
+    "pre-push": ["records", "frozen", "pins", "mutation", "niyam"]
   },
   "records": {
     "baseline": ".dvara/records-baseline.json",

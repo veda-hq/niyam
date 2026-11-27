@@ -1,8 +1,9 @@
 // .githooks/, run by git in a throwaway repository laid out as niyam is: the
 // hooks, released-pins.mjs, a package.json pinning dvara with its lockfile
 // entry, and that dvara installed (linked to this checkout's install, which
-// `pnpm install` must have laid out, as in CI). `niyam` on PATH is a
-// stand-in that records its arguments and the refs git gave the hook.
+// `pnpm install` must have laid out, as in CI). `niyam` on PATH and the
+// installed `agnipariksha` are stand-ins that record their arguments and the
+// refs git gave the hook; agnipariksha exits with AGNIPARIKSHA_EXIT.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,11 +20,12 @@ after(() => rmSync(scratch, { recursive: true, force: true }));
 
 const bin = join(scratch, 'bin');
 const niyamCalls = join(scratch, 'niyam-calls');
+const gateCalls = join(scratch, 'agnipariksha-calls');
 // HOME is the scratch folder, so the hook finds the stand-in niyam on PATH,
 // never this machine's launcher.
-const env = { ...process.env, HOME: scratch, PATH: `${bin}${delimiter}${process.env.PATH}`, NIYAM_CALLS: niyamCalls };
+const env = { ...process.env, HOME: scratch, PATH: `${bin}${delimiter}${process.env.PATH}`, NIYAM_CALLS: niyamCalls, AGNIPARIKSHA_CALLS: gateCalls };
 for (const name of Object.keys(env)) {
-  if (name.startsWith('DVARA_') || name.startsWith('GIT_') || name === 'NIYAM_AGENT' || name === 'CLAUDECODE') delete env[name];
+  if (name.startsWith('DVARA_') || name.startsWith('GIT_') || name === 'NIYAM_AGENT' || name === 'CLAUDECODE' || name === 'AGNIPARIKSHA_EXIT') delete env[name];
 }
 // No machine git config, and no automatic maintenance: a commit's detached
 // `git maintenance run --auto` outlives it and can write into the scratch
@@ -61,6 +63,9 @@ before(() => {
   // released-pins reads the lockfile with yaml, which resolves from the script's own folder upward.
   symlinkSync(realpathSync(join(ROOT, 'node_modules', 'yaml')), join(repo, 'node_modules', 'yaml'));
   symlinkSync(realpathSync(join(ROOT, 'node_modules', DVARA)), join(repo, 'node_modules', DVARA));
+  mkdirSync(join(repo, 'node_modules', '.bin'));
+  writeFileSync(join(repo, 'node_modules', '.bin', 'agnipariksha'), '#!/bin/sh\n{ echo "args: $*"; cat; } >> "$AGNIPARIKSHA_CALLS"\nexit "${AGNIPARIKSHA_EXIT:-0}"\n');
+  chmodSync(join(repo, 'node_modules', '.bin', 'agnipariksha'), 0o755);
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ devDependencies: { [DVARA]: PIN } }));
   writeFileSync(
     join(repo, 'pnpm-lock.yaml'),
@@ -157,6 +162,29 @@ describe('pre-push', () => {
       writeFileSync(join(bin, 'niyam'), '#!/bin/sh\n{ echo "args: $*"; cat; } >> "$NIYAM_CALLS"\n');
       chmodSync(join(bin, 'niyam'), 0o755);
     }
+  });
+
+  test("runs the pinned agnipariksha on the tracked files and git's refs", () => {
+    rmSync(gateCalls, { force: true });
+    writeFileSync(join(repo, 'four.md'), 'fourth\n');
+    git(repo, ['add', 'four.md']);
+    assert.equal(git(repo, ['commit', '-q', '-m', 'fourth']).code, 0);
+    const head = git(repo, ['rev-parse', 'HEAD']).stdout;
+    const result = git(repo, ['push', '-q', 'origin', 'main']);
+    assert.equal(result.code, 0, result.out);
+    const calls = readFileSync(gateCalls, 'utf8');
+    assert.match(calls, /^args: --tracked-only --pushed-refs --base origin\/main$/m);
+    assert.match(calls, new RegExp(`^refs/heads/main ${head} refs/heads/main [0-9a-f]{40}$`, 'm'));
+  });
+
+  test('refuses a push agnipariksha refuses, before niyam runs', () => {
+    rmSync(niyamCalls, { force: true });
+    writeFileSync(join(repo, 'five.md'), 'fifth\n');
+    git(repo, ['add', 'five.md']);
+    assert.equal(git(repo, ['commit', '-q', '-m', 'fifth']).code, 0);
+    const result = git(repo, ['push', '-q', 'origin', 'main'], { CLAUDECODE: '1', AGNIPARIKSHA_EXIT: '1' });
+    assert.notEqual(result.code, 0);
+    assert.ok(!existsSync(niyamCalls), 'the mutation stage refuses before niyam pre-push runs');
   });
 
   test('refuses a push whose pins are not registry releases', () => {

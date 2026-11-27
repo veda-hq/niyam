@@ -7,11 +7,10 @@ name: Mutation
 # changed file judges nothing and passes, so the lanes are listed, not
 # planned.
 #
-# Until the sweep has killed every existing mutant (#580), a surviving or
-# uncovered mutant is a warning, not a failure: a gate on changed files would
-# otherwise block a change by mutants it did not make. A refusal (exit 2: a
-# bad config, a failed dry run) still fails. The sweep's last slice makes exit
-# 1 fail and asks for Mutation to be required by main's ruleset.
+# A surviving or uncovered mutant in a changed file (exit 1) fails its lane,
+# as a refusal (exit 2: a bad config, a failed dry run) does (#706). Each
+# lane is named, so agnipariksha.json's maxLines cut-off never leaves one out
+# here: this is where a change the pre-push hook left to CI is judged.
 #
 # No `paths:` filter, so the check reports on every pull request, and no
 # `workflow_dispatch`, whose run would post the gate as skipped on the pull
@@ -64,7 +63,7 @@ jobs:
           node_modules/.bin/agnipariksha --lane "$LANE" --base "origin/$BASE_REF" --tracked-only --no-reuse || status=$?
           case "$status" in
             0) ;;
-            1) echo "::warning title=Mutation ($LANE)::a mutant no test kills is left in a changed file; it is reported, not blocking, until the sweep ends (#580)" ;;
+            1) echo "::error title=Mutation ($LANE)::a mutant no test kills is left in a changed file"; exit 1 ;;
             *) echo "::error title=Mutation ($LANE)::agnipariksha refused or could not judge (exit $status)"; exit "$status" ;;
           esac
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
