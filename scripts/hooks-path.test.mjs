@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decide, HOOKS, main, realGit, toStderr } from './hooks-path.mjs';
+import { fileURLToPath } from 'node:url';
+
+import { decide, entry, HOOKS, main, realGit, toStderr } from './hooks-path.mjs';
 
 /** A git that answers from `config`, recording each call. */
 function fakeGit({ gitDir = '/repo/.git', commonDir = '/repo/.git', hooksPath, setFails = false } = {}) {
@@ -39,6 +41,12 @@ describe('decide', () => {
     ]) {
       assert.deepEqual(decide(git, env), { set: false, say: '' });
     }
+  });
+
+  test('asks git where the checkout keeps its folders, then for the hooks path, to the letter', () => {
+    const { git, calls } = fakeGit();
+    decide(git, {});
+    assert.deepEqual(calls, ['rev-parse --path-format=absolute --git-dir', 'rev-parse --path-format=absolute --git-common-dir', 'config --local --get core.hooksPath']);
   });
 
   test("leaves someone else's hooks folder alone, saying what to add", () => {
@@ -102,6 +110,32 @@ describe('realGit', () => {
     process.chdir(main_);
     assert.equal(main(realGit, {}, () => {}), 0);
     assert.equal(realGit(['config', '--local', '--get', 'core.hooksPath']), HOOKS);
+  });
+});
+
+describe('entry', () => {
+  const url = new URL('./hooks-path.mjs', import.meta.url).href;
+
+  test('run as the file, as pnpm install runs it, it runs main', () => {
+    const { git, calls } = fakeGit();
+    const said = [];
+    assert.equal(entry(['node', fileURLToPath(url)], url, git, {}, (line) => said.push(line)), 0);
+    assert.ok(calls.includes(`config --local core.hooksPath ${HOOKS}`));
+    assert.equal(said.length, 1);
+  });
+
+  test('imported, it asks and says nothing, and leaves the exit code as it was', async () => {
+    const never = () => assert.fail('nothing runs on import');
+    assert.equal(entry(['node', '/repo/scripts/other.mjs'], url, never, {}, never), undefined);
+    assert.equal(entry(['node'], url, never, {}, never), undefined);
+    const before = process.exitCode;
+    process.exitCode = 7;
+    try {
+      await import(`${url}?imported`);
+      assert.equal(process.exitCode, 7);
+    } finally {
+      process.exitCode = before;
+    }
   });
 });
 

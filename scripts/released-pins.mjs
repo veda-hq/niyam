@@ -20,7 +20,7 @@ const EXACT = /^\d+\.\d+\.\d+$/;
 
 /** @param {string} file @returns {any} */
 function readJson(file) {
-  return JSON.parse(readFileSync(file, 'utf8'));
+  return JSON.parse(String(readFileSync(file)));
 }
 
 /**
@@ -31,13 +31,15 @@ function readJson(file) {
  * @returns {string | undefined}
  */
 function lockProblem(lock, name, pin) {
-  const entry = lock?.importers?.['.']?.devDependencies?.[name];
+  // A lock that has importers has the project's, with devDependencies, null where it lists none: that is the
+  // document problems takes.
+  const entry = lock.importers?.['.'].devDependencies?.[name];
   if (entry === undefined) return `${name} is not in pnpm-lock.yaml; run pnpm install`;
   if (entry.specifier !== pin) return `pnpm-lock.yaml locks ${name} as "${entry.specifier}", but package.json pins ${pin}; run pnpm install`;
   const version = String(entry.version);
   if (/^(link|file|workspace|portal):/.test(version)) return `pnpm-lock.yaml resolves ${name} to ${version}, not the registry release ${pin}`;
   if (version !== pin && !version.startsWith(`${pin}(`)) return `pnpm-lock.yaml resolves ${name} to ${version}, not ${pin}`;
-  const resolution = lock?.packages?.[`${name}@${pin}`]?.resolution;
+  const resolution = lock.packages?.[`${name}@${pin}`]?.resolution;
   if (typeof resolution?.integrity !== 'string' || resolution.integrity === '') return `pnpm-lock.yaml has no integrity hash for ${name}@${pin}, so it is not a registry tarball`;
   if (resolution.tarball !== undefined || resolution.directory !== undefined || resolution.repo !== undefined) {
     return `pnpm-lock.yaml takes ${name}@${pin} from ${resolution.tarball ?? resolution.directory ?? resolution.repo}, not the registry`;
@@ -100,24 +102,38 @@ export function problems(root, only = []) {
   return found;
 }
 
+/**
+ * The root and the packages `argv` names past `read`, or undefined where `--root` names no folder: each argument in
+ * turn, by recursion, so no mutant of a counter reads forever.
+ * @param {string[]} argv @param {{ root: string, only: string[] }} read @returns {{ root: string, only: string[] } | undefined}
+ */
+function argsOf(argv, read) {
+  const [arg, ...rest] = argv;
+  if (arg === undefined) return read;
+  if (arg !== '--root') return argsOf(rest, { ...read, only: [...read.only, arg] });
+  const [root, ...after] = rest;
+  return root === undefined ? undefined : argsOf(after, { ...read, root });
+}
+
 /** @param {string[]} argv @returns {number} */
 export function main(argv) {
-  let root = process.cwd();
-  const only = [];
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--root') {
-      if (argv[i + 1] === undefined) {
-        console.error('usage: released-pins.mjs [--root <dir>] [package…]');
-        return 2;
-      }
-      root = argv[++i];
-    } else {
-      only.push(argv[i]);
-    }
+  const read = argsOf(argv, { root: process.cwd(), only: [] });
+  if (read === undefined) {
+    console.error('usage: released-pins.mjs [--root <dir>] [package…]');
+    return 2;
   }
-  const found = problems(root, only);
+  const found = problems(read.root, read.only);
   for (const problem of found) console.error(`released-pins: ${problem}`);
   return found.length > 0 ? 1 : 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) process.exit(main(process.argv.slice(2)));
+/**
+ * main's exit code where `argv` runs the file at `url`; undefined where something imported it.
+ * @param {string[]} argv @param {string} url @returns {number | undefined}
+ */
+export function entry(argv, url) {
+  return argv[1] && url === pathToFileURL(argv[1]).href ? main(argv.slice(2)) : undefined;
+}
+
+// Imported, entry gives undefined, and the importer's exit code stands.
+process.exitCode = entry(process.argv, import.meta.url) ?? process.exitCode;

@@ -40,8 +40,9 @@ const numbers = (text) => [...text.matchAll(/#(\d+)\b/g)].map((match) => Number(
  * @param {any} pull @param {string} repo @returns {boolean}
  */
 export function isMergifyDraft(pull, repo) {
-  if (pull.user?.login !== MERGE_QUEUE_BOT || pull.user?.type !== 'Bot') return false;
-  return Boolean(pull.head?.ref?.startsWith(MERGE_QUEUE_BRANCH)) && pull.head?.repo?.full_name === repo;
+  // A pull request with no user, or no head, is refused at the first check of each line.
+  if (pull.user?.login !== MERGE_QUEUE_BOT || pull.user.type !== 'Bot') return false;
+  return Boolean(pull.head?.ref?.startsWith(MERGE_QUEUE_BRANCH)) && pull.head.repo?.full_name === repo;
 }
 
 /**
@@ -53,14 +54,15 @@ export function isMergifyDraft(pull, repo) {
  */
 export function mergifyTests(pull, repo, pr) {
   if (!isMergifyDraft(pull, repo)) return undefined;
-  const merged = MERGED_TITLE.exec(pull.title ?? '')?.[1];
+  // No title, body or stack reads as the word undefined, which names no pull request.
+  const merged = MERGED_TITLE.exec(String(pull.title))?.[1];
   if (merged !== undefined) return Number(merged) === pr ? undefined : [Number(merged)];
-  const title = MERGE_QUEUE_TITLE.exec(pull.title ?? '');
+  const title = MERGE_QUEUE_TITLE.exec(String(pull.title));
   if (!title) return undefined;
-  const [, batch = '', stacked = '', ahead] = title;
-  const named = [...numbers(batch), ...numbers(stacked)];
+  const [, batch, stacked, ahead] = title;
+  const named = [...numbers(batch), ...numbers(String(stacked))];
   if (ahead !== undefined) {
-    const queued = [...new Set(numbers(QUEUED_AHEAD.exec(pull.body ?? '')?.[1] ?? ''))];
+    const queued = [...new Set(numbers(String(QUEUED_AHEAD.exec(String(pull.body))?.[1])))];
     if (queued.length !== Number(ahead)) return undefined;
     named.push(...queued);
   }
@@ -75,14 +77,14 @@ export function mergifyTests(pull, repo, pr) {
  * @param {any} commit @param {number[]} tested @returns {boolean}
  */
 export function isMergifyMerge(commit, tested) {
-  const number = MERGE_OF.exec(commit.commit?.message?.split('\n')[0] ?? '')?.[1];
+  // No message reads as the word undefined, which merges nothing; a merge of no number tested none of `tested`.
+  const number = MERGE_OF.exec(String(commit.commit?.message?.split('\n')[0]))?.[1];
   return (
-    number !== undefined &&
     tested.includes(Number(number)) &&
     commit.parents?.length === 2 &&
     commit.author?.login === MERGE_QUEUE_BOT &&
     commit.committer?.login === MERGE_QUEUE_SIGNER &&
-    commit.commit?.verification?.verified === true
+    commit.commit.verification?.verified === true
   );
 }
 

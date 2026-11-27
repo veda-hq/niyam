@@ -3,16 +3,23 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   attestationsUrl,
   bundleVerifier,
   check,
+  entry,
+  fetchJson,
+  IO,
   ISSUER,
+  main,
   ownPackages,
+  passed,
   provenanceFailures,
   REPOSITORY,
   signingPolicy,
   SLSA,
+  THRESHOLDS,
   TRUSTED_ROOT,
   WORKFLOW,
 } from './own-provenance.mjs';
@@ -117,6 +124,38 @@ describe('ownPackages', () => {
     ].join('\n');
     assert.deepEqual(ownPackages(lock), { packages: [], unread: ['@veda-hq/dvara@0.7.0-rc.1', '@veda-hq/niyam@0.6.14', '@veda-hq/pariksha@0.5.20'] });
   });
+  test('reads a key unquoted, of any width, a key two spaces in alone, and a link key whole', () => {
+    const lock = [
+      'packages:',
+      '  @veda-hq/dvara@10.20.30:',
+      `    resolution: {integrity: ${INTEGRITY}}`,
+      "    '@veda-hq/deep@1.0.0':",
+      `    resolution: {integrity: ${INTEGRITY}}`,
+      "  '@veda-hq/linked@link:../x':",
+      '    resolution: {directory: ../x}',
+      '',
+    ].join('\n');
+    assert.deepEqual(ownPackages(lock), { packages: [{ name: '@veda-hq/dvara', version: '10.20.30', integrity: INTEGRITY }], unread: ['@veda-hq/linked@link:../x'] });
+  });
+  test('reads a resolution of more than its integrity as a shape it does not read', () => {
+    const lock = `packages:\n  '@veda-hq/odd@1.0.0':\n    resolution: {integrity: ${INTEGRITY}} # and more\n`;
+    assert.deepEqual(ownPackages(lock), { packages: [], unread: ['@veda-hq/odd@1.0.0'] });
+  });
+});
+
+test('a pass names each package it checked', () => {
+  assert.equal(
+    passed([
+      { name: '@veda-hq/kavach', version: '0.6.0' },
+      { name: '@veda-hq/sarathi', version: '0.6.1' },
+    ]),
+    `own-provenance: @veda-hq/kavach@0.6.0, @veda-hq/sarathi@0.6.1 built and signed by ${REPOSITORY} ${WORKFLOW}`,
+  );
+});
+
+test('a bundle carries a Rekor entry, a certificate timestamp and a timestamp, one of each', () => {
+  assert.deepEqual(THRESHOLDS, { tlogThreshold: 1, ctlogThreshold: 1, timestampThreshold: 1 });
+  assert.ok(Object.isFrozen(THRESHOLDS));
 });
 
 test('attestationsUrl escapes the scope', () => {
@@ -162,6 +201,25 @@ describe('provenanceFailures', () => {
     const failures = provenanceFailures(pkg, served({}), accept);
     assert.equal(failures.length, 4);
     assert.match(failures[0], /repository null/);
+    // Whatever part of the statement is missing, each check fails and none throws.
+    for (const statement of [null, { predicate: {} }, { predicate: { buildDefinition: {} } }, { predicate: { buildDefinition: { externalParameters: {} } } }]) {
+      assert.equal(provenanceFailures(pkg, served(statement), accept).length, 4, JSON.stringify(statement));
+    }
+  });
+
+  test('reads the SLSA bundle past an attestation of no shape, and finds none in a bundle with no envelope', () => {
+    const ok = release('0.6.0');
+    assert.deepEqual(provenanceFailures(pkg, { attestations: [null, ...ok.attestations] }, accept), []);
+    assert.deepEqual(provenanceFailures(pkg, { attestations: [{ predicateType: SLSA, bundle: {} }] }, accept), ['@veda-hq/sarathi@0.6.0: it has no SLSA provenance']);
+  });
+
+  test('reads the attested tarballs past subjects of no shape', () => {
+    const statement = {
+      subject: [null, {}, { digest: { sha512: DIGEST } }],
+      predicate: { buildDefinition: { externalParameters: { workflow: { repository: REPOSITORY, path: WORKFLOW, ref: 'refs/tags/v0.6.0' } } } },
+    };
+    assert.deepEqual(provenanceFailures(pkg, served(statement), accept), []);
+    assert.deepEqual(provenanceFailures(pkg, served({ ...statement, subject: [null, {}] }), accept), ['@veda-hq/sarathi@0.6.0: the attested tarball is not the one the lockfile installs']);
   });
 });
 
@@ -273,5 +331,83 @@ describe('the Sigstore bundle, on real attestations', () => {
     const failures = provenanceFailures(kavach, KAVACH, empty);
     assert.equal(failures.length, 1);
     assert.match(failures[0], /^@veda-hq\/kavach@0\.6\.0: its provenance is not signed by veda's release of v0\.6\.0 \(.+\)$/);
+  });
+
+  describe('main, run by the lockfile check', () => {
+    const LOCKED = `packages:\n  '@veda-hq/kavach@0.6.0':\n    resolution: {integrity: ${kavach.integrity}}\n`;
+    /** An io that reads `lock` as pnpm-lock.yaml and the trusted root from disk, serves `document`, and keeps what is said. */
+    const io = (lock, document) => {
+      const said = { log: [], error: [], asked: [] };
+      return {
+        said,
+        readText: path => (path === 'pnpm-lock.yaml' ? lock : readFileSync(path, 'utf8')),
+        getJson: async url => {
+          said.asked.push(url);
+          return document;
+        },
+        log: line => said.log.push(line),
+        error: line => said.error.push(line),
+      };
+    };
+
+    test("passes veda's own release, saying what it checked", async () => {
+      const ok = io(LOCKED, KAVACH);
+      assert.equal(await main(ok), 0);
+      assert.deepEqual(ok.said, {
+        log: [`own-provenance: @veda-hq/kavach@0.6.0 built and signed by ${REPOSITORY} ${WORKFLOW}`],
+        error: [],
+        asked: [attestationsUrl('@veda-hq/kavach', '0.6.0')],
+      });
+    });
+
+    test('fails anything else, saying each failure and why it matters', async () => {
+      const bad = io(LOCKED, null);
+      assert.equal(await main(bad), 1);
+      assert.deepEqual(bad.said.error, ['own-provenance: @veda-hq/kavach@0.6.0: the registry served no attestations', "own-provenance: @veda-hq/* skips the release age only when veda's release built it."]);
+      assert.deepEqual(bad.said.log, []);
+    });
+
+    test('run as the file, entry runs main; imported, it reads nothing and leaves the exit code as it was', async () => {
+      const url = new URL('./own-provenance.mjs', import.meta.url).href;
+      assert.equal(await entry(['node', fileURLToPath(url)], url, io(LOCKED, KAVACH)), 0);
+      const never = () => assert.fail('nothing runs on import');
+      const quiet = { readText: never, getJson: never, log: never, error: never };
+      assert.equal(entry(['node', '/repo/scripts/other.mjs'], url, quiet), undefined);
+      assert.equal(entry(['node'], url, quiet), undefined);
+      const before = process.exitCode;
+      process.exitCode = 7;
+      try {
+        await import(`${url}?imported`);
+        assert.equal(process.exitCode, 7);
+      } finally {
+        process.exitCode = before;
+      }
+    });
+  });
+});
+
+describe("the machine's own io", () => {
+  test('fetchJson gives the JSON answered, and fails on a status that is not ok', async () => {
+    const asked = [];
+    const answer = (ok, status) => async url => {
+      asked.push(url);
+      return { ok, status, json: async () => ({ ok }) };
+    };
+    assert.deepEqual(await fetchJson('https://x/1', answer(true, 200)), { ok: true });
+    await assert.rejects(fetchJson('https://x/2', answer(false, 503)), /^Error: HTTP 503$/);
+    assert.deepEqual(asked, ['https://x/1', 'https://x/2']);
+  });
+
+  test('reads files as text, asks over fetch, and writes to the console', async t => {
+    assert.equal(IO.readText(TRUSTED_ROOT), readFileSync(TRUSTED_ROOT, 'utf8'));
+    const fetched = t.mock.method(globalThis, 'fetch', async () => ({ ok: true, status: 200, json: async () => ({ a: 1 }) }));
+    assert.deepEqual(await IO.getJson('https://registry.example/x'), { a: 1 });
+    assert.deepEqual(fetched.mock.calls.map(call => call.arguments), [['https://registry.example/x']]);
+    const logged = t.mock.method(console, 'log', () => {});
+    const errored = t.mock.method(console, 'error', () => {});
+    IO.log('a line');
+    IO.error('an error');
+    assert.deepEqual(logged.mock.calls.map(call => call.arguments), [['a line']]);
+    assert.deepEqual(errored.mock.calls.map(call => call.arguments), [['an error']]);
   });
 });

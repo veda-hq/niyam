@@ -37,9 +37,34 @@ describe("Mergify's merge-queue draft", () => {
       draft(undefined, { head: { ref: 'mergify/bp/main/pr-2', repo: { full_name: REPO } } }),
       draft(undefined, { head: { ref: 'mergify/merge-queue/x', repo: null } }),
       draft(undefined, { head: undefined }),
+      draft(undefined, { user: { login: 'someone', type: 'Bot' } }),
+      draft(undefined, { head: { repo: { full_name: REPO } } }),
     ]) {
       assert.equal(isMergifyDraft(pull, REPO), false);
     }
+  });
+
+  test('reads numbers of any width, every way Mergify spaces a stack, and the title alone at its start', () => {
+    assert.deepEqual(mergifyTests(draft('merge queue: checking #12 + #13 together on main (7514101), stacked on #15,#16  and  #17'), REPO, 1), [12, 13, 15, 16, 17]);
+    assert.deepEqual(mergifyTests(draft('merge queue: merged #12: x'), REPO, 1), [12]);
+    const title = 'merge queue: checking #2 on main (bbead47), stacked on 12 pull requests ahead';
+    const twelve = AHEAD(Array.from({ length: 12 }, (_, i) => `- [#${i + 10}](x)`).join('\n'));
+    assert.deepEqual(mergifyTests(draft(title, { body: twelve }), REPO, 1), [2, ...Array.from({ length: 12 }, (_, i) => i + 10)]);
+    assert.equal(mergifyTests(draft('x merge queue: checking #2 on main (634865a)'), REPO, 1), undefined);
+  });
+
+  test('tests neither the draft itself nor nothing', () => {
+    assert.deepEqual(mergifyTests(draft('merge queue: checking #1 + #2 on main (634865a)'), REPO, 1), [2]);
+    assert.equal(mergifyTests(draft('merge queue: checking #1 on main (634865a)'), REPO, 1), undefined);
+  });
+
+  test("reads the list ahead from its own heading at a line's start, up to the next heading or details block at one", () => {
+    const title = 'merge queue: checking #2 on main (bbead47), stacked on 2 pull requests ahead';
+    const ahead = (body) => mergifyTests(draft(title, { body }), REPO, 1);
+    assert.equal(ahead('see ### Queued ahead of this batch\n- [#4](x)\n- [#5](x)'), undefined);
+    assert.deepEqual(ahead('### Queued ahead of this batch\n- [#4](x)\n- [#5](x)\n## Next\n#6'), [2, 4, 5]);
+    assert.deepEqual(ahead('### Queued ahead of this batch\n- [#4](x) <details> - [#5](x)\n<details>\n#6'), [2, 4, 5]);
+    assert.deepEqual(ahead('### Queued ahead of this batch\n- [#4](x) see # notes\n- [#5](x)'), [2, 4, 5]);
   });
 
   test('mergifyTests reads a batch, a stack and a deep stack from the title', () => {
@@ -101,9 +126,14 @@ describe("Mergify's merge-queue draft", () => {
       ['no parents', merge('m', 2, { parents: undefined })],
       ['another message', merge('m', 2, { commit: { message: 'Merge branch main', verification: { verified: true } } })],
       ['no message', merge('m', 2, { commit: undefined })],
+      ['a commit with no message', merge('m', 2, { commit: { verification: { verified: true } } })],
+      ['no author', merge('m', 2, { author: null })],
+      ['more after the number', merge('m', 2, { commit: { message: 'Merge of PR 2 and 3', verification: { verified: true } } })],
+      ['more before it', merge('m', 2, { commit: { message: 'Revert Merge of PR 2', verification: { verified: true } } })],
     ]) {
       assert.equal(isMergifyMerge(commit, [2, 3]), false, why);
     }
+    assert.equal(isMergifyMerge(merge('m', 12), [12]), true, 'a number of any width');
   });
 
   test('strayCommits names what is neither a tested pull request’s commit nor Mergify’s merge', () => {
