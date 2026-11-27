@@ -787,12 +787,17 @@ export function pollOf(head: string, checks: Checks, mergeable: string | null, v
   };
 }
 
+/** Verdicts that end the wait early: waiting changes no conflicted head or unread rules, and a failure can be fixed now. */
+const EARLY = new Set<Verdict>(['failed', 'conflicted', 'unjudged']);
+
 /**
- * Whether two polls in a row end the wait: both settled, on the same head and the same check runs, with the same
- * verdict, and not `short`, since a required check that starts late looks missing at first.
+ * Whether two polls in a row end the wait. Both must show the same head and the same verdict. `failed`, `conflicted`
+ * and `unjudged` need no more, so other runs still going hold none of them. Green needs both settled on the same
+ * check runs. `short` never ends it, since a required check that starts late looks missing at first.
  */
 export function agreed(last: Poll | undefined, now: Poll): boolean {
-  return last !== undefined && last.settled && now.settled && last.head === now.head && last.ids === now.ids && last.verdict === now.verdict && now.verdict !== 'short';
+  if (last?.head !== now.head || last.verdict !== now.verdict) return false;
+  return EARLY.has(now.verdict) || (now.verdict !== 'short' && last.settled && now.settled && last.ids === now.ids);
 }
 
 /**

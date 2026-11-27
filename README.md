@@ -1051,16 +1051,19 @@ missing or still runs. The exit code is 0 whatever the verdict.
 <minutes>]` polls every 30 s until CI settles, then reads the pull request
 in full as above, prints the JSON once, and exits with the verdict. Each
 poll is a light read: the pull request, its head's check runs and
-statuses, and the base's rules, with no logs, threads or findings. The wait
-ends at two polls in a row that are both settled and agree. Settled means
-every run `completed`, no status `pending`, and a `mergeable_state` GitHub
-has worked out. Agree means the same head, the same set of check-run ids
-and the same verdict. So a workflow that starts once others finish, on
-`workflow_run` or as a bot's late check, is caught by the second poll. A
-push that moves the head starts the count again, and standard error says
-so. A `short` head is polled on until the timeout, since a required check
-that starts late looks missing at first. `--ci-only --wait` skips the
-threads in the full read too.
+statuses, and the base's rules, with no logs, threads or findings. A green
+wait ends at two polls in a row that are both settled and agree. Settled
+means every run `completed`, no status `pending`, and a `mergeable_state`
+GitHub has worked out. Agree means the same head, the same set of
+check-run ids and the same verdict. So a workflow that starts once others
+finish, on `workflow_run` or as a bot's late check, is caught by the
+second poll. `failed`, `conflicted` and `unjudged` end early, at two polls
+in a row with the same head and verdict, whatever still runs. Waiting
+changes no conflicted head, and a failure can be fixed at once. A push
+that moves the head starts the count again, and standard error says so. A
+`short` head is polled on until the timeout, since a required check that
+starts late looks missing at first. `--ci-only --wait` skips the threads
+in the full read too.
 
 | Exit | When |
 |---|---|

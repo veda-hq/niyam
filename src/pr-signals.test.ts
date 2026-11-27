@@ -1424,7 +1424,11 @@ const HEAD_B = 'b'.repeat(40);
 function waiting(answers: Record<string, unknown>[][], pulls: Record<string, unknown>[] = [], head = HEAD): FakeSys {
   const sys = session();
   let reads = 0;
-  sys.route('GET', `${REPO}/commits/${head}/check-runs?per_page=100&page=1`, () => ({ status: 200, json: { check_runs: answers[Math.min(reads++, answers.length - 1)] } }));
+  sys.route('GET', `${REPO}/commits/${head}/check-runs?per_page=100&page=1`, () => {
+    // A deadline for the poll loop: a 60-minute wait reads 122 times, so a mutant that never ends it stops here.
+    if (reads > 200) throw new Error('the wait polled past its timeout');
+    return { status: 200, json: { check_runs: answers[Math.min(reads++, answers.length - 1)] } };
+  });
   if (pulls.length) {
     let pullReads = 0;
     sys.route('GET', `${REPO}/pulls/7`, () => ({ status: 200, json: { ...OPEN, mergeable_state: 'clean', ...pulls[Math.min(pullReads++, pulls.length - 1)] } }));
@@ -1448,7 +1452,7 @@ describe('pollOf and agreed', () => {
     for (const state of [null, 'unknown']) assert.equal(pollOf(HEAD, checksOf(runs), state, 'pending').settled, false, String(state));
   });
 
-  it('agrees only when both polls settled on the same head, runs and verdict, and never on short', () => {
+  it('agrees on green only when both polls settled on the same head, runs and verdict, and never on short', () => {
     assert.equal(agreed(settledPoll(), settledPoll()), true);
     assert.equal(agreed(undefined, settledPoll()), false);
     for (const [last, now] of [
@@ -1461,7 +1465,15 @@ describe('pollOf and agreed', () => {
     ] as const) {
       assert.equal(agreed(last, now), false, JSON.stringify([last, now]));
     }
-    for (const verdict of ['failed', 'conflicted', 'unjudged', 'pending'] as const) assert.equal(agreed(settledPoll({ verdict }), settledPoll({ verdict })), true, verdict);
+  });
+
+  it('ends early on failed, conflicted and unjudged at two polls of one head and verdict, whatever still runs', () => {
+    for (const verdict of ['failed', 'conflicted', 'unjudged'] as const) {
+      assert.equal(agreed(settledPoll({ verdict, settled: false, ids: '1' }), settledPoll({ verdict, settled: false })), true, verdict);
+      assert.equal(agreed(undefined, settledPoll({ verdict })), false, verdict);
+      assert.equal(agreed(settledPoll({ verdict, head: HEAD_B }), settledPoll({ verdict })), false, verdict);
+      assert.equal(agreed(settledPoll({ verdict: 'pending', settled: false }), settledPoll({ verdict })), false, verdict);
+    }
   });
 });
 
@@ -1484,8 +1496,8 @@ describe('pr-signals --wait', () => {
     assert.deepEqual([result.code, sys.slept.length, reads(sys, '/graphql')], [0, 2, 0]);
   });
 
-  it('ends early on a failure, downloading logs only in the full read', async () => {
-    const sys = waiting([[done(1, 'ci', 'failure')]]);
+  it('ends early on a failure while another run still goes, downloading logs only in the full read', async () => {
+    const sys = waiting([[done(1, 'ci', 'failure'), going(2, 'Lane (src)')], [done(1, 'ci', 'failure'), going(2, 'Lane (src)'), going(3, 'late')]]);
     sys.route('GET', `${REPO}/actions/jobs/1/logs`, { status: 200, json: null, text: 'error: it broke' });
     const result = await run(sys, ['7', '--wait', '--ci-only']);
     assert.deepEqual([result.code, sys.slept, reads(sys, '/logs')], [5, [30_000], 1]);
@@ -1493,8 +1505,8 @@ describe('pr-signals --wait', () => {
     assert.equal((parsed(result).ci as { verdict: string }).verdict, 'failed');
   });
 
-  it('ends at 6 on a conflicted head once its verdict agrees twice', async () => {
-    const sys = waiting([[done(1)]], [{ mergeable_state: 'clean' }, { mergeable_state: 'dirty' }]);
+  it('ends at 6 on a conflicted head once its verdict agrees twice, though its pull_request_target runs still go', async () => {
+    const sys = waiting([[done(1), going(2, 'judge')]], [{ mergeable_state: 'clean' }, { mergeable_state: 'dirty' }]);
     const result = await run(sys, ['7', '--wait', '--ci-only']);
     assert.deepEqual([result.code, sys.slept.length], [6, 2]);
   });
@@ -1537,8 +1549,9 @@ describe('pr-signals --wait', () => {
     const unjudged = waiting([[going(1)]]);
     unjudged.route('GET', `${RULES}?per_page=100&page=1`, { status: 403, json: null });
     assert.equal((await run(unjudged, ['7', '--wait', '--timeout', '1'])).code, 7);
-    const failing = waiting([[done(1, 'ci', 'failure'), going(2, 'lane')]]);
-    assert.equal((await run(failing, ['7', '--wait', '--timeout', '1'])).code, 8);
+    // A failure that a newer run replaced, still going, is pending, not failed.
+    const rerun = waiting([[done(1, 'ci', 'failure'), going(2)]]);
+    assert.equal((await run(rerun, ['7', '--wait', '--timeout', '1'])).code, 8);
     // Green on the last poll alone, with no second poll to agree: still pending, with only the timeout's line.
     const late = waiting([[going(1)], [going(1)], [done(1)]]);
     const lateResult = await run(late, ['7', '--wait', '--timeout', '1']);
@@ -1547,7 +1560,11 @@ describe('pr-signals --wait', () => {
 
   it('says when a push moves the head, and counts again on the new one', async () => {
     const sys = waiting([[done(1)]], [{}, { head: { sha: HEAD_B } }]);
-    sys.route('GET', `${REPO}/commits/${HEAD_B}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [done(5)] } });
+    let readsB = 0;
+    sys.route('GET', `${REPO}/commits/${HEAD_B}/check-runs?per_page=100&page=1`, () => {
+      if (readsB++ > 200) throw new Error('the wait polled past its timeout');
+      return { status: 200, json: { check_runs: [done(5)] } };
+    });
     sys.route('GET', `${REPO}/commits/${HEAD_B}/status?per_page=100&page=1`, { status: 200, json: { statuses: [] } });
     const result = await run(sys, ['7', '--wait', '--ci-only']);
     assert.deepEqual([result.code, sys.slept.length], [0, 2]);
