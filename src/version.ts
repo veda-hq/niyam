@@ -16,7 +16,7 @@ export function versionOf(raw: unknown): string {
   throw new Error('package.json has no string "version"');
 }
 
-/** The major part of release `v`, major.minor.patch, or undefined when it is not one. */
+/** The major part of release `v` (major.minor.patch), or undefined when `v` is not one. */
 export function majorOf(v: string): number | undefined {
   return /^\d+\.\d+\.\d+$/.test(v) ? Number(v.split('.')[0]) : undefined;
 }
