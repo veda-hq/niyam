@@ -36,6 +36,7 @@ import {
   testChange,
   versionMoves,
   workflowOf,
+  workRulesIn,
 } from './guard.mjs';
 
 const REPO = 'o/r';
@@ -165,9 +166,26 @@ const onMain = (...tags) =>
 describe('which files the guard watches', () => {
   test('the floor of guard files', () => {
     for (const path of ['.github/workflows/ci.yml', '.github/niyam.json', '.githooks/pre-push', '.husky/pre-commit', 'lefthook.yml', '.dvara.json', '.dvara/records-baseline.json', '.gitleaks.toml', '.trufflehog-exclude', 'package.json']) {
-      assert.ok(isGuardFile(path), path);
+      assert.ok(isGuardFile(path, []), path);
     }
-    for (const path of ['src/cli.ts', 'scripts/guard.mjs', 'README.md', '.dvara/other.json', 'docs/decisions.md', 'apps/lefthook.yml']) assert.ok(!isGuardFile(path), path);
+    for (const path of ['src/cli.ts', 'scripts/guard.mjs', 'README.md', '.dvara/other.json', 'docs/decisions.md', 'apps/lefthook.yml']) assert.ok(!isGuardFile(path, []), path);
+    // Each floor path at the root alone, and as itself alone.
+    for (const path of [
+      'app/.github/x.yml',
+      'app/.githooks/pre-push',
+      'app/.husky/pre-commit',
+      'lefthook.yml.bak',
+      'app.dvara.json',
+      '.dvara.json.bak',
+      'app.dvara/records-baseline.json',
+      '.dvara/records-baseline.json.bak',
+      'app.gitleaks.toml',
+      '.gitleaks.toml.bak',
+      'app.trufflehog-exclude',
+      '.trufflehog-exclude.bak',
+    ]) {
+      assert.ok(!isGuardFile(path, []), path);
+    }
   });
 
   test("a repository's own paths add to the floor", () => {
@@ -188,8 +206,14 @@ describe('which files the guard watches', () => {
     assert.ok(isTestFile('src/a.test.ts'));
     assert.ok(isTestFile('scripts/a.test.mjs'));
     assert.ok(isTestFile('b.spec.js'));
+    assert.ok(isTestFile('src/onboard.test.ts'));
     assert.ok(!isTestFile('src/a.ts'));
     assert.ok(!isTestFile('src/test.ts'));
+    assert.ok(!isTestFile('src/a.test.ts.bak'));
+  });
+
+  test("guardPathsIn refuses a list with anything but names in it", () => {
+    for (const bad of ['{"guard":["scripts/*.mjs",1]}', '{"guard":["scripts/*.mjs","a.mjs b.mjs"]}']) assert.throws(() => guardPathsIn(bad), /"guard" must be a list of paths/, bad);
   });
 });
 
@@ -198,11 +222,19 @@ describe('reading the slice', () => {
     assert.equal(section('**You will see:** x\n**Guards:** `a`\n- `b`\n**Cost:** c', 'Guards'), '`a`\n- `b`');
     assert.equal(section('**Guards:**\n\n**Cost:** c', 'Guards'), undefined);
     assert.equal(section('nothing', 'Guards'), undefined);
+    // In any case; to the end when no section follows; up to one right after it, or indented; not at a line naming one in passing.
+    assert.equal(section('**guards:** a', 'Guards'), 'a');
+    assert.equal(section('**Guards:** a\nb', 'Guards'), 'a\nb');
+    assert.equal(section('**Guards:** a\n**Cost:** c', 'Guards'), 'a');
+    assert.equal(section('**Guards:** a\n  **Cost:** c', 'Guards'), 'a');
+    assert.equal(section('**Guards:** a\nsee **Note:** b', 'Guards'), 'a\nsee **Note:** b');
   });
 
   test('guardsNamed takes paths and patterns, not prose', () => {
     assert.deepEqual(guardsNamed('`.github/workflows/ci.yml`, `scripts/*.mjs` and\n- .githooks/\n- (package.json).'), ['.github/workflows/ci.yml', 'scripts/*.mjs', '.githooks/', 'package.json']);
     assert.deepEqual(guardsNamed(undefined), []);
+    assert.deepEqual(guardsNamed('-- (a.md)'), ['a.md']);
+    assert.deepEqual(guardsNamed('--a.md'), ['a.md']);
   });
 
   test('named matches paths, folders and globs', () => {
@@ -225,6 +257,13 @@ describe('reading the slice', () => {
     assert.equal(sliceOf('Slice: https://github.com/a/b?x/issues/3', 'o/r'), undefined);
     assert.equal(sliceOf('no slice', 'o/r'), undefined);
     assert.equal(sliceOf(undefined, 'o/r'), undefined);
+    // At a line's start alone, with or without a space, the whole line, and numbers of any length.
+    assert.deepEqual(sliceOf('Slice:#12', 'o/r'), { repo: 'o/r', number: 12 });
+    assert.deepEqual(sliceOf('Slice: other/plans#18', 'o/r'), { repo: 'other/plans', number: 18 });
+    assert.deepEqual(sliceOf('Slice: #3 ', 'o/r'), { repo: 'o/r', number: 3 });
+    assert.equal(sliceOf('see Slice: #3', 'o/r'), undefined);
+    assert.equal(sliceOf('Slice: #3 and #4', 'o/r'), undefined);
+    assert.equal(sliceOf('Slice: https://github.com/other/plans/issues/7x', 'o/r'), undefined);
   });
 
   test('bodyAt reads the revision live at the time', () => {
@@ -243,6 +282,14 @@ describe('reading the slice', () => {
     assert.equal(bodyAt({ ...issue, userContentEdits: undefined }, '2026-01-04'), undefined);
     assert.equal(bodyAt({ ...issue, userContentEdits: { totalCount: 1, nodes: [{ editedAt: '2026-01-03', diff: 'x', deletedAt: '2026-01-04' }] } }, '2026-01-04'), undefined);
     assert.equal(bodyAt({ ...issue, userContentEdits: { totalCount: 1, nodes: [{ editedAt: '2026-01-05', diff: 'x' }] } }, '2026-01-04'), undefined);
+    // At the very moment of its making, of an edit, and of the last edit.
+    assert.equal(bodyAt(issue, '2026-01-01'), 'first');
+    assert.equal(bodyAt(issue, '2026-01-03'), 'middle');
+    assert.equal(bodyAt({ ...issue, userContentEdits: { ...issue.userContentEdits, nodes: [{ editedAt: '2026-01-05', diff: 'as edited' }] } }, '2026-01-05'), 'now');
+    // Not yet made, whatever its edits say; never edited, with no edits listed; a revision GitHub gives no text for.
+    assert.equal(bodyAt({ ...issue, createdAt: '2026-01-03' }, '2026-01-02'), undefined);
+    assert.equal(bodyAt({ ...issue, lastEditedAt: null, userContentEdits: { totalCount: 0, nodes: [] } }, '2026-01-02'), 'now');
+    assert.equal(bodyAt({ ...issue, userContentEdits: { totalCount: 1, nodes: [{ editedAt: '2026-01-03', diff: null }] } }, '2026-01-04'), undefined);
   });
 
   test('ownersIn reads one owner or a list', () => {
@@ -250,11 +297,13 @@ describe('reading the slice', () => {
     assert.deepEqual(ownersIn('{"owner":["A","B"]}'), ['A', 'B']);
     assert.throws(() => ownersIn('{"owner":[]}'), /no owner/);
     assert.throws(() => ownersIn('{}'), /no owner/);
+    for (const bad of ['""', '["A",1]', '["A",""]']) assert.throws(() => ownersIn(`{"owner":${bad}}`), /^Error: \.github\/niyam\.json names no owner$/, bad);
   });
 
   test('approvalsIn reads the Approvals issue, or none (#501)', () => {
     assert.equal(approvalsIn('{"owner":"A"}'), undefined);
     assert.equal(approvalsIn('{"approvals":42}'), 42);
+    assert.equal(approvalsIn('{"approvals":1}'), 1);
     for (const bad of ['"42"', '0', '-1', '1.5', 'null', '[42]']) {
       assert.throws(() => approvalsIn(`{"approvals":${bad}}`), /"approvals" must be the number of the repository's Approvals issue/, bad);
     }
@@ -264,9 +313,20 @@ describe('reading the slice', () => {
     assert.deepEqual(agentsIn('{"owner":"O","agent":"A"}'), ['A']);
     assert.deepEqual(agentsIn('{"owner":"O","agent":["A","B"]}'), ['A', 'B']);
     assert.deepEqual(agentsIn('{"owner":"O"}'), []);
-    for (const bad of ['[]', '""', '1', '[1]', 'null']) assert.throws(() => agentsIn(`{"owner":"O","agent":${bad}}`), /"agent" must be the agent account's login, or a list of them/, bad);
+    for (const bad of ['[]', '""', '1', '[1]', 'null', '["A",1]']) assert.throws(() => agentsIn(`{"owner":"O","agent":${bad}}`), /"agent" must be the agent account's login, or a list of them/, bad);
     // An agent that is also an owner, in any case, refuses: the owner's 👍 on their own proposal would approve it.
     assert.throws(() => agentsIn('{"owner":["O","P"],"agent":["A","p"]}'), /names P as both owner and agent; they must be different accounts/);
+  });
+
+  test('workRulesIn reads the features, older names and spaces aside, and refuses what it does not know', () => {
+    assert.equal(workRulesIn('{"owner":"A"}'), true);
+    assert.equal(workRulesIn('{"features":[" work-rules "]}'), true);
+    assert.equal(workRulesIn('{"features":[" design"]}'), false);
+    assert.throws(() => workRulesIn('{"features":["work-rules",1]}'), /^Error: \.github\/niyam\.json's "features" must be a list of feature names$/);
+    assert.throws(
+      () => workRulesIn('{"features":["a","b"]}'),
+      new RegExp(`^Error: \\.github/niyam\\.json lists unknown feature "a", "b"; the features are ${FEATURES.join(', ')}$`),
+    );
   });
 
   test('reads a proposal with the pattern src/work.ts reads it with (#515)', () => {
@@ -304,6 +364,9 @@ describe('reading a change', () => {
     assert.deepEqual(testChange([{ removed: ["it('a', () => {"], added: [] }]), { fewer: true, skipped: false });
     assert.deepEqual(testChange([{ removed: ["test('a', () => {"], added: ["test.skip('a', () => {"] }]), { fewer: false, skipped: true });
     assert.deepEqual(testChange([{ removed: [], added: ["test('a', { todo: true }, () => {"] }]), { fewer: false, skipped: true });
+    // Spaces before the bracket or the colon count.
+    assert.deepEqual(testChange([{ removed: ["test ('a', () => {"], added: [] }]), { fewer: true, skipped: false });
+    assert.deepEqual(testChange([{ removed: [], added: ["test('a', { skip : true }, () => {"] }]), { fewer: false, skipped: true });
   });
 
   test('newer compares releases', () => {
@@ -311,6 +374,10 @@ describe('reading a change', () => {
     assert.ok(newer('1.0.0', '0.9.9'));
     assert.ok(!newer('0.6.16', '0.6.16'));
     assert.ok(!newer('0.6.9', '0.6.10'));
+    assert.ok(newer('0.6.10', '0.6.9'));
+    assert.ok(newer('0.7.0', '0.6.99'));
+    assert.ok(!newer('0.6.99', '0.7.0'));
+    assert.ok(newer('10.0.0', '9.0.0'));
   });
 
   test('onlyShaMoves takes Dependabot sha moves alone', () => {
@@ -321,6 +388,26 @@ describe('reading a change', () => {
     assert.ok(!onlyShaMoves([{ ...move, added: ['      - uses: actions/checkout@v7'] }]));
     assert.ok(!onlyShaMoves([{ removed: move.removed, added: [] }]));
     assert.ok(!onlyShaMoves([{ removed: ['run: pnpm check'], added: ['run: true'] }]));
+    // Every run, and every line of each.
+    assert.ok(!onlyShaMoves([move, { removed: ['run: pnpm check'], added: ['run: true'] }]));
+    assert.ok(!onlyShaMoves([{ removed: [...move.removed, 'run: pnpm check'], added: [...move.added, 'run: true'] }]));
+    assert.ok(!onlyShaMoves([{ removed: move.removed, added: [...move.added, 'run: true'] }]));
+    // The line moved keeps its indentation and list mark.
+    assert.ok(!onlyShaMoves([{ ...move, added: [`    - uses: actions/checkout@${SHA_B} # v7.0.1`] }]));
+    // A uses: line alone, at the line's start, of a full sha and nothing after but its comment.
+    assert.ok(!onlyShaMoves([{ removed: [`      x uses: actions/checkout@${SHA_A} # v7.0.0`], added: [`      x uses: actions/checkout@${SHA_B} # v7.0.1`] }]));
+    assert.ok(!onlyShaMoves([{ removed: [`      - uses: actions/checkout@${SHA_A}a # v7.0.0`], added: move.added }]));
+    // As Dependabot writes them: with no list mark, no space after the mark or the colon, more spaces, and an old line with no comment.
+    for (const [before, after] of [
+      [`    uses: actions/checkout@${SHA_A} # v7.0.0`, `    uses: actions/checkout@${SHA_B} # v7.0.1`],
+      [`      -uses: actions/checkout@${SHA_A} # v7.0.0`, `      -uses: actions/checkout@${SHA_B} # v7.0.1`],
+      [`      - uses:actions/checkout@${SHA_A} # v7.0.0`, `      - uses:actions/checkout@${SHA_B} # v7.0.1`],
+      [`      - uses: actions/checkout@${SHA_A}  # v7.0.0`, `      - uses: actions/checkout@${SHA_B}  # v7.0.1`],
+      [`      - uses: actions/checkout@${SHA_A} #v7.0.0`, `      - uses: actions/checkout@${SHA_B} #v7.0.1`],
+      [`      - uses: actions/checkout@${SHA_A}`, `      - uses: actions/checkout@${SHA_B} # v7.0.1`],
+    ]) {
+      assert.ok(onlyShaMoves([{ removed: [before], added: [after] }]), after);
+    }
   });
 
   test('versionMoves counts onboard version moves, and refuses anything more', () => {
@@ -337,6 +424,9 @@ describe('reading a change', () => {
     assert.equal(versionMoves(run(['a 0.6.16'], ['a 0.6.19']), '0.6.17'), -1);
     assert.equal(versionMoves(run(['a 0.6.16'], ['a']), '0.6.17'), -1);
     assert.equal(versionMoves(run(['a 0.6.16'], []), '0.6.17'), -1);
+    // A line with a version more than the old one, all else alike; and a sha256 moving after a version.
+    assert.equal(versionMoves(run(['x 1.2.3 a'], ['x 1.2.3 a1.2.4']), '1.2.4'), -1);
+    assert.equal(versionMoves(run([`v 1.2.3 ${H1}`], [`v 1.2.4 ${H2}`]), '1.2.4'), 1);
   });
 
   test("versionMoves takes onboard's own 0.6.17 lines (#348), prose aside", () => {
@@ -374,6 +464,19 @@ describe('reading a change', () => {
     assert.deepEqual(workflowOf('on:\n  pull_request_target:\n    branches: [main]\njobs: {}')?.events, ['pull_request_target']);
     assert.deepEqual(workflowOf('jobs:\n  a: { name: A }')?.jobs, [{ name: 'A', job: { name: 'A' } }]);
     assert.equal(workflowOf('a: [b'), undefined);
+    // A document that is no mapping, jobs that are no mapping, events of no shape it reads, jobs that are no mapping themselves.
+    assert.equal(workflowOf('just text'), undefined);
+    assert.equal(workflowOf('jobs: x'), undefined);
+    assert.deepEqual(workflowOf('on: null\njobs: null')?.events, []);
+    assert.deepEqual(workflowOf('on: 5\njobs: {}')?.events, []);
+    assert.deepEqual(jobNames('jobs:\n  a: { runs-on: x }\n  b: 5\n  c: [x]'), ['a', 'b', 'c']);
+  });
+
+  test("pinsIn reads the refs the jobs call the shared Guard at, and none from what is no workflow", () => {
+    const uses = 'veda-hq/niyam/.github/workflows/shared-guard.yml@';
+    assert.deepEqual(pinsIn(`jobs:\n  a: null\n  b: 5\n  c: { uses: ${uses}v0.8.0 }\n  d: { uses: other/x.yml@v1 }`), ['v0.8.0']);
+    assert.deepEqual(pinsIn(undefined), []);
+    assert.deepEqual(pinsIn('a: [b'), []);
   });
 
   test("isCaller takes the shared Guard's caller as onboard writes it, and nothing else", () => {
@@ -391,6 +494,13 @@ describe('reading a change', () => {
     }
     assert.ok(!isCaller(['pull_request_target'], { name: 'niyam-guard', 'runs-on': 'ubuntu-latest', steps: [{ run: 'true' }] }));
     assert.ok(!isCaller(['pull_request_target'], null));
+    // Releases of any width; nothing before the tag; steps beside the call; a uses: that is no text, or another's of the same length; a job of no mapping.
+    assert.ok(isCaller(['pull_request_target'], { ...job, uses: 'veda-hq/niyam/.github/workflows/shared-guard.yml@v10.20.30' }));
+    assert.ok(!isCaller(['pull_request_target'], { ...job, uses: 'veda-hq/niyam/.github/workflows/shared-guard.yml@xv0.8.0' }));
+    assert.ok(!isCaller(['pull_request_target'], { ...job, steps: [] }));
+    assert.ok(!isCaller(['pull_request_target'], { ...job, uses: 5 }));
+    assert.ok(!isCaller(['pull_request_target'], { ...job, uses: 'abcd-hq/niyam/.github/workflows/shared-guard.yml@v0.8.0' }));
+    for (const odd of ['text', [job]]) assert.ok(!isCaller(['pull_request_target'], odd), JSON.stringify(odd));
   });
 
   test('reports a check by name, matrix leg or reusable job', () => {
@@ -1023,6 +1133,17 @@ describe('judging a pull request', () => {
     assert.equal((await judge(github({ files: swap, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS)).length, 1);
     // Nor is a title for another release than the lines move to.
     assert.equal((await judge(github({ files, contents, body: 'none', pull: { title: 'chore(niyam): onboard at v0.6.18' } }), REPO, 1, OWNERS)).length, 1);
+    // A title with no gitmoji, or with spaces after it, is onboard's; one that opens with other words is not.
+    for (const title of ['chore(niyam): onboard at v0.6.17', '🔧  chore(niyam): onboard at v0.6.17']) {
+      assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: { title }, over: tagged('behind') }), REPO, 1, OWNERS), [], title);
+    }
+    assert.equal((await judge(github({ files, contents, body: 'none', pull: { title: 'see 🔧 chore(niyam): onboard at v0.6.17' }, over: tagged('behind') }), REPO, 1, OWNERS)).length, 1);
+    // Releases of any width.
+    for (const version of ['10.0.0', '0.16.0']) {
+      const wide = [modified('.github/workflows/niyam.yml', `@@ -1 +1 @@\n-    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.16\n+    uses: veda-hq/niyam/.github/workflows/checks.yml@v${version}`)];
+      const route = { [`/repos/${NIYAM}/git/ref/tags/v${version}`]: { object: { type: 'commit', sha: COMMIT } }, [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status: 'behind' } };
+      assert.deepEqual(await judge(github({ files: wide, contents, body: 'none', pull: { title: `🔧 chore(niyam): onboard at v${version}` }, over: route }), REPO, 1, OWNERS), [], version);
+    }
   });
 
   test('a job named after a required check is refused, Guards: or not', async () => {
@@ -1104,7 +1225,7 @@ describe('judging a pull request', () => {
           files: [modified('.github/workflows/niyam-guard.yml', '@@ -1 +1 @@\n-a\n+b', { status })],
           contents: { '.github/workflows/niyam-guard.yml@h': caller(ref), ...(held ? { '.github/workflows/niyam-guard.yml@main': caller(held) } : {}) },
           body: '**Guards:** `.github/workflows/niyam-guard.yml`',
-          over: onMain('v0.7.8', 'v0.8.0', 'v0.10.0'),
+          over: onMain('v0.7.8', 'v0.8.0', 'v0.10.0', 'v0.8.10', 'v10.0.0'),
         }),
         REPO,
         1,
@@ -1112,6 +1233,16 @@ describe('judging a pull request', () => {
       );
     // Forward to a release on niyam's main, the same release, or a new caller: it passes.
     assert.deepEqual(await one('v0.8.0', 'v0.7.8'), []);
+    // Releases of any width, pinned or held.
+    assert.deepEqual(await one('v10.0.0', 'v0.8.0'), []);
+    assert.deepEqual(await one('v0.8.10', 'v0.8.0'), []);
+    assert.match((await one('v0.8.0', 'v10.0.0'))[0]?.message ?? '', /at v0\.8\.0, older than v10\.0\.0, which main's copy pins/);
+    assert.match((await one('v0.8.0', 'v0.8.10'))[0]?.message ?? '', /at v0\.8\.0, older than v0\.8\.10, which main's copy pins/);
+    // A tag with more around it is no release.
+    for (const ref of ['xv0.8.0', 'v0.8.0x']) {
+      const refusals = await one(ref, 'v0.7.8');
+      assert.ok(refusals.some((refusal) => refusal.message.includes(`at ${ref}, which is not a niyam release tag (vX.Y.Z)`)), JSON.stringify(refusals));
+    }
     assert.deepEqual(await one('v0.10.0', 'v0.8.0'), [], 'versions compare as numbers');
     assert.deepEqual(await one('v0.8.0', 'v0.8.0'), []);
     assert.deepEqual(await one('v0.8.0', undefined, 'added'), []);
@@ -1153,6 +1284,129 @@ describe('judging a pull request', () => {
 
   test('a removed workflow reports nothing', async () => {
     assert.deepEqual(await judge(github({ files: [{ filename: '.github/workflows/ci.yml', status: 'removed' }] }), REPO, 1, OWNERS), []);
+  });
+
+  test('a workflow is a .yml or .yaml right in .github/workflows/, nowhere else', async () => {
+    const job = WORKFLOW([['check', 'Typecheck, test, build']]);
+    for (const path of ['docs/.github/workflows/ci.yml', '.github/workflows/ci.yml.txt']) {
+      const gh = github({ files: [modified(path)], contents: { [`${path}@h`]: job }, body: '**Guards:** `.github/`' });
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS), [], path);
+    }
+  });
+
+  test('asks GitHub for the slice body revisions by the query that names them', async () => {
+    const gh = github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents() });
+    const posted = [];
+    const post = gh.post;
+    gh.post = async (path, body) => {
+      posted.push([path, body]);
+      return post(path, body);
+    };
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.deepEqual(posted, [
+      [
+        '/graphql',
+        {
+          query:
+            'query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { body createdAt lastEditedAt userContentEdits(first: 100) { totalCount nodes { editedAt deletedAt diff } } } } }',
+          variables: { owner: 'o', name: 'r', number: 10 },
+        },
+      ],
+    ]);
+  });
+
+  test("reads a file's text raw, and names the failing commit by its short sha", async () => {
+    const head = 'abcdef0'.padEnd(40, '1');
+    const gh = github({ files: [modified('.github/workflows/ci.yml')], pull: { head: { sha: head } } });
+    const get = gh.get;
+    const raw = [];
+    gh.get = async (path, options) => {
+      if (!path.includes('/contents/')) return get(path, options);
+      raw.push(options?.raw);
+      return { status: 500, json: undefined, text: '' };
+    };
+    await assert.rejects(judge(gh, REPO, 1, OWNERS), /^Error: GitHub did not answer \.github\/workflows\/ci\.yml at abcdef0 \(HTTP 500\)$/);
+    assert.deepEqual(raw, [true]);
+  });
+
+  test("a read GitHub refuses with no message fails closed, saying the status alone", async () => {
+    for (const json of [null, {}]) {
+      await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1`]: { status: 500, json } } }), REPO, 1, OWNERS), /^Error: GitHub did not answer \/repos\/o\/r\/pulls\/1 \(HTTP 500\)$/);
+    }
+    // So does an answer that is no JSON.
+    await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1`]: { status: 200, json: undefined } } }), REPO, 1, OWNERS), /^Error: GitHub did not answer \/repos\/o\/r\/pulls\/1 \(HTTP 200\)$/);
+  });
+
+  test('a list GitHub does not hold fails closed, unless it may be missing', async () => {
+    // The slice's own comments are always there.
+    await assert.rejects(
+      judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents(), over: { [`/repos/${REPO}/issues/10/comments`]: { status: 404, json: { message: 'Not Found' } } } }), REPO, 1, OWNERS),
+      /GitHub did not answer \/repos\/o\/r\/issues\/10\/comments \(HTTP 404: Not Found\)/,
+    );
+    // An Approvals issue GitHub cannot find answers nothing.
+    const late = { [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }] };
+    const [refusal] = await judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents(), over: late }), REPO, 1, OWNERS, [], 'main', undefined, 7);
+    assert.match(refusal.message, /has written no unedited Decision: settling it since, on the slice, on Work item #9 or in a batch answer on the Approvals issue, #7/);
+  });
+
+  test("an approval by no one GitHub names is no owner's", async () => {
+    const over = { [`/repos/${REPO}/issues/9/timeline`]: [{ event: 'labeled', label: { name: 'approved' }, created_at: APPROVED }] };
+    const [refusal] = await judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents(), over }), REPO, 1, OWNERS);
+    assert.match(refusal.message, /Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, is not approved by Owner/);
+  });
+
+  test('package.json whose text does not parse needs naming where there was none, even when it reads undefined', async () => {
+    const files = [{ filename: 'package.json', status: 'added', patch: '@@ -0,0 +1 @@\n+undefined' }];
+    const [refusal, ...rest] = await judge(github({ files, contents: { 'package.json@h': 'undefined' }, body: '**Guards:** `.github/`' }), REPO, 1, OWNERS);
+    assert.deepEqual(rest, []);
+    assert.match(refusal.message, /changes the scripts of package\.json, a guard file, package\.json/);
+  });
+});
+
+describe('reading every page', () => {
+  /** `gh` answering `path`'s list `items` a page of 100 at a time, as GitHub does, and 404 for a page past `pages` when given. */
+  const paging = (gh, path, items, pages = Infinity) => {
+    const get = gh.get;
+    gh.get = async (asked, options) => {
+      const [bare, query = ''] = asked.split('?');
+      if (bare !== path) return get(asked, options);
+      gh.calls.push(asked);
+      const page = Number(new URLSearchParams(query).get('page'));
+      if (page > pages) return { status: 404, json: { message: 'Not Found' } };
+      const json = items.slice((page - 1) * 100, page * 100);
+      return { status: 200, json, text: JSON.stringify(json) };
+    };
+    return gh;
+  };
+  const files = [modified('.github/workflows/ci.yml')];
+
+  test('reads past a full page, and stops at the most it reads', async () => {
+    // The approval on the second page of 150 events still counts.
+    const events = [...Array.from({ length: 149 }, () => ({ event: 'commented', created_at: '2025-12-01T00:00:00Z' })), { event: 'labeled', label: { name: 'approved' }, actor: { login: 'owner' }, created_at: APPROVED }];
+    assert.deepEqual(await judge(paging(github({ files, contents: ciContents() }), `/repos/${REPO}/issues/9/timeline`, events), REPO, 1, OWNERS), []);
+    // 3,000 files are read in 30 pages, and no 31st.
+    const many = Array.from({ length: 3000 }, (_, i) => modified(`src/a${i}.ts`));
+    const gh = paging(github({ files: many }), `/repos/${REPO}/pulls/1/files`, many);
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.equal(gh.calls.filter((call) => call.startsWith(`/repos/${REPO}/pulls/1/files?`)).length, 30);
+  });
+
+  test('a list that may be missing still fails past its first page', async () => {
+    const late = { [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }] };
+    const comments = Array.from({ length: 100 }, () => ({ user: { login: 'someone' }, body: 'x', created_at: '2026-01-04T00:00:00Z', updated_at: '2026-01-04T00:00:00Z' }));
+    const gh = paging(github({ files, contents: ciContents(), over: late }), `/repos/${REPO}/issues/7/comments`, comments, 1);
+    await assert.rejects(judge(gh, REPO, 1, OWNERS, [], 'main', undefined, 7), /GitHub did not answer \/repos\/o\/r\/issues\/7\/comments \(HTTP 404: Not Found\)/);
+  });
+
+  test('asks for a page beside the query a list path has', async () => {
+    const over = {
+      [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' }],
+      [`/repos/${REPO}/issues/10/comments`]: [{ id: 5, user: { login: 'AthyaBot' }, body: 'Proposal: add #10 (x) to work item #9.', created_at: '2026-01-03T12:00:00Z', updated_at: '2026-01-03T12:00:00Z' }],
+      [`/repos/${REPO}/issues/comments/5/reactions`]: [{ user: { login: 'Owner' }, content: '+1', created_at: '2026-01-04T00:00:00Z' }],
+    };
+    const gh = github({ files, contents: ciContents(), over });
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, undefined, ['AthyaBot']), []);
+    assert.ok(gh.calls.includes(`/repos/${REPO}/issues/comments/5/reactions?content=%2B1&per_page=100&page=1`), gh.calls.join('\n'));
   });
 });
 
@@ -1346,5 +1600,20 @@ describe('main', () => {
     assert.equal(seen[2].init.body, '{"query":"q"}');
     assert.equal(seen[2].init.headers['content-type'], 'application/json');
     assert.equal(client('t').get.length, 2);
+    // Every request to the letter, at GitHub's own API when none is given.
+    const asked = [];
+    const plain = client('tok', undefined, async (url, init) => {
+      asked.push([url, init]);
+      return { status: 200, text: async () => 'null' };
+    });
+    await plain.get('/x');
+    await plain.get('/y', { raw: true });
+    await plain.post('/z', { q: 1 });
+    const headers = { authorization: 'Bearer tok', accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': 'niyam-guard' };
+    assert.deepEqual(asked, [
+      ['https://api.github.com/x', { method: 'GET', headers }],
+      ['https://api.github.com/y', { method: 'GET', headers: { ...headers, accept: 'application/vnd.github.raw' } }],
+      ['https://api.github.com/z', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{"q":1}' }],
+    ]);
   });
 });
