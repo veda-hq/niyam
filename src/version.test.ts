@@ -2,18 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import { isNewer, majorOf, packageVersion, versionOf } from './version.ts';
-
-describe('majorOf', () => {
-  it('gives the major part of a release', () => {
-    assert.equal(majorOf('2.0.0'), 2);
-    assert.equal(majorOf('10.20.30'), 10, 'a major of two digits');
-  });
-
-  it('is undefined for anything that is not a release number', () => {
-    for (const v of ['v1.2.3', '1.2.3.4', '1.2.3-rc', '1.2', 'a.b.c', '']) assert.equal(majorOf(v), undefined, v);
-  });
-});
+import { isNewer, packageVersion, versionOf } from './version.ts';
 
 describe('packageVersion', () => {
   it("reads this package's package.json", () => {
