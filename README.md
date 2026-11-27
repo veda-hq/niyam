@@ -1003,17 +1003,53 @@ printing, as one can merge while its signals are read. `--ci-only` reads the
 checks alone.
 
 An empty list of failures is green only once CI has run, so the output also
-carries `ci`: `{ "mergeable", "checkRuns", "actionsRuns" }`, the pull
-request's `mergeable_state` and how many check runs its head has, and how
-many of them GitHub Actions ran. A warning on standard error says when none
-has run. On a conflicted pull request (`dirty`), GitHub runs no
-`pull_request` workflow, so the warning says to merge the base and push
-before reading it as clear. On a head with no GitHub Actions check run yet,
-it says no CI has run on that commit. `signals` is the same either way.
+carries `ci`: `{ "mergeable", "checkRuns", "actionsRuns", "verdict",
+"required", "minimum" }`. The first three are the pull request's
+`mergeable_state`, how many check runs its head has, and how many of them
+GitHub Actions ran. `verdict` says whether CI is green, and never says so
+below the minimum:
+
+- `unjudged`: the base branch's required checks cannot be read; `reason`
+  says why. It is never green.
+- `conflicted`: `mergeable_state` is `dirty`. GitHub runs no `pull_request`
+  workflow on a conflicted pull request, so merge the base and push.
+- `failed`: a check that decides finished and did not pass.
+- `pending`: a check that decides, or any other run on the head, has not
+  finished, a status is `pending`, or GitHub has not worked out the
+  mergeable state yet.
+- `short`: everything finished, but a required check has no run on the
+  head, or the head has fewer runs than the minimum.
+- `green`: none of these.
+
+The required checks are the ones the rulesets on the pull request's own
+base branch require (`GET /repos/{owner}/{repo}/rules/branches/{base}`),
+and those decide. `required` lists each as `{ "name", "conclusion" }`:
+the conclusion of its newest run, `pending` before that run finished, or
+`missing` when no run of that name is on the head. The newest run of each
+name decides, and of the app the rule names, so a failed run that a later
+run of the same name passed does not hold the pull request. A commit status
+counts by its context. A run passes when its conclusion is `success`,
+`neutral` or `skipped`, as GitHub's own required checks do.
+
+Where no ruleset names a required check, every name on the head decides,
+so one failed run is never read as green, and `minimum` says where the
+fewest runs came from. With `"signals": { "minCheckRuns": N }` in
+`.github/niyam.json` (`settings`), the head needs N runs that finished and
+were not skipped: a conflicted head can carry many skipped
+`pull_request_target` jobs. Without it (`default`), one GitHub Actions run
+that was not skipped is enough. Classic branch protection is not read, so
+such a repository sets `minCheckRuns`. `minimum` is `ruleset` where a
+ruleset names the checks.
+
+`signals` still lists every failing run. A failing run that a newer
+passing run of the same name and app replaced carries `"superseded": true`,
+so a `green` verdict beside a listed failure explains itself. Standard
+error gets one line for any verdict but `green`, naming what failed, is
+missing or still runs. The exit code is 0 whatever the verdict.
 
 A repository with a local review, one that runs before a push and writes its
 findings to a file, names it in `.github/niyam.json`, with the logins of its
-review bots:
+review bots (and `minCheckRuns` beside them, where it needs one):
 
 ```json
 { "signals": { "bots": ["review-bot"], "findings": ".tmp/review/findings.json" } }

@@ -11,21 +11,37 @@ import {
   excerpt,
   failureType,
   findingSignals,
+  judge,
+  newestRuns,
   normalizeBody,
   prSignals,
   proxyThreads,
+  readChecks,
   readFindings,
+  readRules,
   restComments,
   signalArgs,
   signalSettings,
   threadSignals,
   unconfirmedFindings,
+  verdictLine,
+  type CheckRun,
+  type Checks,
+  type Judged,
   type RawSignal,
+  type Rules,
 } from './pr-signals.ts';
 import { connection, nextCursor, restList } from './pages.ts';
 
 const REPO = '/repos/example-org/example-app';
 const HEAD = 'a'.repeat(40);
+/** GitHub Actions' app id, as a ruleset's integration_id names it. */
+const ACTIONS = 15368;
+const RULES = `${REPO}/rules/branches/main`;
+/** The pull request #7 as GitHub gives it, open on HEAD. */
+const OPEN = { state: 'open', merged_at: null, head: { sha: HEAD }, base: { ref: 'main' } };
+/** The `ci` of the session's pull request: its one required check passed. */
+const GREEN = { mergeable: 'clean', checkRuns: 1, actionsRuns: 1, verdict: 'green', required: [{ name: 'ci', conclusion: 'success' }], minimum: 'ruleset' };
 
 describe('signalArgs', () => {
   it('reads a pull request number, with --ci-only anywhere', () => {
@@ -52,13 +68,20 @@ describe('signalSettings', () => {
       findings: '.tmp/review/findings.json',
     });
     assert.deepEqual(signalSettings({ signals: {} }), { bots: [] });
+    assert.deepEqual(signalSettings({ signals: { minCheckRuns: 1 } }), { bots: [], minCheckRuns: 1 });
+    assert.deepEqual(signalSettings({ signals: { bots: [], minCheckRuns: 32 } }), { bots: [], minCheckRuns: 32 });
   });
 
   for (const [signals, message] of [
     [[], /"signals" must be an object/],
     ['x', /"signals" must be an object/],
     [null, /"signals" must be an object/],
-    [{ bot: [] }, /unknown key "bot"; it takes "bots" and "findings"/],
+    [{ bot: [] }, /unknown key "bot"; it takes "bots", "findings" and "minCheckRuns"/],
+    [{ minCheckRuns: 0 }, /minCheckRuns must be a whole number from 1$/],
+    [{ minCheckRuns: -2 }, /minCheckRuns must be a whole number from 1$/],
+    [{ minCheckRuns: 1.5 }, /minCheckRuns must be a whole number from 1$/],
+    [{ minCheckRuns: '3' }, /minCheckRuns must be a whole number from 1$/],
+    [{ minCheckRuns: null }, /minCheckRuns must be a whole number from 1$/],
     [{ bots: 'review-bot' }, /bots must be a list of GitHub logins/],
     [{ bots: ['not a login'] }, /bots must be a list of GitHub logins/],
     [{ bots: [3] }, /bots must be a list of GitHub logins/],
@@ -301,9 +324,10 @@ describe('pages', () => {
 function session(pull: Record<string, unknown> = {}): FakeSys {
   const sys = new FakeSys();
   sys.env = { NIYAM_AGENT: AGENT, GH_TOKEN: 'ghp_good' };
-  sys.route('GET', `${REPO}/pulls/7`, { status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, mergeable_state: 'clean', ...pull } });
-  sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ id: 1, name: 'ci', conclusion: 'success', app: { slug: 'github-actions' } }] } });
+  sys.route('GET', `${REPO}/pulls/7`, { status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, base: { ref: 'main' }, mergeable_state: 'clean', ...pull } });
+  sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success', app: { id: ACTIONS, slug: 'github-actions' } }] } });
   sys.route('GET', `${REPO}/commits/${HEAD}/status?per_page=100&page=1`, { status: 200, json: { statuses: [] } });
+  sys.route('GET', `${RULES}?per_page=100&page=1`, { status: 200, json: [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: ACTIONS }] } }] });
   sys.route('GET', `${REPO}/pulls/7/files?per_page=100&page=1`, { status: 200, json: [{ filename: 'src/a.ts' }] });
   sys.route('POST', '/graphql', () => ({
     status: 200,
@@ -350,7 +374,7 @@ describe('prSignals', () => {
     );
     assert.deepEqual(out.resolved, [{ file: 'src/a.ts', line: 8, preview: 'Rename it.', createdAt: '2026-11-13T00:00:00Z' }]);
     assert.deepEqual([out.ok, out.pr, out.cloud, out.duplicates, out.findings], [true, 7, false, 1, { status: 'ok', droppedOffDiff: 1 }]);
-    assert.deepEqual(out.ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1 });
+    assert.deepEqual(out.ci, GREEN);
     assert.equal(out.signals[0]?.candidates?.length, 1);
     assert.deepEqual(result.err, []);
     const query = sys.requests.find((r) => r.url.endsWith('/graphql'))?.body as { variables: Record<string, unknown> };
@@ -375,7 +399,7 @@ describe('prSignals', () => {
     assert.deepEqual([closed.code, closed.err], [CLOSED_EXIT, ['✗ #7 is closed without merging; nothing to answer']]);
     const sys = session();
     let reads = 0;
-    sys.route('GET', `${REPO}/pulls/7`, () => ({ status: 200, json: { state: reads++ ? 'closed' : 'open', merged_at: reads > 1 ? '2026-11-14T02:00:00Z' : null, head: { sha: HEAD } } }));
+    sys.route('GET', `${REPO}/pulls/7`, () => ({ status: 200, json: { ...OPEN, state: reads++ ? 'closed' : 'open', merged_at: reads > 1 ? '2026-11-14T02:00:00Z' : null } }));
     const late = await run(sys, ['7']);
     assert.equal(late.code, MERGED_EXIT);
     assert.deepEqual(late.err, ['✗ #7 merged at 2026-11-14T02:00:00Z; nothing to answer (it changed while the signals were read)']);
@@ -453,7 +477,7 @@ describe('prSignals', () => {
     const sys = session();
     sys.files.set(`${ROOT}/.tmp/review/findings.json`, JSON.stringify({ issues: [{ title: 'x', file: 'src/a.ts', line: 1 }] }));
     const out = parsed(await run(sys, ['7', '--ci-only']));
-    assert.deepEqual([out.signals, out.resolved, out.findings, out.ci], [[], [], undefined, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1 }]);
+    assert.deepEqual([out.signals, out.resolved, out.findings, out.ci], [[], [], undefined, GREEN]);
     assert.ok(!sys.requests.some((r) => r.url.endsWith('/graphql')));
   });
 
@@ -497,16 +521,17 @@ describe('prSignals', () => {
     const result = await run(sys, ['7', '--ci-only']);
     assert.equal(result.code, 0);
     const out = parsed(result);
-    assert.deepEqual([out.signals, out.ci], [[], { mergeable: 'dirty', checkRuns: 0, actionsRuns: 0 }]);
-    assert.deepEqual(result.err, ['⚠ #7 has merge conflicts, so GitHub runs no pull_request workflows on it: merge the base and push before reading it as clear']);
+    assert.deepEqual([out.signals, out.ci], [[], { mergeable: 'dirty', checkRuns: 0, actionsRuns: 0, verdict: 'conflicted', required: [{ name: 'ci', conclusion: 'missing' }], minimum: 'ruleset' }]);
+    assert.deepEqual(result.err, ['⚠ CI on #7 is conflicted: it has merge conflicts, so GitHub runs no pull_request workflows on it; merge the base and push before reading it as clear']);
   });
 
-  it('says when no GitHub Actions check run is on the head yet, though another app ran', async () => {
+  it('says when a required check has no run on the head yet, though another app ran', async () => {
     const sys = session();
-    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ id: 3, name: 'Cubic', conclusion: 'success', app: { slug: 'cubic' } }] } });
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [{ id: 3, name: 'Cubic', status: 'completed', conclusion: 'success', app: { id: 9, slug: 'cubic' } }] } });
     const result = await run(sys, ['7', '--ci-only']);
-    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 0 });
-    assert.deepEqual(result.err, [`⚠ no CI has run on ${HEAD} yet: no GitHub Actions check run is on it, so no failure listed is not a pass`]);
+    assert.equal(result.code, 0);
+    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 0, verdict: 'short', required: [{ name: 'ci', conclusion: 'missing' }], minimum: 'ruleset' });
+    assert.deepEqual(result.err, [`⚠ CI on #7 is short: the required "ci" has no run on ${HEAD}`]);
   });
 
   it("takes the later read's mergeable state, unless GitHub is still working it out", async () => {
@@ -518,22 +543,26 @@ describe('prSignals', () => {
     ] as const) {
       const sys = session();
       let reads = 0;
-      sys.route('GET', `${REPO}/pulls/7`, () => ({ status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, mergeable_state: reads++ ? later : first } }));
+      sys.route('GET', `${REPO}/pulls/7`, () => ({ status: 200, json: { ...OPEN, mergeable_state: reads++ ? later : first } }));
       const result = await run(sys, ['7', '--ci-only']);
-      assert.equal((parsed(result).ci as { mergeable: unknown }).mergeable, want);
-      assert.equal(result.err.length, want === 'dirty' ? 1 : 0);
+      const ci = parsed(result).ci as { mergeable: unknown; verdict: unknown };
+      assert.deepEqual([ci.mergeable, ci.verdict], [want, want === 'dirty' ? 'conflicted' : want === null ? 'pending' : 'green']);
+      assert.equal(result.err.length, want === 'clean' ? 0 : 1);
     }
   });
 
   it("keeps the first read's mergeable state when a push moved the head while the checks were read", async () => {
     const sys = session();
     let reads = 0;
-    sys.route('GET', `${REPO}/pulls/7`, () => (reads++ ? { status: 200, json: { state: 'open', merged_at: null, head: { sha: 'b'.repeat(40) }, mergeable_state: 'dirty' } } : { status: 200, json: { state: 'open', merged_at: null, head: { sha: HEAD }, mergeable_state: 'clean' } }));
+    sys.route('GET', `${REPO}/pulls/7`, () => (reads++ ? { status: 200, json: { ...OPEN, head: { sha: 'b'.repeat(40) }, mergeable_state: 'dirty' } } : { status: 200, json: { ...OPEN, mergeable_state: 'clean' } }));
     const result = await run(sys, ['7', '--ci-only']);
-    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1 });
+    assert.deepEqual(parsed(result).ci, GREEN);
     assert.deepEqual(result.err, []);
   });
 });
+
+/** What ciSignals found, without the checks it read. */
+const withoutChecks = ({ signals, checkRuns, actionsRuns }: Awaited<ReturnType<typeof ciSignals>>): Record<string, unknown> => ({ signals, checkRuns, actionsRuns });
 
 describe('ciSignals', () => {
   it("gives each failing check's error lines, from its job's log when GitHub Actions ran it", async () => {
@@ -556,7 +585,7 @@ describe('ciSignals', () => {
       status: 200,
       json: { statuses: [{ context: 'deploy', state: 'error', description: 'build failed' }, { context: 'other', state: 'success' }] },
     });
-    assert.deepEqual(await ciSignals(sys, 't', 'example-org/example-app', HEAD), {
+    assert.deepEqual(withoutChecks(await ciSignals(sys, 't', 'example-org/example-app', HEAD)), {
       signals: [
         { source: 'ci-failure', check: 'ci / test', file: null, line: null, body: 'error TS2322: wrong type', failureType: 'typecheck' },
         { source: 'ci-failure', check: 'Cubic', file: null, line: null, body: 'Cubic: failure\nReview failed', failureType: 'other' },
@@ -792,7 +821,7 @@ describe('pr-signals at the edges', () => {
       },
     });
     sys.route('GET', `${REPO}/actions/jobs/6/logs`, { status: 410, json: null, text: 'error x' });
-    assert.deepEqual(await ciSignals(sys, 't', 'example-org/example-app', HEAD), {
+    assert.deepEqual(withoutChecks(await ciSignals(sys, 't', 'example-org/example-app', HEAD)), {
       signals: [
         { source: 'ci-failure', check: 'x', file: null, line: null, body: 'x: startup_failure', failureType: 'other' },
         { source: 'ci-failure', check: 'y', file: null, line: null, body: 'y: failure', failureType: 'other' },
@@ -809,11 +838,13 @@ describe('pr-signals at the edges', () => {
     await assert.rejects(ciSignals(sys, 't', 'example-org/example-app', HEAD), /lists a status with no name or state/);
   });
 
-  it('refuses a pull request GitHub answers other than 200 or without its state and head', async () => {
+  it('refuses a pull request GitHub answers other than 200 or without its state, head and base', async () => {
     for (const [status, json] of [
-      [500, { state: 'open', merged_at: null, head: { sha: HEAD } }],
+      [500, OPEN],
       [200, {}],
-      [200, { state: 'open' }],
+      [200, { state: 'open', base: { ref: 'main' } }],
+      [200, { state: 'open', head: { sha: HEAD } }],
+      [200, { ...OPEN, base: { ref: 7 } }],
     ] as const) {
       const sys = session();
       sys.route('GET', `${REPO}/pulls/7`, { status, json });
@@ -990,5 +1021,368 @@ describe('pr-signals, as GitHub answers', () => {
     const [candidate] = (parsed(await run(sys, ['7'])).signals[0]?.candidates ?? []) as { diff?: string }[];
     assert.ok(candidate);
     assert.equal(candidate.diff, undefined);
+  });
+});
+
+/** A check run that GitHub Actions ran and finished, unless `more` says otherwise. */
+const runOf = (id: number, name: string, conclusion: string | null, more: Partial<CheckRun> = {}): CheckRun => ({ id, name, app: ACTIONS, actions: true, status: 'completed', conclusion, ...more });
+const CI: Rules = { required: [{ context: 'ci', app: ACTIONS }] };
+const NONE: Rules = { required: [] };
+const checksOf = (runs: CheckRun[], statuses: Checks['statuses'] = []): Checks => ({ runs, statuses });
+/** The verdict alone. */
+const verdictOf = (runs: CheckRun[], rules: Rules = CI, mergeable: string | null = 'clean', min?: number, statuses: Checks['statuses'] = []): string => judge(checksOf(runs, statuses), rules, mergeable, min).verdict;
+
+describe('judge', () => {
+  it('is green when every required check passed on its newest run, with what it judged by', () => {
+    assert.deepEqual(judge(checksOf([runOf(1, 'ci', 'success'), runOf(2, 'other', 'failure')]), CI, 'clean'), {
+      verdict: 'green',
+      required: [{ name: 'ci', conclusion: 'success' }],
+      minimum: 'ruleset',
+      failing: [],
+      running: [],
+      missing: [],
+      counted: 2,
+      floor: 0,
+    } satisfies Judged);
+  });
+
+  it('judges in order: unjudged, conflicted, failed, pending, short, green', () => {
+    const failed = runOf(1, 'ci', 'failure');
+    const going = runOf(2, 'lint', null, { status: 'in_progress' });
+    assert.equal(verdictOf([failed, going], { unread: 'HTTP 403' }, 'dirty'), 'unjudged');
+    assert.equal(verdictOf([failed, going], CI, 'dirty'), 'conflicted');
+    assert.equal(verdictOf([failed, going], CI, 'unknown'), 'failed');
+    assert.equal(verdictOf([going], CI, 'clean'), 'pending');
+    assert.equal(verdictOf([runOf(3, 'lint', 'success')], CI, 'clean'), 'short');
+    assert.equal(verdictOf([runOf(4, 'ci', 'success')], CI, 'blocked'), 'green');
+  });
+
+  it('says why it is unjudged, and judges no required check then', () => {
+    assert.deepEqual(judge(checksOf([runOf(1, 'ci', 'success')]), { unread: 'cannot read it (HTTP 403)' }, 'clean'), {
+      verdict: 'unjudged',
+      required: [],
+      minimum: 'default',
+      reason: 'cannot read it (HTTP 403)',
+      failing: [],
+      running: [],
+      missing: [],
+      counted: 1,
+      floor: 1,
+    } satisfies Judged);
+  });
+
+  it('lets the newest run of a name decide, by its id wherever it is listed', () => {
+    assert.equal(verdictOf([runOf(1, 'ci', 'failure'), runOf(2, 'ci', 'success')]), 'green');
+    assert.equal(verdictOf([runOf(2, 'ci', 'success'), runOf(1, 'ci', 'cancelled')]), 'green');
+    assert.equal(verdictOf([runOf(1, 'ci', 'success'), runOf(2, 'ci', 'failure')]), 'failed');
+    assert.equal(verdictOf([runOf(2, 'ci', 'failure'), runOf(1, 'ci', 'success')]), 'failed');
+  });
+
+  it('reads an older failure under a newer run still going as pending, not failed', () => {
+    const judged = judge(checksOf([runOf(1, 'ci', 'failure'), runOf(2, 'ci', null, { status: 'queued' })]), CI, 'clean');
+    assert.deepEqual([judged.verdict, judged.required, judged.running], ['pending', [{ name: 'ci', conclusion: 'pending' }], ['ci']]);
+  });
+
+  it('passes success, neutral and skipped, and fails every other conclusion', () => {
+    for (const conclusion of ['success', 'neutral', 'skipped']) assert.equal(verdictOf([runOf(1, 'ci', conclusion)]), 'green', conclusion);
+    for (const conclusion of ['failure', 'cancelled', 'timed_out', 'action_required', 'stale', 'startup_failure']) assert.equal(verdictOf([runOf(1, 'ci', conclusion)]), 'failed', conclusion);
+  });
+
+  it('reads a run as finished only when its status says completed', () => {
+    for (const status of [null, 'queued', 'in_progress', 'waiting', 'requested', 'pending']) {
+      const judged = judge(checksOf([runOf(1, 'ci', 'success', { status })]), CI, 'clean');
+      assert.deepEqual([judged.verdict, judged.required[0]?.conclusion], ['pending', 'pending'], String(status));
+    }
+  });
+
+  it("takes a required check from the app its rule names, or from any app's newest run", () => {
+    const cubic = runOf(5, 'ci', 'failure', { app: 9, actions: false });
+    assert.deepEqual(judge(checksOf([cubic]), CI, 'clean').required, [{ name: 'ci', conclusion: 'missing' }]);
+    assert.equal(verdictOf([cubic, runOf(3, 'ci', 'success')]), 'green');
+    assert.equal(verdictOf([cubic, runOf(3, 'ci', 'success')], { required: [{ context: 'ci' }] }), 'failed');
+    assert.equal(verdictOf([runOf(3, 'ci', 'success'), cubic], { required: [{ context: 'ci' }] }), 'failed');
+    assert.equal(verdictOf([runOf(7, 'ci', 'success', { app: null }), cubic], { required: [{ context: 'ci' }] }), 'green');
+  });
+
+  it("takes a required check from a commit status when no run has its name, and a run's over a status", () => {
+    for (const [state, verdict, conclusion] of [
+      ['success', 'green', 'success'],
+      ['pending', 'pending', 'pending'],
+      ['failure', 'failed', 'failure'],
+      ['error', 'failed', 'error'],
+    ] as const) {
+      const judged = judge(checksOf([], [{ context: 'ci', state }]), CI, 'clean');
+      assert.deepEqual([judged.verdict, judged.required], [verdict, [{ name: 'ci', conclusion }]], state);
+    }
+    assert.equal(verdictOf([runOf(1, 'ci', 'success')], CI, 'clean', undefined, [{ context: 'ci', state: 'failure' }]), 'green');
+  });
+
+  it('waits for every run and status, required or not, but fails only on a required one', () => {
+    const judged = judge(checksOf([runOf(1, 'ci', 'success'), runOf(2, 'Lane', null, { status: 'in_progress' }), runOf(3, 'Lane', null, { status: 'queued' })], [{ context: 'deploy', state: 'pending' }]), CI, 'clean');
+    assert.deepEqual([judged.verdict, judged.running], ['pending', ['Lane', 'deploy']]);
+    assert.equal(verdictOf([runOf(1, 'ci', 'success'), runOf(2, 'Lane', 'failure')], CI, 'clean', undefined, [{ context: 'deploy', state: 'error' }]), 'green');
+  });
+
+  it('waits while GitHub has not worked out whether the pull request merges', () => {
+    for (const state of [null, 'unknown']) assert.equal(verdictOf([runOf(1, 'ci', 'success')], CI, state), 'pending');
+    for (const state of ['clean', 'blocked', 'unstable', 'behind', 'has_hooks']) assert.equal(verdictOf([runOf(1, 'ci', 'success')], CI, state), 'green');
+  });
+
+  it('needs no run count beyond the required checks, a status among them', () => {
+    const judged = judge(checksOf([], [{ context: 'ci', state: 'success' }]), CI, 'clean');
+    assert.deepEqual([judged.verdict, judged.counted, judged.floor], ['green', 0, 0]);
+  });
+
+  it('without required checks, lets every name and status decide', () => {
+    assert.equal(verdictOf([runOf(1, 'a', 'success'), runOf(2, 'b', 'failure')], NONE), 'failed');
+    assert.equal(verdictOf([runOf(1, 'a', 'success'), runOf(2, 'b', 'failure'), runOf(3, 'b', 'success')], NONE), 'green');
+    assert.equal(verdictOf([runOf(1, 'a', 'success')], NONE, 'clean', undefined, [{ context: 'deploy', state: 'failure' }]), 'failed');
+    assert.equal(verdictOf([runOf(1, 'a', 'success')], NONE, 'clean', undefined, [{ context: 'deploy', state: 'success' }]), 'green');
+    const judged = judge(checksOf([runOf(1, 'a', 'failure')], [{ context: 'deploy', state: 'error' }]), NONE, 'clean');
+    assert.deepEqual([judged.required, judged.failing], [[], ['a', 'deploy']]);
+  });
+
+  it('by default, needs one GitHub Actions run that was not skipped', () => {
+    const skipped = runOf(1, 'judge', 'skipped');
+    const cubic = runOf(2, 'Cubic', 'success', { app: 9, actions: false });
+    assert.deepEqual(judge(checksOf([skipped, cubic]), NONE, 'clean'), {
+      verdict: 'short',
+      required: [],
+      minimum: 'default',
+      failing: [],
+      running: [],
+      missing: [],
+      counted: 0,
+      floor: 1,
+    } satisfies Judged);
+    assert.equal(verdictOf([], NONE), 'short');
+    assert.equal(verdictOf([skipped, cubic, runOf(3, 'test', 'success')], NONE), 'green');
+    assert.equal(verdictOf([runOf(3, 'test', 'neutral')], NONE), 'green');
+  });
+
+  it('with minCheckRuns, needs that many runs from any app that finished and were not skipped', () => {
+    const cubic = runOf(2, 'Cubic', 'success', { app: 9, actions: false });
+    const judged = judge(checksOf([runOf(1, 'judge', 'skipped'), cubic]), NONE, 'clean', 2);
+    assert.deepEqual([judged.verdict, judged.minimum, judged.counted, judged.floor], ['short', 'settings', 1, 2]);
+    assert.equal(verdictOf([cubic, runOf(3, 'test', 'success')], NONE, 'clean', 2), 'green');
+    assert.equal(verdictOf([cubic], NONE, 'clean', 1), 'green');
+    assert.equal(verdictOf([cubic, runOf(3, 'test', 'success')], NONE, 'clean', 3), 'short');
+    assert.equal(judge(checksOf([runOf(1, 'ci', 'success')]), CI, 'clean', 5).minimum, 'ruleset');
+    assert.equal(verdictOf([runOf(1, 'ci', 'success')], CI, 'clean', 5), 'green');
+  });
+});
+
+/** A judgement, with no names behind it unless `more` gives them. */
+const judgedAs = (verdict: Judged['verdict'], more: Partial<Judged> = {}): Judged => ({ verdict, required: [], minimum: 'ruleset', failing: [], running: [], missing: [], counted: 0, floor: 0, ...more });
+
+describe('verdictLine', () => {
+  it('says nothing of a green verdict, and names what holds any other', () => {
+    assert.equal(verdictLine(7, HEAD, judgedAs('green')), undefined);
+    assert.equal(
+      verdictLine(7, HEAD, judgedAs('unjudged', { reason: 'cannot read it (HTTP 403)' })),
+      "⚠ CI on #7 is unjudged: the base branch's required checks cannot be read (cannot read it (HTTP 403)), so it is never read as green",
+    );
+    assert.equal(
+      verdictLine(7, HEAD, judgedAs('conflicted')),
+      '⚠ CI on #7 is conflicted: it has merge conflicts, so GitHub runs no pull_request workflows on it; merge the base and push before reading it as clear',
+    );
+    assert.equal(verdictLine(7, HEAD, judgedAs('failed', { failing: ['ci', 'lint'] })), '⚠ CI on #7 failed: "ci", "lint" did not pass on its newest run');
+    assert.equal(verdictLine(7, HEAD, judgedAs('pending', { running: ['Lane (src)'] })), `⚠ CI on #7 is pending: "Lane (src)" still running on ${HEAD}`);
+    assert.equal(verdictLine(7, HEAD, judgedAs('pending')), '⚠ CI on #7 is pending: GitHub has not worked out whether it merges yet');
+    assert.equal(verdictLine(7, HEAD, judgedAs('short', { missing: ['ci', 'Typecheck, test, build'] })), `⚠ CI on #7 is short: the required "ci", "Typecheck, test, build" has no run on ${HEAD}`);
+    assert.equal(
+      verdictLine(7, HEAD, judgedAs('short', { minimum: 'default', floor: 1 })),
+      `⚠ CI on #7 is short: no GitHub Actions run that was not skipped is on ${HEAD}, and the repository names no required checks`,
+    );
+    assert.equal(
+      verdictLine(7, HEAD, judgedAs('short', { minimum: 'settings', counted: 1, floor: 3 })),
+      `⚠ CI on #7 is short: 1 of the 3 check runs "minCheckRuns" asks for finished on ${HEAD} without being skipped`,
+    );
+  });
+});
+
+describe('readChecks and newestRuns', () => {
+  it('reads each run with its app, status and output, and each status with its description', async () => {
+    const sys = session();
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, {
+      status: 200,
+      json: {
+        check_runs: [
+          { id: 1, name: 'ci', status: 'completed', conclusion: 'success', app: { id: ACTIONS, slug: 'github-actions' }, output: { title: 'T', summary: 'S' } },
+          { id: 2, name: 'Cubic', status: 'in_progress', conclusion: null, app: { id: 0, slug: 'cubic' }, output: { title: 3 } },
+          { id: 3, name: 'bare', status: 4, conclusion: 5, app: null, output: null },
+        ],
+      },
+    });
+    sys.route('GET', `${REPO}/commits/${HEAD}/status?per_page=100&page=1`, { status: 200, json: { statuses: [{ context: 'deploy', state: 'pending', description: 'going' }, { context: 'x', state: 'success', description: null }] } });
+    assert.deepEqual(await readChecks(sys, 't', 'example-org/example-app', HEAD), {
+      runs: [
+        { id: 1, name: 'ci', app: ACTIONS, actions: true, status: 'completed', conclusion: 'success', title: 'T', summary: 'S' },
+        { id: 2, name: 'Cubic', app: null, actions: false, status: 'in_progress', conclusion: null },
+        { id: 3, name: 'bare', app: null, actions: false, status: null, conclusion: null },
+      ],
+      statuses: [{ context: 'deploy', state: 'pending', description: 'going' }, { context: 'x', state: 'success' }],
+    });
+  });
+
+  it('keeps the run with the highest id of each name and app', () => {
+    const runs = [runOf(4, 'ci', 'success'), runOf(9, 'ci', 'failure'), runOf(6, 'ci', 'success'), runOf(2, 'ci', 'success', { app: 9 }), runOf(3, 'ci', 'success', { app: null })];
+    assert.deepEqual(
+      [...newestRuns(runs)].map(([key, run]) => [key, run.id]),
+      [
+        [`${ACTIONS}/ci`, 9],
+        ['9/ci', 2],
+        ['/ci', 3],
+      ],
+    );
+  });
+});
+
+describe('superseded failures', () => {
+  it('marks a failure that a newer passing run of its name and app replaced, and no other', async () => {
+    const sys = session();
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, {
+      status: 200,
+      json: {
+        check_runs: [
+          { id: 1, name: 'judge', status: 'completed', conclusion: 'failure', app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 2, name: 'judge', status: 'completed', conclusion: 'skipped', app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 3, name: 'lint', status: 'completed', conclusion: 'failure', app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 4, name: 'lint', status: 'in_progress', conclusion: null, app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 5, name: 'review', status: 'completed', conclusion: 'failure', app: { id: 9, slug: 'cubic' } },
+          { id: 6, name: 'review', status: 'completed', conclusion: 'success', app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 7, name: 'test', status: 'completed', conclusion: 'cancelled', app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 8, name: 'test', status: 'completed', conclusion: 'failure', app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 9, name: 'odd', status: 'completed', conclusion: 'failure', app: { id: ACTIONS, slug: 'github-actions' } },
+          { id: 10, name: 'odd', status: 'in_progress', conclusion: 'success', app: { id: ACTIONS, slug: 'github-actions' } },
+        ],
+      },
+    });
+    const { signals } = await ciSignals(sys, 't', 'example-org/example-app', HEAD);
+    assert.deepEqual(
+      signals.map((s) => [s.body, s.superseded]),
+      [
+        ['judge: failure', true],
+        ['lint: failure', undefined],
+        ['review: failure', undefined],
+        ['test: cancelled', undefined],
+        ['test: failure', undefined],
+        ['odd: failure', undefined],
+      ],
+    );
+    assert.ok(!('superseded' in (signals[1] as object)));
+  });
+
+  it('folds one failure into a superseded signal only when every copy of it is superseded', () => {
+    const failure = (superseded: boolean): RawSignal => ({ source: 'ci-failure', check: 'ci', file: null, line: null, body: 'ci: failure', ...(superseded ? { superseded: true as const } : {}) });
+    assert.equal(dedupe([failure(true), failure(true)], [])[0]?.superseded, true);
+    for (const pair of [
+      [failure(true), failure(false)],
+      [failure(false), failure(true)],
+    ]) {
+      const [folded] = dedupe(pair, []);
+      assert.deepEqual([dedupe(pair, []).length, folded && 'superseded' in folded], [1, false]);
+    }
+  });
+});
+
+describe('readRules', () => {
+  it("reads the checks every ruleset on the base requires, each once, with the app it names", async () => {
+    const sys = session();
+    sys.route('GET', `${RULES}?per_page=100&page=1`, {
+      status: 200,
+      json: [
+        { type: 'pull_request', parameters: { required_approving_review_count: 0 } },
+        null,
+        { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: ACTIONS }, { context: 'Cubic', integration_id: 0 }, { context: 'ci', integration_id: ACTIONS }] } },
+        { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }, { context: 'deploy', integration_id: '9' }] } },
+      ],
+    });
+    assert.deepEqual(await readRules(sys, 't', 'example-org/example-app', 'main'), {
+      required: [{ context: 'ci', app: ACTIONS }, { context: 'Cubic' }, { context: 'ci' }, { context: 'deploy' }],
+    });
+    assert.equal(sys.requests.at(-1)?.token, 't');
+  });
+
+  it('reads every page, and names each part of the base in the path', async () => {
+    const sys = session();
+    const route = `${REPO}/rules/branches/release/a%20b`;
+    sys.route('GET', `${route}?per_page=100&page=1`, { status: 200, json: Array.from({ length: 100 }, () => ({ type: 'deletion' })) });
+    sys.route('GET', `${route}?per_page=100&page=2`, { status: 200, json: [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }] } }] });
+    assert.deepEqual(await readRules(sys, 't', 'example-org/example-app', 'release/a b'), { required: [{ context: 'ci' }] });
+  });
+
+  it('reads a base with no required checks as none', async () => {
+    const sys = session();
+    sys.route('GET', `${RULES}?per_page=100&page=1`, { status: 200, json: [] });
+    assert.deepEqual(await readRules(sys, 't', 'example-org/example-app', 'main'), { required: [] });
+  });
+
+  it('says why it cannot read the rules, never that there are none', async () => {
+    const sys = session();
+    sys.route('GET', `${RULES}?per_page=100&page=1`, { status: 403, json: { message: 'Forbidden' } });
+    assert.deepEqual(await readRules(sys, 't', 'example-org/example-app', 'main'), { unread: 'cannot read repos/example-org/example-app/rules/branches/main (HTTP 403)' });
+    sys.route('GET', `${RULES}?per_page=100&page=1`, () => {
+      throw new Error('the request timed out');
+    });
+    assert.deepEqual(await readRules(sys, 't', 'example-org/example-app', 'main'), { unread: 'the request timed out' });
+    for (const [parameters, unread] of [
+      [undefined, 'a required_status_checks rule on main names no checks'],
+      [null, 'a required_status_checks rule on main names no checks'],
+      [{ required_status_checks: 'ci' }, 'a required_status_checks rule on main names no checks'],
+      [{ required_status_checks: [null] }, 'a required_status_checks rule on main names a check with no name'],
+      [{ required_status_checks: [{ context: '' }] }, 'a required_status_checks rule on main names a check with no name'],
+      [{ required_status_checks: [{ context: 3 }] }, 'a required_status_checks rule on main names a check with no name'],
+    ] as const) {
+      sys.route('GET', `${RULES}?per_page=100&page=1`, { status: 200, json: [{ type: 'required_status_checks', parameters }] });
+      assert.deepEqual(await readRules(sys, 't', 'example-org/example-app', 'main'), { unread }, JSON.stringify(parameters));
+    }
+  });
+});
+
+describe('prSignals says whether CI is green', () => {
+  it("reads the required checks from the pull request's own base", async () => {
+    const sys = session({ base: { ref: 'release/2' } });
+    sys.route('GET', `${REPO}/rules/branches/release/2?per_page=100&page=1`, { status: 200, json: [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'build' }] } }] });
+    const result = await run(sys, ['7', '--ci-only']);
+    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1, verdict: 'short', required: [{ name: 'build', conclusion: 'missing' }], minimum: 'ruleset' });
+    assert.deepEqual(result.err, [`⚠ CI on #7 is short: the required "build" has no run on ${HEAD}`]);
+  });
+
+  it('is unjudged, with its reason, when the rules cannot be read, and still exits 0', async () => {
+    const sys = session();
+    sys.route('GET', `${RULES}?per_page=100&page=1`, { status: 403, json: null });
+    const result = await run(sys, ['7', '--ci-only']);
+    const reason = 'cannot read repos/example-org/example-app/rules/branches/main (HTTP 403)';
+    assert.equal(result.code, 0);
+    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1, verdict: 'unjudged', required: [], minimum: 'default', reason });
+    assert.deepEqual(result.err, [`⚠ CI on #7 is unjudged: the base branch's required checks cannot be read (${reason}), so it is never read as green`]);
+  });
+
+  it("takes the minimum from the settings' minCheckRuns where no ruleset names a check", async () => {
+    const sys = session();
+    sys.route('GET', `${RULES}?per_page=100&page=1`, { status: 200, json: [] });
+    sys.files.set(`${ROOT}/.github/niyam.json`, JSON.stringify({ owner: 'example-owner', agent: AGENT, signals: { minCheckRuns: 2 } }));
+    const result = await run(sys, ['7', '--ci-only']);
+    assert.equal(result.code, 0);
+    assert.deepEqual(parsed(result).ci, { mergeable: 'clean', checkRuns: 1, actionsRuns: 1, verdict: 'short', required: [], minimum: 'settings' });
+    assert.deepEqual(result.err, [`⚠ CI on #7 is short: 1 of the 2 check runs "minCheckRuns" asks for finished on ${HEAD} without being skipped`]);
+  });
+
+  it('lists a superseded failure beside a green verdict, and fails on a live one', async () => {
+    const sys = session();
+    const actions = { id: ACTIONS, slug: 'github-actions' };
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, {
+      status: 200,
+      json: { check_runs: [{ id: 1, name: 'ci', status: 'completed', conclusion: 'failure', app: actions }, { id: 2, name: 'ci', status: 'completed', conclusion: 'success', app: actions }] },
+    });
+    const green = await run(sys, ['7', '--ci-only']);
+    assert.deepEqual([(parsed(green).ci as { verdict: string }).verdict, parsed(green).signals.map((s) => [s.body, (s as { superseded?: boolean }).superseded]), green.err], ['green', [['ci: failure', true]], []]);
+    sys.route('GET', `${REPO}/commits/${HEAD}/check-runs?per_page=100&page=1`, {
+      status: 200,
+      json: { check_runs: [{ id: 2, name: 'ci', status: 'completed', conclusion: 'success', app: actions }, { id: 3, name: 'ci', status: 'completed', conclusion: 'failure', app: actions }] },
+    });
+    const failed = await run(sys, ['7', '--ci-only']);
+    assert.deepEqual([(parsed(failed).ci as { verdict: string }).verdict, failed.code, failed.err], ['failed', 0, ['⚠ CI on #7 failed: "ci" did not pass on its newest run']]);
   });
 });
