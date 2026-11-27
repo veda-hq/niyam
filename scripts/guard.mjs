@@ -533,7 +533,8 @@ async function tagOnMain(gh, repo, tag) {
     const annotated = await gh.get(`/repos/${repo}/git/tags/${object.sha}`);
     object = annotated.status === 200 ? annotated.json?.object : undefined;
   }
-  if (object?.type !== 'commit' || !/^[0-9a-f]{40}$/.test(object.sha ?? '')) return false;
+  // A commit with no sha reads as the word undefined, which is no sha.
+  if (object?.type !== 'commit' || !/^[0-9a-f]{40}$/.test(String(object.sha))) return false;
   const { status, json } = await gh.get(`/repos/${repo}/compare/${MAIN}...${object.sha}`);
   return status === 200 && (json?.status === 'behind' || json?.status === 'identical');
 }
@@ -548,10 +549,10 @@ async function approvalsThere(gh, repo) {
   if (typeof branch !== 'string' || branch === '') return undefined;
   const settings = await textAt(gh, repo, SETTINGS, encodeURIComponent(branch));
   try {
-    return settings === undefined ? undefined : approvalsIn(settings);
+    // No settings read as the word undefined, which does not parse either.
+    return approvalsIn(String(settings));
   } catch {
-    // Settings there that do not parse name no Approvals issue, as for the work rules.
-    return undefined;
+    // Settings there that do not parse name no Approvals issue, as for the work rules: undefined.
   }
 }
 
@@ -565,7 +566,7 @@ async function approvalsThere(gh, repo) {
  * Approvals issue GitHub cannot find answers nothing, as for the work rules.
  * With what it is, for the refusals, or why there is none.
  */
-async function approvedAt(gh, repo, slice, owners, approvals, agents, name = (number) => `#${number}`) {
+async function approvedAt(gh, repo, slice, owners, approvals, agents, name) {
   const parent = await gh.get(`/repos/${repo}/issues/${slice}/parent`);
   const who = owners.join(' or ');
   // Each problem carries its own remedy: a new proposal settles none of them but the last (#534).
@@ -593,9 +594,11 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents, name = (nu
   const there = !joined || joined <= approval.created_at;
   const from = there ? approval.created_at : joined;
   const since = (comment) => sameLogin(owners, comment.user?.login) && comment.created_at > from && comment.updated_at <= comment.created_at;
-  const decision = (comment, mention) => since(comment) && /^\s*Decision:/i.test(comment.body ?? '') && (!mention || new RegExp(`#${slice}\\b`).test(comment.body));
+  // No body reads as the word undefined, which decides and approves nothing.
+  const decision = (comment, mention) => since(comment) && /^\s*Decision:/i.test(String(comment.body)) && (!mention || new RegExp(`#${slice}\\b`).test(comment.body));
   const settled = `${who}'s Decision: settled slice ${name(slice)}`;
-  const batch = approvals === undefined ? [] : await every(gh, `/repos/${repo}/issues/${approvals}/comments`, 3000, true);
+  // The Approvals issue's comments, where the settings name one.
+  const batch = (await Promise.all([approvals].filter(Number.isInteger).map((number) => every(gh, `/repos/${repo}/issues/${number}/comments`, 3000, true)))).flat();
   const comments = await every(gh, `/repos/${repo}/issues/${slice}/comments`);
   const byTime = (a, b) => (a.at < b.at ? -1 : 1);
   const answers = [
@@ -603,13 +606,13 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents, name = (nu
     ...comments.filter((comment) => decision(comment, false)).map((comment) => ({ at: comment.created_at, what: settled })),
     ...events.filter((event) => event.event === 'commented' && decision(event, true)).map((event) => ({ at: event.created_at, what: settled })),
     ...batch
-      .filter((comment) => since(comment) && approvedIn(comment.body ?? '').includes(slice))
+      .filter((comment) => since(comment) && approvedIn(String(comment.body)).includes(slice))
       .map((comment) => ({ at: comment.created_at, what: `${who}'s batch answer on the Approvals issue, ${name(approvals)}, settled slice ${name(slice)}` })),
   ];
   // An owner's 👍 on an agent's proposal for the slice, after it joined and after the proposal's last edit, as the
   // work rules read it (src/work.ts, thumbsUp). A proposal GitHub no longer has answers nothing (#515). A 👍 on any
   // proposal, an old one included, can be the latest answer, so every proposal's reactions are read (#534).
-  const proposals = comments.filter((comment) => sameLogin(agents, comment.user?.login) && Number(PROPOSAL.exec(comment.body ?? '')?.[1]) === slice);
+  const proposals = comments.filter((comment) => sameLogin(agents, comment.user?.login) && Number(PROPOSAL.exec(String(comment.body))?.[1]) === slice);
   for (const proposal of proposals) {
     const edited = proposal.updated_at > proposal.created_at ? proposal.updated_at : undefined;
     for (const reaction of await every(gh, `/repos/${repo}/issues/comments/${proposal.id}/reactions?content=%2B1`, 3000, true)) {
@@ -649,11 +652,11 @@ async function approvedAt(gh, repo, slice, owners, approvals, agents, name = (nu
  * the Approvals issue the settings name, whose batch answers count too (#501).
  * `agents` are the settings' agent accounts, whose proposals an owner's 👍
  * settles (#515).
- * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} [ownPaths] @param {string} [branch]
+ * @param {{ get: Function, post: Function }} gh @param {string} repo @param {number} pr @param {string[]} owners @param {string[]} ownPaths @param {string} [branch]
  * @param {{ path: string, why: string }[]} [unjudged] @param {number} [approvals] @param {string[]} [agents]
  * @returns {Promise<{ file?: string, message: string }[]>}
  */
-export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, unjudged = undefined, approvals = undefined, agents = []) {
+export async function judge(gh, repo, pr, owners, ownPaths, branch = MAIN, unjudged = undefined, approvals = undefined, agents = []) {
   const pull = await read(gh, `/repos/${repo}/pulls/${pr}`);
   // Without work rules no slice is judged, so a draft is judged as itself: no tested pull request changes that.
   const tested = unjudged ? undefined : mergifyTests(pull, repo, pr);
@@ -663,7 +666,8 @@ export async function judge(gh, repo, pr, owners, ownPaths = [], branch = MAIN, 
   const reads = new Map();
   const once = {
     get: (path, options) => {
-      const key = `${options?.raw ? 'raw' : 'json'} ${path}`;
+      // A raw read and a JSON read of one path are two reads.
+      const key = `${Boolean(options?.raw)} ${path}`;
       if (!reads.has(key)) reads.set(key, gh.get(path, options));
       return reads.get(key);
     },
@@ -694,7 +698,8 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
   }
   const runsOf = new Map(files.map((file) => [file, changeRuns(file.patch)]));
   const mechanical = (test) => files.every((file) => file.status === 'modified' && runsOf.get(file) && test(runsOf.get(file)));
-  const onboard = ONBOARD_TITLE.exec(as.title ?? '')?.[1];
+  // No title reads as the word undefined, which is no onboard's.
+  const onboard = ONBOARD_TITLE.exec(String(as.title))?.[1];
   // Whether niyam's tag `ref` is on niyam's main, read once a run however many files name it.
   const tags = new Map();
   const released = (ref) => {
@@ -703,11 +708,15 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
   };
   let exempt = false;
   if (as.user?.login === DEPENDABOT && mechanical(onlyShaMoves)) exempt = true;
-  else if (onboard && mechanical((runs) => versionMoves(runs, onboard) >= 0)) {
-    // The version must move somewhere, so a PR that only swaps sha256s is no onboard change.
-    const moved = files.reduce((total, file) => total + versionMoves(runsOf.get(file), onboard), 0);
-    // The release is niyam's, so its tag is read there, whichever repository onboarded.
-    exempt = moved > 0 && (await released(`v${onboard}`));
+  else {
+    // Onboard's release, or the word undefined for any other title: no version moves to it, so nothing is exempt.
+    const to = String(onboard);
+    if (mechanical((runs) => versionMoves(runs, to) >= 0)) {
+      // The version must move somewhere, so a PR that only swaps sha256s is no onboard change.
+      const moved = files.reduce((total, file) => total + versionMoves(runsOf.get(file), to), 0);
+      // The release is niyam's, so its tag is read there, whichever repository onboarded.
+      exempt = moved > 0 && (await released(`v${onboard}`));
+    }
   }
 
   /** Each file that needs naming, with why. */
@@ -752,9 +761,13 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
     }
     // A workflow job named after a required check.
     if (isWorkflow(file.filename) && file.status !== 'removed') {
-      const text = (await textAt(gh, repo, file.filename, pull.head.sha)) ?? '';
+      // A workflow GitHub does not have reads as the word undefined, which is no workflow.
+      const text = String(await textAt(gh, repo, file.filename, pull.head.sha));
       const workflow = workflowOf(text);
-      const before = isWorkflow(was) && file.status !== 'added' ? jobNames((await textAt(gh, repo, was, await base())) ?? '') ?? [] : [];
+      // The jobs it had at the merge base, none where it was added there or was no workflow; Object.values reads a
+      // file that is no workflow as none.
+      const earlier = isWorkflow(was) && file.status !== 'added' ? await textAt(gh, repo, was, await base()) : undefined;
+      const before = Object.values(jobNames(String(earlier)) ?? {});
       if (!workflow) {
         refusals.push({ file: file.filename, message: `${file.filename} does not parse as a workflow, so the guard cannot tell which checks its jobs report. Make it valid YAML with a jobs: map.` });
         continue;
@@ -819,33 +832,31 @@ async function judgeAs(gh, repo, pr, pull, as, owners, ownPaths, branch, unjudge
     return refusals;
   }
 
-  const ref = sliceOf(as.body ?? '', repo);
+  const ref = sliceOf(as.body, repo);
+  const who = owners.join(' or ');
+  // Where the slice is not settled at all, a new proposal is no remedy: the problem's own remedy is.
+  const settle = (whose, path, what) => `name \`${path}\` in ${whose} **Guards:** section, and ${what}; then edit or push this pull request so Guard runs again`;
+  if (ref === undefined) {
+    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${settle("the slice's", path, `have ${who} approve that slice`)}.` }))];
+  }
   // A slice in another repository is read there, as Work rules reads it: its Work item, its Approvals issue, its body.
-  const where = ref?.repo ?? repo;
+  const { repo: where, number: slice } = ref;
   const foreign = where !== repo;
   const name = (number) => (foreign ? `${where}#${number}` : `#${number}`);
   // The slice's own address, where the owner approves it again, so the agent can pass on the link (#557). Guard
   // reads the section as of the owner's latest answer, so a 👍 on a new proposal approves it again (#534); `niyam
   // propose` posts nothing for a slice already settled, so the refusal does not send the agent to it.
-  const who = owners.join(' or ');
-  const it = ref === undefined ? 'the slice' : `slice ${name(ref.number)}`;
-  const at = ref === undefined ? '' : `, ${issueUrl(where, ref.number)}`;
+  const it = `slice ${name(slice)}, ${issueUrl(where, slice)}`;
   const again =
     agents.length > 0
-      ? `post a new \`Proposal:\` comment on ${it}${at}, whose first #N is ${ref === undefined ? 'the slice' : `#${ref.number}`}, and have ${who} react 👍 to it or write a \`Decision:\` there. Guard reads the section as it stood at ${who}'s latest answer, so a 👍 on the new proposal is enough`
-      : `have ${who} write a \`Decision:\` on ${it}${at}. Guard reads the section as it stood at ${who}'s latest answer, so a new Decision is enough`;
-  const whose = ref === undefined ? "the slice's" : `slice ${name(ref.number)}'s`;
+      ? `post a new \`Proposal:\` comment on ${it}, whose first #N is #${slice}, and have ${who} react 👍 to it or write a \`Decision:\` there. Guard reads the section as it stood at ${who}'s latest answer, so a 👍 on the new proposal is enough`
+      : `have ${who} write a \`Decision:\` on ${it}. Guard reads the section as it stood at ${who}'s latest answer, so a new Decision is enough`;
+  const whose = `slice ${name(slice)}'s`;
   const how = (path) => `name \`${path}\` in ${whose} **Guards:** section, then ${again}; then edit or push this pull request so Guard runs again`;
-  // Where the slice is not settled at all, a new proposal is no remedy: the problem's own remedy is.
-  const settle = (path, what) => `name \`${path}\` in ${whose} **Guards:** section, and ${what}; then edit or push this pull request so Guard runs again`;
-  if (ref === undefined) {
-    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, and names no slice. Add a "Slice: #N" line to its body, ${settle(path, `have ${who} approve that slice`)}.` }))];
-  }
-  const { number: slice } = ref;
   const theirs = foreign ? await approvalsThere(gh, where) : approvals;
   const approval = await approvedAt(gh, where, slice, owners, theirs, agents, name);
   if (approval.problem) {
-    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${settle(path, approval.remedy)}.` }))];
+    return [...refusals, ...needs.map(({ path, why }) => ({ file: path, message: `This pull request ${why}, ${path}, but ${approval.problem}. To pass, ${settle(whose, path, approval.remedy)}.` }))];
   }
   const [owner, repoName] = where.split('/');
   const answer = await gh.post('/graphql', { query: ISSUE_QUERY, variables: { owner, name: repoName, number: slice } });
@@ -885,7 +896,8 @@ export async function main(env = process.env, out = console, gh = undefined) {
   try {
     const github = gh ?? client(env.GH_TOKEN, env.GITHUB_API_URL || undefined);
     // The repository's own default branch, which a pull request cannot change.
-    const branch = (await read(github, `/repos/${repo}`))?.default_branch;
+    // read gives an answer or throws.
+    const branch = (await read(github, `/repos/${repo}`)).default_branch;
     if (typeof branch !== 'string' || branch === '') throw new Unread(`GitHub named no default branch for ${repo}`);
     const settings = await textAt(github, repo, SETTINGS, encodeURIComponent(branch));
     if (settings === undefined) throw new Unread(`${branch} has no ${SETTINGS}; run niyam onboard`);
@@ -907,4 +919,14 @@ export async function main(env = process.env, out = console, gh = undefined) {
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) process.exit(await main());
+/**
+ * Exits with `run`'s code where `argv` runs the file at `url`, as the Guard workflow does; does nothing where
+ * something imported it. `run` is main and `exit` process.exit, but under test.
+ * @param {string[]} argv @param {string} url @param {() => Promise<number>} run @param {(code: number) => void} exit
+ */
+export async function entry(argv, url, run, exit) {
+  if (!argv[1] || url !== pathToFileURL(argv[1]).href) return;
+  exit(await run());
+}
+
+await entry(process.argv, import.meta.url, main, process.exit);
