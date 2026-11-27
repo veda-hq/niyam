@@ -24,6 +24,8 @@ const ACCOUNTS = { owners: [OWNER], agents: [AGENT] };
 const T0 = '2026-10-01T00:00:00Z';
 const APPROVED = '2026-10-02T00:00:00Z';
 const LATER = '2026-10-03T00:00:00Z';
+/** After the approval and before LATER: a sub-issue left the work item, so the slice may have left and come back. */
+const LEFT = '2026-10-02T12:00:00Z';
 const LATEST = '2026-10-04T00:00:00Z';
 
 type Node = Record<string, unknown>;
@@ -544,6 +546,8 @@ describe('sliceProblems', () => {
 
     it('ignores the add of another slice', async () => {
       const g = graph();
+      // The slice may have left, so only the additions' own names and the sibling's record clear them.
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: null });
       g.timeline.push({ event: 'sub_issue_added', created_at: LATEST, sub_issue: null });
       g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: { number: 13 } });
       g.siblings.push({ number: 14, type: { name: 'Slice' }, own: [{ event: 'parent_issue_added', created_at: LATEST, parent_issue: null }] });
@@ -561,6 +565,7 @@ describe('sliceProblems', () => {
     it("owes the owner's say for a hidden late addition no sub-issue accounts for", async () => {
       const g = graph();
       g.timeline[0] = { event: 'sub_issue_added', created_at: T0, sub_issue: null };
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: null });
       g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
       // The slice's own record is only its first addition, before approval: the later one may be it, added again.
       assert.deepEqual(await problems(g.issue), [refused]);
@@ -572,6 +577,7 @@ describe('sliceProblems', () => {
 
     it("puts a hidden late addition down to the sibling whose own timeline records it", async () => {
       const g = graph();
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: null });
       g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
       g.siblings.push({ number: 13, type: { name: 'Slice' }, own: [{ event: 'parent_issue_added', created_at: LATER, parent_issue: null }] });
       assert.deepEqual(await problems(g.issue), []);
@@ -579,11 +585,82 @@ describe('sliceProblems', () => {
       assert.deepEqual(await problems(g.issue), [refused], 'a sibling added at another moment does not account for it');
     });
 
+    it('puts a hidden late addition down to another issue when the slice has not left the work item since its first addition', async () => {
+      // athya-hq/athya-rules#214: a sub-issue added after the approval and removed minutes later; no sub-issue's
+      // timeline records the addition now, and the slice, under the work item throughout, cannot have been added again.
+      const g = graph();
+      g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LATEST, sub_issue: null });
+      assert.deepEqual(await problems(g.issue), [], 'the removal came after the addition');
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: { number: 13 } });
+      assert.deepEqual(await problems(g.issue), [], 'a removal naming another issue is not the slice leaving');
+      g.timeline.push({ event: 'sub_issue_removed', created_at: T0, sub_issue: null });
+      assert.deepEqual(await problems(g.issue), [], "a removal at the slice's first addition is not after it");
+    });
+
+    for (const [why, removal] of [
+      ['naming no issue, between its first addition and the hidden one', { created_at: LEFT, sub_issue: null }],
+      ['naming the slice', { created_at: LEFT, sub_issue: { number: 12 } }],
+      ['at the moment of the hidden addition', { created_at: LATER, sub_issue: null }],
+    ] as const) {
+      it(`owes the owner's say for a hidden late addition after a removal ${why}`, async () => {
+        const g = graph();
+        g.timeline.push({ event: 'sub_issue_removed', ...removal });
+        g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+        assert.deepEqual(await problems(g.issue), [refused]);
+      });
+    }
+
+    it("bounds a removal by the slice's latest addition on record, not its first", async () => {
+      // Added, removed and added again before the approval: under the work item since its second addition.
+      const g = graph();
+      g.own.push({ event: 'parent_issue_added', created_at: '2026-10-01T12:00:00Z', parent_issue: null });
+      g.timeline.push({ event: 'sub_issue_removed', created_at: '2026-10-01T06:00:00Z', sub_issue: null });
+      g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+      assert.deepEqual(await problems(g.issue), [], 'it left before its latest addition, not after');
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: null });
+      assert.deepEqual(await problems(g.issue), [refused], 'it may have left after its latest addition');
+    });
+
+    it('owes the owner\'s say when any one removal may be the slice leaving', async () => {
+      const g = graph();
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: { number: 13 } });
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: null });
+      g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+      assert.deepEqual(await problems(g.issue), [refused]);
+    });
+
+    it("owes the owner's say where a time it weighs does not parse, as it may be any time", async () => {
+      const removal = graph();
+      removal.timeline.push({ event: 'sub_issue_removed', created_at: 'soon', sub_issue: null });
+      removal.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+      assert.deepEqual(await problems(removal.issue), [refused], 'a removal at no readable time');
+      const addition = graph();
+      addition.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: { number: 13 } });
+      addition.timeline.push({ event: 'sub_issue_added', created_at: 'soon', sub_issue: null });
+      assert.deepEqual(await problems(addition.issue), [refused], 'an addition at no readable time');
+      // Before the approval as text, so only the instant can refuse it: no offset, so no instant.
+      const own = graph();
+      own.own.push({ event: 'parent_issue_added', created_at: '2026-10-01T06:00:00', parent_issue: null });
+      own.timeline.push({ event: 'sub_issue_removed', created_at: T0, sub_issue: null });
+      own.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+      assert.deepEqual(await problems(own.issue), [refused], "one of the slice's own additions at no readable time");
+    });
+
+    it('owes the owner\'s say for a hidden late addition when the slice has no addition on record, removal or not', async () => {
+      const g = graph();
+      g.timeline[0] = { event: 'sub_issue_added', created_at: T0, sub_issue: null };
+      g.own.length = 0;
+      g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
+      assert.deepEqual(await problems(g.issue), [refused]);
+    });
+
     /** The timelines a run read, by issue number, in order. */
     const timelines = (sys: FakeSys): string[] => sys.requests.flatMap((r) => /\/issues\/(\d+)\/timeline\?/.exec(r.url)?.slice(1, 2) ?? []);
 
     it("reads a sibling's timeline only while an unnamed addition is left to put down, never the slice's own again", async () => {
       const g = graph();
+      g.timeline.push({ event: 'sub_issue_removed', created_at: LEFT, sub_issue: null });
       g.timeline.push({ event: 'sub_issue_added', created_at: LATER, sub_issue: null });
       g.siblings.push(
         { number: 13, type: { name: 'Slice' }, own: [{ event: 'parent_issue_added', created_at: LATER, parent_issue: null }] },
@@ -598,6 +675,8 @@ describe('sliceProblems', () => {
     it('reads no sibling when no unnamed addition comes after the approval, one made at its moment included', async () => {
       for (const at of [T0, APPROVED]) {
         const g = graph();
+        // The slice left before the approval, so only the approval's time keeps these additions out.
+        g.timeline.push({ event: 'sub_issue_removed', created_at: '2026-10-01T12:00:00Z', sub_issue: null });
         g.timeline.push({ event: 'sub_issue_added', created_at: at, sub_issue: null });
         g.siblings.push({ number: 13, type: { name: 'Slice' }, own: [] });
         const sys = new FakeSys();
