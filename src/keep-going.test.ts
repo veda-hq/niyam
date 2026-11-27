@@ -64,7 +64,11 @@ describe('decide', () => {
   });
 
   it('sends a terminal session with a ready PR back to carry it to merge', () => {
-    assert.match(reason(decide(facts({ pr: open() }), null, SETTINGS)), /^Branch feature has 2 commit\(s\) origin\/main lacks, and started work runs to merge\. PR 7 is open: carry it to merge, polling checks and review threads with foreground waits\. Do not end a turn waiting on something that cannot wake you\. If only the owner can unblock it.*\(niyam keep-going, 1 of 5\.\)$/);
+    assert.match(reason(decide(facts({ pr: open() }), null, SETTINGS)), /^Branch feature has 2 commit\(s\) origin\/main lacks, and started work runs to merge\. PR 7 is open: carry it to merge\. Run `niyam pr-signals 7 --wait` as a background task, whose exit wakes you once CI settles\. Do not end a turn waiting on something that cannot wake you\. If only the owner can unblock it.*\(niyam keep-going, 1 of 5\.\)$/);
+    assert.match(
+      reason(decide(facts({ print: true, pr: open() }), null, SETTINGS)),
+      /PR 7 is open: carry it to merge\. In print mode a background task dies with this turn, so run `niyam pr-signals 7 --wait --timeout 9` in the foreground, inside the Bash tool's ten-minute limit, and again until it ends\. /,
+    );
   });
 
   it('lets a desktop session with every commit on a ready PR stop, and nothing short of that', () => {

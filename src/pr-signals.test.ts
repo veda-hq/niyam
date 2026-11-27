@@ -6,6 +6,7 @@ import {
   CLOSED_EXIT,
   MERGED_EXIT,
   addCandidates,
+  agreed,
   ciSignals,
   dedupe,
   excerpt,
@@ -14,6 +15,7 @@ import {
   judge,
   newestRuns,
   normalizeBody,
+  pollOf,
   prSignals,
   proxyThreads,
   readChecks,
@@ -28,6 +30,7 @@ import {
   type CheckRun,
   type Checks,
   type Judged,
+  type Poll,
   type RawSignal,
   type Rules,
 } from './pr-signals.ts';
@@ -45,8 +48,14 @@ const GREEN = { mergeable: 'clean', checkRuns: 1, actionsRuns: 1, verdict: 'gree
 
 describe('signalArgs', () => {
   it('reads a pull request number, with --ci-only anywhere', () => {
-    assert.deepEqual(signalArgs(['7']), { pr: 7, ciOnly: false });
-    assert.deepEqual(signalArgs(['--ci-only', '#7']), { pr: 7, ciOnly: true });
+    assert.deepEqual(signalArgs(['7']), { pr: 7, ciOnly: false, wait: false, timeout: 60 });
+    assert.deepEqual(signalArgs(['--ci-only', '#7']), { pr: 7, ciOnly: true, wait: false, timeout: 60 });
+  });
+
+  it('reads --wait, and --timeout in minutes with it, in any order', () => {
+    assert.deepEqual(signalArgs(['7', '--wait']), { pr: 7, ciOnly: false, wait: true, timeout: 60 });
+    assert.deepEqual(signalArgs(['7', '--wait', '--timeout', '9']), { pr: 7, ciOnly: false, wait: true, timeout: 9 });
+    assert.deepEqual(signalArgs(['--timeout', '120', '--ci-only', '--wait', '7']), { pr: 7, ciOnly: true, wait: true, timeout: 120 });
   });
 
   for (const [args, message] of [
@@ -54,6 +63,16 @@ describe('signalArgs', () => {
     [['07'], /unexpected argument "07"/],
     [['7', '8'], /unexpected argument "8"/],
     [['7', '--ci-only', '--ci-only'], /unexpected argument "--ci-only"/],
+    [['7', '--wait', '--wait'], /unexpected argument "--wait"/],
+    [['7', '--wait', '--timeout', '9', '--timeout', '9'], /unexpected argument "--timeout"/],
+    [['7', '--timeout', '9'], /^Error: --timeout goes with --wait$/],
+    [['7', '--wait', '--timeout'], /^Error: --timeout takes whole minutes from 1, such as --timeout 9$/],
+    [['7', '--wait', '--timeout', '0'], /^Error: --timeout takes whole minutes from 1/],
+    [['7', '--wait', '--timeout', '09'], /^Error: --timeout takes whole minutes from 1/],
+    [['7', '--wait', '--timeout', '1.5'], /^Error: --timeout takes whole minutes from 1/],
+    [['7', '--wait', '--timeout', '9m'], /^Error: --timeout takes whole minutes from 1/],
+    [['7', '--wait', '--timeout', 'x9'], /^Error: --timeout takes whole minutes from 1/],
+    [['7', '--wait', '--timeout', '9'.repeat(20)], /^Error: --timeout takes whole minutes from 1/],
   ] as const) {
     it(`refuses ${JSON.stringify(args)}`, () => assert.throws(() => signalArgs(args), message));
   }
@@ -688,7 +707,7 @@ describe('prSignals in a Claude cloud session', () => {
 
 describe('pr-signals at the edges', () => {
   it('reads only a bare number from 1, of any length', () => {
-    assert.deepEqual(signalArgs(['17']), { pr: 17, ciOnly: false });
+    assert.deepEqual(signalArgs(['17']), { pr: 17, ciOnly: false, wait: false, timeout: 60 });
     for (const arg of ['7x', 'x7', '#', '-7']) assert.throws(() => signalArgs([arg]), { message: `unexpected argument "${arg}"` });
   });
 
@@ -1387,5 +1406,167 @@ describe('prSignals says whether CI is green', () => {
     });
     const failed = await run(sys, ['7', '--ci-only']);
     assert.deepEqual([(parsed(failed).ci as { verdict: string }).verdict, failed.code, failed.err], ['failed', 0, ['⚠ CI on #7 failed: "ci" did not pass on its newest run']]);
+  });
+});
+
+const ACTIONS_APP = { id: ACTIONS, slug: 'github-actions' };
+/** A GitHub Actions run that finished, and one still going. */
+const done = (id: number, name = 'ci', conclusion = 'success'): Record<string, unknown> => ({ id, name, status: 'completed', conclusion, app: ACTIONS_APP });
+const going = (id: number, name = 'ci'): Record<string, unknown> => ({ id, name, status: 'in_progress', conclusion: null, app: ACTIONS_APP });
+const HEAD_B = 'b'.repeat(40);
+
+/**
+ * A session whose head's check runs answer each read in turn, the last again after, and whose pull request reads
+ * answer the same way when `pulls` are given. Its clock moves on by each sleep.
+ */
+function waiting(answers: Record<string, unknown>[][], pulls: Record<string, unknown>[] = [], head = HEAD): FakeSys {
+  const sys = session();
+  let reads = 0;
+  sys.route('GET', `${REPO}/commits/${head}/check-runs?per_page=100&page=1`, () => ({ status: 200, json: { check_runs: answers[Math.min(reads++, answers.length - 1)] } }));
+  if (pulls.length) {
+    let pullReads = 0;
+    sys.route('GET', `${REPO}/pulls/7`, () => ({ status: 200, json: { ...OPEN, mergeable_state: 'clean', ...pulls[Math.min(pullReads++, pulls.length - 1)] } }));
+  }
+  const start = sys.now().getTime();
+  sys.now = () => new Date(start + sys.slept.reduce((total, ms) => total + ms, 0));
+  return sys;
+}
+
+const reads = (sys: FakeSys, part: string): number => sys.requests.filter((r) => r.url.includes(part)).length;
+
+describe('pollOf and agreed', () => {
+  const settledPoll = (more: Partial<Poll> = {}): Poll => ({ head: HEAD, ids: '1,2', settled: true, verdict: 'green', ...more });
+
+  it('names the runs by id in number order, and is settled only with every run done, no status pending and the state known', () => {
+    const runs = [runOf(10, 'a', 'success'), runOf(9, 'b', 'success'), runOf(100, 'c', 'failure')];
+    assert.deepEqual(pollOf(HEAD, checksOf(runs), 'clean', 'failed'), { head: HEAD, ids: '9,10,100', settled: true, verdict: 'failed' });
+    assert.equal(pollOf(HEAD, checksOf([...runs, runOf(11, 'd', null, { status: 'queued' })]), 'clean', 'pending').settled, false);
+    assert.equal(pollOf(HEAD, checksOf(runs, [{ context: 'deploy', state: 'pending' }]), 'clean', 'pending').settled, false);
+    assert.equal(pollOf(HEAD, checksOf(runs, [{ context: 'deploy', state: 'success' }]), 'blocked', 'failed').settled, true);
+    for (const state of [null, 'unknown']) assert.equal(pollOf(HEAD, checksOf(runs), state, 'pending').settled, false, String(state));
+  });
+
+  it('agrees only when both polls settled on the same head, runs and verdict, and never on short', () => {
+    assert.equal(agreed(settledPoll(), settledPoll()), true);
+    assert.equal(agreed(undefined, settledPoll()), false);
+    for (const [last, now] of [
+      [settledPoll({ settled: false }), settledPoll()],
+      [settledPoll(), settledPoll({ settled: false })],
+      [settledPoll({ head: HEAD_B }), settledPoll()],
+      [settledPoll({ ids: '1' }), settledPoll()],
+      [settledPoll({ verdict: 'failed' }), settledPoll()],
+      [settledPoll({ verdict: 'short' }), settledPoll({ verdict: 'short' })],
+    ] as const) {
+      assert.equal(agreed(last, now), false, JSON.stringify([last, now]));
+    }
+    for (const verdict of ['failed', 'conflicted', 'unjudged', 'pending'] as const) assert.equal(agreed(settledPoll({ verdict }), settledPoll({ verdict })), true, verdict);
+  });
+});
+
+describe('pr-signals --wait', () => {
+  it('waits for every run to finish, ends at two agreeing settled polls, then reads in full and exits 0 on green', async () => {
+    const sys = waiting([[going(1)], [done(1)], [done(1)]]);
+    const result = await run(sys, ['7', '--wait']);
+    assert.equal(result.code, 0);
+    assert.deepEqual(sys.slept, [30_000, 30_000]);
+    assert.equal(reads(sys, '/check-runs'), 4);
+    const out = parsed(result);
+    assert.deepEqual([out.ok, out.ci], [true, GREEN]);
+    assert.equal(reads(sys, '/graphql'), 1);
+    assert.deepEqual(result.err, []);
+  });
+
+  it('starts the count again when a new run appears, as one a finished workflow starts', async () => {
+    const sys = waiting([[done(1)], [done(1), done(2, 'late')], [done(1), done(2, 'late')]]);
+    const result = await run(sys, ['7', '--wait', '--ci-only']);
+    assert.deepEqual([result.code, sys.slept.length, reads(sys, '/graphql')], [0, 2, 0]);
+  });
+
+  it('ends early on a failure, downloading logs only in the full read', async () => {
+    const sys = waiting([[done(1, 'ci', 'failure')]]);
+    sys.route('GET', `${REPO}/actions/jobs/1/logs`, { status: 200, json: null, text: 'error: it broke' });
+    const result = await run(sys, ['7', '--wait', '--ci-only']);
+    assert.deepEqual([result.code, sys.slept, reads(sys, '/logs')], [5, [30_000], 1]);
+    assert.deepEqual(result.err, ['⚠ CI on #7 failed: "ci" did not pass on its newest run']);
+    assert.equal((parsed(result).ci as { verdict: string }).verdict, 'failed');
+  });
+
+  it('ends at 6 on a conflicted head once its verdict agrees twice', async () => {
+    const sys = waiting([[done(1)]], [{ mergeable_state: 'clean' }, { mergeable_state: 'dirty' }]);
+    const result = await run(sys, ['7', '--wait', '--ci-only']);
+    assert.deepEqual([result.code, sys.slept.length], [6, 2]);
+  });
+
+  it('ends at 7 when the rules cannot be read', async () => {
+    const sys = waiting([[done(1)]]);
+    sys.route('GET', `${RULES}?per_page=100&page=1`, { status: 403, json: null });
+    const result = await run(sys, ['7', '--wait', '--ci-only']);
+    assert.deepEqual([result.code, sys.slept.length, (parsed(result).ci as { verdict: string }).verdict], [7, 1, 'unjudged']);
+  });
+
+  it('polls a short head on, ending once the late required check has run', async () => {
+    const lint = done(2, 'lint');
+    const sys = waiting([[lint], [lint], [lint], [lint, done(3)]]);
+    const result = await run(sys, ['7', '--wait', '--ci-only']);
+    assert.deepEqual([result.code, sys.slept.length], [0, 4]);
+  });
+
+  it('at the timeout, prints the last poll and exits 7 while short', async () => {
+    const sys = waiting([[done(2, 'lint')]]);
+    const result = await run(sys, ['7', '--wait', '--timeout', '1']);
+    assert.deepEqual([result.code, sys.slept], [7, [30_000, 30_000]]);
+    assert.deepEqual(parsed(result), {
+      ok: false,
+      reason: 'ci-not-settled',
+      pr: 7,
+      head: HEAD,
+      minutes: 1,
+      ci: { mergeable: 'clean', checkRuns: 1, actionsRuns: 1, verdict: 'short', required: [{ name: 'ci', conclusion: 'missing' }], minimum: 'ruleset' },
+    } as never);
+    assert.deepEqual(result.err, ['⚠ CI on #7 did not settle within 1 minute(s); the last poll read it as short', `⚠ CI on #7 is short: the required "ci" has no run on ${HEAD}`]);
+    assert.equal(reads(sys, '/graphql'), 0);
+  });
+
+  it('at the timeout, exits 8 while pending, and 7 while unjudged', async () => {
+    const pending = waiting([[going(1)]]);
+    const result = await run(pending, ['7', '--wait', '--timeout', '2']);
+    assert.deepEqual([result.code, pending.slept.length, (parsed(result).ci as { verdict: string }).verdict], [8, 4, 'pending']);
+    assert.equal(result.err[0], '⚠ CI on #7 did not settle within 2 minute(s); the last poll read it as pending');
+    const unjudged = waiting([[going(1)]]);
+    unjudged.route('GET', `${RULES}?per_page=100&page=1`, { status: 403, json: null });
+    assert.equal((await run(unjudged, ['7', '--wait', '--timeout', '1'])).code, 7);
+    const failing = waiting([[done(1, 'ci', 'failure'), going(2, 'lane')]]);
+    assert.equal((await run(failing, ['7', '--wait', '--timeout', '1'])).code, 8);
+  });
+
+  it('says when a push moves the head, and counts again on the new one', async () => {
+    const sys = waiting([[done(1)]], [{}, { head: { sha: HEAD_B } }]);
+    sys.route('GET', `${REPO}/commits/${HEAD_B}/check-runs?per_page=100&page=1`, { status: 200, json: { check_runs: [done(5)] } });
+    sys.route('GET', `${REPO}/commits/${HEAD_B}/status?per_page=100&page=1`, { status: 200, json: { statuses: [] } });
+    const result = await run(sys, ['7', '--wait', '--ci-only']);
+    assert.deepEqual([result.code, sys.slept.length], [0, 2]);
+    assert.deepEqual(result.err, [`⚠ #7's head moved from ${HEAD} to ${HEAD_B}, so the wait counts its polls again`]);
+    assert.equal(reads(sys, `/commits/${HEAD_B}/check-runs`), 3);
+  });
+
+  it('exits 3 when the pull request merges while it waits, saying so', async () => {
+    const sys = waiting([[going(1)]], [{}, { state: 'closed', merged_at: '2026-11-27T03:00:00Z' }]);
+    const result = await run(sys, ['7', '--wait']);
+    assert.equal(result.code, MERGED_EXIT);
+    assert.deepEqual(parsed(result), { ok: false, reason: 'pr-not-open', pr: 7, state: 'MERGED', mergedAt: '2026-11-27T03:00:00Z', phase: 'wait' } as never);
+    assert.deepEqual(result.err, ['✗ #7 merged at 2026-11-27T03:00:00Z; nothing to answer (it changed while CI was waited on)']);
+    const closed = waiting([[going(1)]], [{}, { state: 'closed' }]);
+    assert.equal((await run(closed, ['7', '--wait'])).code, CLOSED_EXIT);
+  });
+
+  it('exits with the full read\'s verdict, so a run that starts after the polls holds it', async () => {
+    const sys = waiting([[done(1)], [done(1)], [done(1), going(2, 'late')]]);
+    const result = await run(sys, ['7', '--wait', '--ci-only']);
+    assert.deepEqual([result.code, (parsed(result).ci as { verdict: string }).verdict], [8, 'pending']);
+  });
+
+  it('without --wait, reads once and sleeps never', async () => {
+    const sys = waiting([[going(1)]]);
+    assert.deepEqual([(await run(sys, ['7', '--ci-only'])).code, sys.slept], [0, []]);
   });
 });

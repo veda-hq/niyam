@@ -76,17 +76,47 @@ export interface SignalSettings {
 export const MERGED_EXIT = 3;
 export const CLOSED_EXIT = 4;
 
-/** `<pr> [--ci-only]`, refusing anything else. */
-export function signalArgs(args: readonly string[]): { pr: number; ciOnly: boolean } {
+/**
+ * `--wait`'s exit for each verdict: 0 green, 5 failed, 6 conflicted, 7 unjudged or still short, 8 still pending.
+ * None clashes with 1, 2, merged (3), closed (4) or LOCKED (77); `gh pr checks` uses 8 for pending checks too.
+ */
+export const WAIT_EXIT: Readonly<Record<Verdict, number>> = { green: 0, failed: 5, conflicted: 6, unjudged: 7, short: 7, pending: 8 };
+
+/** How long `--wait` waits by default, in minutes, and how long between its polls. */
+export const WAIT_MINUTES = 60;
+export const POLL_MS = 30_000;
+
+/** What `pr-signals` was asked: the pull request, whether to read the checks alone, and whether and how long to wait. */
+export interface SignalArgs {
+  pr: number;
+  ciOnly: boolean;
+  wait: boolean;
+  /** Minutes `--wait` waits at most. */
+  timeout: number;
+}
+
+/** `<pr> [--ci-only] [--wait [--timeout <minutes>]]`, refusing anything else. */
+export function signalArgs(args: readonly string[]): SignalArgs {
   let pr: number | undefined;
   let ciOnly = false;
-  for (const arg of args) {
+  let wait = false;
+  let timeout: number | undefined;
+  for (let at = 0; at < args.length; at++) {
+    const arg = args[at] as string;
     if (arg === '--ci-only' && !ciOnly) ciOnly = true;
-    else if (pr === undefined && /^#?[1-9]\d*$/.test(arg)) pr = Number(arg.replace('#', ''));
+    else if (arg === '--wait' && !wait) wait = true;
+    else if (arg === '--timeout' && timeout === undefined) {
+      // A missing value reads as "undefined", which is no number.
+      const text = String(args[++at]);
+      const minutes = Number(text);
+      if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(minutes)) throw new Error('--timeout takes whole minutes from 1, such as --timeout 9');
+      timeout = minutes;
+    } else if (pr === undefined && /^#?[1-9]\d*$/.test(arg)) pr = Number(arg.replace('#', ''));
     else throw new Error(`unexpected argument "${arg}"`);
   }
   if (pr === undefined) throw new Error('pr-signals needs a pull request number');
-  return { pr, ciOnly };
+  if (timeout !== undefined && !wait) throw new Error('--timeout goes with --wait');
+  return { pr, ciOnly, wait, timeout: timeout ?? WAIT_MINUTES };
 }
 
 /** The `"signals"` settings; none named is no bots and no findings file. Throws on a malformed entry. */
@@ -255,10 +285,11 @@ async function readPull(sys: Sys, token: string, slug: string, pr: number): Prom
 }
 
 /** Refuses a pull request that is not open: a stale findings file must not make signals for a merged one. */
-function notOpen(io: Output, pr: number, pull: Pull, phase: 'start' | 'before-print'): number | undefined {
+function notOpen(io: Output, pr: number, pull: Pull, phase: 'start' | 'wait' | 'before-print'): number | undefined {
   if (pull.state === 'OPEN') return undefined;
   const why = pull.state === 'MERGED' ? `#${pr} merged at ${pull.mergedAt as string}` : `#${pr} is closed without merging`;
-  io.err(`✗ ${why}; nothing to answer${phase === 'before-print' ? ' (it changed while the signals were read)' : ''}`);
+  const when = phase === 'before-print' ? ' (it changed while the signals were read)' : phase === 'wait' ? ' (it changed while CI was waited on)' : '';
+  io.err(`✗ ${why}; nothing to answer${when}`);
   io.out(JSON.stringify({ ok: false, reason: 'pr-not-open', pr, state: pull.state, mergedAt: pull.mergedAt, phase }, null, 2));
   return pull.state === 'MERGED' ? MERGED_EXIT : CLOSED_EXIT;
 }
@@ -720,16 +751,94 @@ export function unconfirmedFindings(findings: readonly Finding[]): Unconfirmed[]
 
 const DIFF_CHARS = 4000;
 
+/** The `ci` object `pr-signals` prints. */
+function ciOf(mergeable: string | null, checks: Checks, judged: Judged): Record<string, unknown> {
+  return {
+    mergeable,
+    checkRuns: checks.runs.length,
+    actionsRuns: checks.runs.filter((run) => run.actions).length,
+    verdict: judged.verdict,
+    required: judged.required,
+    minimum: judged.minimum,
+    ...only('reason', judged.reason),
+  };
+}
+
+/** One light poll of CI: what two polls must agree on, and whether this one has settled. */
+export interface Poll {
+  head: string;
+  /** The check runs' ids, in order. */
+  ids: string;
+  /** Every run completed, no status pending, and a mergeable state GitHub has worked out. */
+  settled: boolean;
+  verdict: Verdict;
+}
+
+/** A poll of `checks` on `head`: settled once every run has completed, no status is pending and the state is known. */
+export function pollOf(head: string, checks: Checks, mergeable: string | null, verdict: Verdict): Poll {
+  return {
+    head,
+    ids: checks.runs
+      .map((run) => run.id)
+      .sort((a, b) => a - b)
+      .join(','),
+    settled: checks.runs.every((run) => run.status === 'completed') && !checks.statuses.some((one) => one.state === 'pending') && settled(mergeable),
+    verdict,
+  };
+}
+
+/**
+ * Whether two polls in a row end the wait: both settled, on the same head and the same check runs, with the same
+ * verdict, and not `short`, since a required check that starts late looks missing at first.
+ */
+export function agreed(last: Poll | undefined, now: Poll): boolean {
+  return last !== undefined && last.settled && now.settled && last.head === now.head && last.ids === now.ids && last.verdict === now.verdict && now.verdict !== 'short';
+}
+
+/**
+ * Polls CI every 30 s with light reads (the pull request, its head's check runs and statuses, the base's rules: no
+ * logs, threads or findings) until two polls in a row agree, then returns the pull request as the last poll read it,
+ * for the full read. Returns the exit
+ * instead when the pull request merged or closed meanwhile (3 or 4), or when `minutes` ran out, after printing the
+ * last poll: 7 still short or unjudged, else 8.
+ */
+async function waitForCi(sys: Sys, io: Output, token: string, slug: string, pr: number, first: Pull, minutes: number, minCheckRuns: number | undefined): Promise<{ exit: number } | { pull: Pull }> {
+  const deadline = sys.now().getTime() + minutes * 60_000;
+  let pull = first;
+  let last: Poll | undefined;
+  for (;;) {
+    if (last && last.head !== pull.head) io.err(`⚠ #${pr}'s head moved from ${last.head} to ${pull.head}, so the wait counts its polls again`);
+    const checks = await readChecks(sys, token, slug, pull.head);
+    const judged = judge(checks, await readRules(sys, token, slug, pull.base), pull.mergeable, minCheckRuns);
+    const now = pollOf(pull.head, checks, pull.mergeable, judged.verdict);
+    if (agreed(last, now)) return { pull };
+    last = now;
+    if (sys.now().getTime() >= deadline) {
+      const exit = judged.verdict === 'short' || judged.verdict === 'unjudged' ? WAIT_EXIT.short : WAIT_EXIT.pending;
+      io.err(`⚠ CI on #${pr} did not settle within ${minutes} minute(s); the last poll read it as ${judged.verdict}`);
+      const line = verdictLine(pr, pull.head, judged);
+      if (line) io.err(line);
+      io.out(JSON.stringify({ ok: false, reason: 'ci-not-settled', pr, head: pull.head, minutes, ci: ciOf(pull.mergeable, checks, judged) }, null, 2));
+      return { exit };
+    }
+    await sys.sleep(POLL_MS);
+    pull = await readPull(sys, token, slug, pr);
+    const refused = notOpen(io, pr, pull, 'wait');
+    if (refused !== undefined) return { exit: refused };
+  }
+}
+
 /**
  * Prints, as one JSON object, a pull request's open review threads, its failing checks (error lines only) and the
  * local review's findings, duplicates folded, each thread with the ids `review-thread` takes; resolved threads come
  * with it, to tell a new finding from one answered. Refuses a pull request that is not open, before reading anything
  * and again before printing. Says under `ci` whether CI is green, and on standard error why when it is not, exiting
- * 0 whatever the verdict. In a Claude cloud session
+ * 0 whatever the verdict. With `--wait`, it first polls until CI settles, and exits with the verdict. In a Claude
+ * cloud session
  * the threads come over the proxy's REST routes.
  */
 export async function prSignals(sys: Sys, io: Output, args: readonly string[]): Promise<number> {
-  const { pr, ciOnly } = signalArgs(args);
+  const { pr, ciOnly, wait, timeout } = signalArgs(args);
   const { root, slug } = repoAt(sys);
   const settingsPath = `${root}/${SETTINGS_PATH}`;
   const settings = signalSettings(sys.exists(settingsPath) ? (JSON.parse(sys.read(settingsPath)) as unknown) : {});
@@ -739,9 +848,14 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
     return 1;
   }
   const cloud = sys.env.CLAUDE_CODE_REMOTE === 'true';
-  const pull = await readPull(sys, token, slug, pr);
+  let pull = await readPull(sys, token, slug, pr);
   const refused = notOpen(io, pr, pull, 'start');
   if (refused !== undefined) return refused;
+  if (wait) {
+    const waited = await waitForCi(sys, io, token, slug, pr, pull, timeout, settings.minCheckRuns);
+    if ('exit' in waited) return waited.exit;
+    pull = waited.pull;
+  }
 
   const threads = ciOnly ? { signals: [], resolved: [] } : threadSignals(await (cloud ? cloudThreads : graphThreads)(sys, token, slug, pr));
   const checks = await ciSignals(sys, token, slug, pull.head);
@@ -787,15 +901,7 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
   const later = after.head === pull.head && settled(after.mergeable);
   const mergeable = later ? after.mergeable : pull.mergeable;
   const judged = judge(checks.checks, rules, mergeable, settings.minCheckRuns);
-  const ci = {
-    mergeable,
-    checkRuns: checks.checkRuns,
-    actionsRuns: checks.actionsRuns,
-    verdict: judged.verdict,
-    required: judged.required,
-    minimum: judged.minimum,
-    ...only('reason', judged.reason),
-  };
+  const ci = ciOf(mergeable, checks.checks, judged);
   const line = verdictLine(pr, pull.head, judged);
   if (line) io.err(line);
   io.out(
@@ -805,5 +911,6 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
       2,
     ),
   );
-  return 0;
+  // The plain read exits 0 whatever the verdict, so its callers keep working; the wait exits with it.
+  return wait ? WAIT_EXIT[judged.verdict] : 0;
 }

@@ -91,9 +91,11 @@ Commands:
   review-thread --batch <file>
                    The same for each thread a JSON list in the file names, in order, with the token checked
                    once; it stops at the first refusal and says which threads were done
-  pr-signals <pr> [--ci-only]
+  pr-signals <pr> [--ci-only] [--wait [--timeout <minutes>]]
                    A pull request's open review threads, failing checks (error lines only) and local
-                   review findings, as one JSON list without duplicates; exit 3 merged, 4 closed
+                   review findings, as one JSON list without duplicates, with whether CI is green; exit 3
+                   merged, 4 closed. --wait polls until CI settles (60 minutes at most by default) and
+                   exits 0 green, 5 failed, 6 conflicted, 7 unjudged or still short, 8 still pending
   handoff --detect | --record --disposition <own-work|handed-off|carrying|dismissed> --reason <text>
           [--brief #N,...] [--open-brief <draft.md>] | --assert-fresh [--call-site <site>] [--base <ref>]
                    The hand-off gate, where .github/niyam.json names "handoff": a push that edits shared
@@ -198,7 +200,7 @@ export function stateArgs(args: readonly string[]): { slice: number; title: stri
 /** Runs one command and returns its exit code: 0 done, 1 failed, 2 bad usage. */
 export async function run(args: readonly string[], io: Output, sys: () => Sys | Promise<Sys>): Promise<number> {
   const [command, ...rest] = args;
-  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'state' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit' || command === SSH_SIGN ? Infinity : command === 'pre-push' || command === 'pr-signals' ? 2 : command === 'doctor' ? 1 : 0;
+  const allowed = command === 'onboard' || command === 'machine' || command === 'cloud-key' || command === 'review-thread' || command === 'as-agent' || command === 'env' || command === 'propose' || command === 'state' || command === 'owner-step' || command === 'handoff' || command === 'brief' || command === 'cubic-dismiss' || command === 'pr-autocreate' || command === 'keep-going' || command === 'doc-number' || command === 'renumber-doc' || command === 'work-item-number' || command === 'board-audit' || command === SSH_SIGN ? Infinity : command === 'pr-signals' ? 5 : command === 'pre-push' ? 2 : command === 'doctor' ? 1 : 0;
   const extra = rest[allowed];
   if (extra !== undefined) {
     io.err(`niyam: unexpected argument "${extra}"`);
