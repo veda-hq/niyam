@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { parse as parseYaml } from 'yaml';
 
@@ -16,6 +17,7 @@ import {
   bodyAt,
   changeRuns,
   client,
+  entry,
   guardPathsIn,
   guardsNamed,
   mergifyTests,
@@ -466,6 +468,8 @@ describe('reading a change', () => {
     assert.equal(workflowOf('a: [b'), undefined);
     // A document that is no mapping, jobs that are no mapping, events of no shape it reads, jobs that are no mapping themselves.
     assert.equal(workflowOf('just text'), undefined);
+    assert.equal(workflowOf(''), undefined, 'an empty file is no workflow');
+    assert.equal(workflowOf('null'), undefined);
     assert.equal(workflowOf('jobs: x'), undefined);
     assert.deepEqual(workflowOf('on: null\njobs: null')?.events, []);
     assert.deepEqual(workflowOf('on: 5\njobs: {}')?.events, []);
@@ -519,13 +523,13 @@ describe('reading a change', () => {
 describe('judging a pull request', () => {
   test('a change to no guard file passes without reading the slice', async () => {
     const gh = github({ files: [modified('src/cli.ts'), modified('README.md')] });
-    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
     assert.ok(!gh.calls.includes('/graphql'));
     assert.ok(!gh.calls.some((call) => call.includes('/issues/')));
   });
 
   test('a guard file the approved Guards: names passes', async () => {
-    assert.deepEqual(await judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents() }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents() }), REPO, 1, OWNERS, []), []);
   });
 
   describe("a slice in another repository, such as a repository's work planned elsewhere", () => {
@@ -553,7 +557,7 @@ describe('judging a pull request', () => {
 
     test('is judged there: its Work item, its approval and its body', async () => {
       const { gh, posts } = elsewhere();
-      assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
       assert.ok(gh.calls.includes(`/repos/${PLANS}/issues/10/parent`));
       assert.ok(!gh.calls.some((call) => call.startsWith(`/repos/${REPO}/issues/`)));
       assert.deepEqual(posts[0]?.variables, { owner: 'other-org', name: 'plans', number: 10 });
@@ -565,7 +569,7 @@ describe('judging a pull request', () => {
       const routes = { [`/repos/${PLANS}/issues/10/parent`]: { status: 404, json: { message: 'Not Found' } } };
       const get = gh.get;
       gh.get = async (path) => routes[path] ?? get(path);
-      const [refusal, ...rest] = await judge(gh, REPO, 1, OWNERS);
+      const [refusal, ...rest] = await judge(gh, REPO, 1, OWNERS, []);
       assert.equal(rest.length, 0);
       assert.match(refusal.message, /but slice other-org\/plans#10 is not a sub-issue of a Work item GitHub can read \(HTTP 404\)/);
     });
@@ -574,7 +578,7 @@ describe('judging a pull request', () => {
       const { gh } = elsewhere();
       const get = gh.get;
       gh.get = async (path) => (path.startsWith(`/repos/${PLANS}/issues/9/timeline`) ? { status: 200, json: [] } : get(path));
-      const [refusal] = await judge(gh, REPO, 1, OWNERS);
+      const [refusal] = await judge(gh, REPO, 1, OWNERS, []);
       assert.match(refusal.message, /but Work item other-org\/plans#9, https:\/\/github.com\/other-org\/plans\/issues\/9, is not approved by Owner, so slice other-org\/plans#10's \*\*Guards:\*\* names nothing yet/);
     });
 
@@ -603,7 +607,7 @@ describe('judging a pull request', () => {
   });
 
   test('a guard file the Guards: does not name is refused, naming the file and how to pass', async () => {
-    const [refusal, ...rest] = await judge(github({ files: [modified('.githooks/pre-push')] }), REPO, 1, OWNERS);
+    const [refusal, ...rest] = await judge(github({ files: [modified('.githooks/pre-push')] }), REPO, 1, OWNERS, []);
     assert.equal(rest.length, 0);
     assert.equal(refusal.file, '.githooks/pre-push');
     assert.match(refusal.message, /changes a guard file, \.githooks\/pre-push/);
@@ -621,23 +625,23 @@ describe('judging a pull request', () => {
       userContentEdits: { totalCount: 2, nodes: [{ editedAt: '2026-01-03T00:00:00Z', diff: '**Guards:** `.githooks/`' }, { editedAt: '2026-01-01T00:00:00Z', diff: 'no guards' }] },
     };
     const over = { '/graphql': { data: { repository: { issue } } } };
-    const refusals = await judge(github({ files: [modified('.githooks/pre-push')], over }), REPO, 1, OWNERS);
+    const refusals = await judge(github({ files: [modified('.githooks/pre-push')], over }), REPO, 1, OWNERS, []);
     assert.equal(refusals.length, 1);
     // One written before it does.
     issue.userContentEdits.nodes[1].diff = '**Guards:** `.githooks/`';
-    assert.deepEqual(await judge(github({ files: [modified('.githooks/pre-push')], over }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files: [modified('.githooks/pre-push')], over }), REPO, 1, OWNERS, []), []);
   });
 
   test('a slice whose revisions GitHub cuts short, or GraphQL that does not answer, is refused', async () => {
     const issue = { body: 'x', createdAt: '2026-01-01T00:00:00Z', lastEditedAt: '2026-01-03T00:00:00Z', userContentEdits: { totalCount: 200, nodes: [] } };
-    let [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { '/graphql': { data: { repository: { issue } } } } }), REPO, 1, OWNERS);
+    let [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { '/graphql': { data: { repository: { issue } } } } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /does not show every revision of slice #10's body/);
-    [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { '/graphql': { status: 502, json: undefined } } }), REPO, 1, OWNERS);
+    [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { '/graphql': { status: 502, json: undefined } } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /GraphQL API did not give slice #10's body revisions \(HTTP 502\)/);
   });
 
   test('a pull request that names no slice is refused', async () => {
-    const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], pull: { body: null } }), REPO, 1, OWNERS);
+    const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], pull: { body: null } }), REPO, 1, OWNERS, []);
     // With no slice there is no address to give yet.
     assert.match(refusal.message, /names no slice\. Add a "Slice: #N" line to its body, name `\.githooks\/pre-push` in the slice's \*\*Guards:\*\* section, and have Owner approve that slice; then edit/);
   });
@@ -647,7 +651,7 @@ describe('judging a pull request', () => {
       { event: 'labeled', label: { name: 'approved' }, actor: { login: 'Owner' }, created_at: APPROVED },
       { event: 'unlabeled', label: { name: 'approved' }, actor: { login: 'Owner' }, created_at: APPROVED },
     ]]) {
-      const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/9/timeline`]: events } }), REPO, 1, OWNERS);
+      const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/9/timeline`]: events } }), REPO, 1, OWNERS, []);
       assert.match(refusal.message, /Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, is not approved by Owner/);
       // A new proposal settles nothing here, so the remedy is what the problem names (#534).
       assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and have Owner put the `approved` label on Work item #9, https:\/\/github\.com\/o\/r\/issues\/9; then edit/);
@@ -656,11 +660,11 @@ describe('judging a pull request', () => {
   });
 
   test('a slice under no Work item is refused', async () => {
-    const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 404, json: { message: 'No parent issue found' } } } }), REPO, 1, OWNERS);
+    const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 404, json: { message: 'No parent issue found' } } } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /slice #10 is not a sub-issue of a Work item GitHub can read \(HTTP 404\)/);
     assert.match(refusal.message, /To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and add slice #10, https:\/\/github\.com\/o\/r\/issues\/10, as a sub-issue of its Work item, and have Owner approve it there; then edit/);
     // A parent GitHub does not answer for is no missing parent: the remedy is a re-run, not a new link.
-    const [unread] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 502, json: { message: 'Bad gateway' } } } }), REPO, 1, OWNERS);
+    const [unread] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/10/parent`]: { status: 502, json: { message: 'Bad gateway' } } } }), REPO, 1, OWNERS, []);
     assert.match(unread.message, /\(HTTP 502\)\. To pass, name `\.githooks\/pre-push` in slice #10's \*\*Guards:\*\* section, and run Guard again once GitHub answers for slice #10's Work item; then edit/);
     assert.doesNotMatch(unread.message, /as a sub-issue/);
   });
@@ -678,12 +682,12 @@ describe('judging a pull request', () => {
     const files = [modified('.githooks/pre-push')];
 
     // None yet.
-    let [refusal] = await judge(github({ files, over: { ...joined, ...graphql } }), REPO, 1, OWNERS);
+    let [refusal] = await judge(github({ files, over: { ...joined, ...graphql } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /slice #10, https:\/\/github\.com\/o\/r\/issues\/10, joined Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, after its approval, and Owner has written no unedited Decision:/);
 
     // One on the slice after the Guards: line: it counts from then.
     const later = { [`/repos/${REPO}/issues/10/comments`]: [decision('2026-01-06T00:00:00Z')] };
-    assert.deepEqual(await judge(github({ files, over: { ...joined, ...graphql, ...later } }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files, over: { ...joined, ...graphql, ...later } }), REPO, 1, OWNERS, []), []);
 
     // One on the Work item naming the slice before it, alone: the Guards: line came after it.
     const onItem = {
@@ -693,15 +697,15 @@ describe('judging a pull request', () => {
         { event: 'commented', ...decision('2026-01-07T00:00:00Z', { body: 'Decision: about #11' }) },
       ],
     };
-    [refusal] = await judge(github({ files, over: { ...joined, ...graphql, ...onItem } }), REPO, 1, OWNERS);
+    [refusal] = await judge(github({ files, over: { ...joined, ...graphql, ...onItem } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /as it stood when Owner's Decision: settled slice #10 \(2026-01-04T00:00:00Z\), Owner's latest answer/);
 
     // The latest answer counts (#534): the Decision on the slice after the Guards: line passes, the earlier one aside.
-    assert.deepEqual(await judge(github({ files, over: { ...joined, ...graphql, ...later, ...onItem } }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files, over: { ...joined, ...graphql, ...later, ...onItem } }), REPO, 1, OWNERS, []), []);
 
     // An edited one, or another login's, does not count.
     const edited = { [`/repos/${REPO}/issues/10/comments`]: [decision('2026-01-06T00:00:00Z', { updated_at: '2026-01-07T00:00:00Z' }), decision('2026-01-06T00:00:00Z', { user: { login: 'AthyaBot' } })] };
-    [refusal] = await judge(github({ files, over: { ...joined, ...graphql, ...edited } }), REPO, 1, OWNERS);
+    [refusal] = await judge(github({ files, over: { ...joined, ...graphql, ...edited } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /no unedited Decision:/);
   });
 
@@ -959,29 +963,29 @@ describe('judging a pull request', () => {
     test('a guard file the tested pull request’s approved slice names passes', async () => {
       const files = [modified('.githooks/pre-push')];
       const gh = github({ files, body: githooks, pull: draft(), over: tested(2, 'Slice: #10') });
-      assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
       assert.ok(gh.calls.includes(`/repos/${REPO}/pulls/2`));
     });
 
     test('a merged draft, retitled after it closes, is judged as the pull request it merged, as it was while checking (#532)', async () => {
       const files = [modified('.githooks/pre-push')];
       const merged = draft('merge queue: merged #2: ✨ feat(x): y', { state: 'closed', draft: true });
-      assert.deepEqual(await judge(github({ files, body: githooks, pull: merged, over: tested(2, 'Slice: #10') }), REPO, 1, OWNERS), []);
+      assert.deepEqual(await judge(github({ files, body: githooks, pull: merged, over: tested(2, 'Slice: #10') }), REPO, 1, OWNERS, []), []);
       // athya_mono#3839: judged as itself, it named no slice and was refused.
-      const refusals = await judge(github({ files, body: githooks, pull: merged, over: tested(2, 'no slice here') }), REPO, 1, OWNERS);
+      const refusals = await judge(github({ files, body: githooks, pull: merged, over: tested(2, 'no slice here') }), REPO, 1, OWNERS, []);
       assert.equal(refusals.length, 1);
       assert.match(refusals[0].message, /^This is Mergify's merge-queue draft testing #2, and none of them passes this\. As #2: /);
     });
 
     test('one no tested pull request passes is refused, saying so', async () => {
       const files = [modified('.githooks/pre-push')];
-      const [refusal, ...rest] = await judge(github({ files, body: githooks, pull: draft(), over: tested(2, 'no slice') }), REPO, 1, OWNERS);
+      const [refusal, ...rest] = await judge(github({ files, body: githooks, pull: draft(), over: tested(2, 'no slice') }), REPO, 1, OWNERS, []);
       assert.equal(refusal.file, '.githooks/pre-push');
       assert.match(refusal.message, /^This is Mergify's merge-queue draft testing #2, and none of them passes this\. As #2: This pull request changes a guard file, \.githooks\/pre-push, and names no slice\./);
       assert.deepEqual(rest, []);
       // A file the slice does not name is refused, even one only the draft changes.
       const more = [modified('.githooks/pre-push'), modified('.husky/pre-commit')];
-      const refusals = await judge(github({ files: more, body: githooks, pull: draft(), over: tested(2, 'Slice: #10') }), REPO, 1, OWNERS);
+      const refusals = await judge(github({ files: more, body: githooks, pull: draft(), over: tested(2, 'Slice: #10') }), REPO, 1, OWNERS, []);
       assert.deepEqual(refusals.map((one) => one.file), ['.husky/pre-commit']);
     });
 
@@ -990,7 +994,7 @@ describe('judging a pull request', () => {
       const pull = draft('merge queue: checking #2 on main (0aa2f20), stacked on #3');
       const over = { ...tested(2, 'Slice: #10'), ...tested(3, 'no slice') };
       const gh = github({ files, body: githooks, pull, over });
-      const refusals = await judge(gh, REPO, 1, OWNERS);
+      const refusals = await judge(gh, REPO, 1, OWNERS, []);
       // .githooks/ passes as #2, though #3 names no slice; .husky/ passes as neither.
       assert.deepEqual(refusals.map((one) => one.file), ['.husky/pre-commit']);
       // The draft's diff is read once, however many pull requests it tests.
@@ -1007,16 +1011,16 @@ describe('judging a pull request', () => {
         [`/repos/${NIYAM}/compare/main...${'d'.repeat(40)}`]: { status: 'behind' },
       };
       const onboard = tested(2, 'no slice', '🔧 chore(niyam): onboard at v0.6.17');
-      assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: draft(), over: { ...tag, ...onboard } }), REPO, 1, OWNERS), []);
+      assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: draft(), over: { ...tag, ...onboard } }), REPO, 1, OWNERS, []), []);
       // The draft's own title is no onboard's, so as itself it is refused, as #3822 was.
-      assert.equal((await judge(github({ files, contents, body: 'none', pull: draft('merge queue: checking it'), over: { ...tag, ...onboard } }), REPO, 1, OWNERS)).length, 1);
+      assert.equal((await judge(github({ files, contents, body: 'none', pull: draft('merge queue: checking it'), over: { ...tag, ...onboard } }), REPO, 1, OWNERS, [])).length, 1);
     });
 
     test('a draft not of Mergify’s, or with work rules off, is judged as itself', async () => {
       const files = [modified('.githooks/pre-push')];
       const over = tested(2, 'Slice: #10');
       // As itself it names slice #10 nowhere, so the approved slice does not count.
-      const [refusal] = await judge(github({ files, body: githooks, pull: draft(undefined, { user: { login: 'AthyaBot', type: 'User' } }), over }), REPO, 1, OWNERS);
+      const [refusal] = await judge(github({ files, body: githooks, pull: draft(undefined, { user: { login: 'AthyaBot', type: 'User' } }), over }), REPO, 1, OWNERS, []);
       assert.match(refusal.message, /^This pull request changes a guard file, \.githooks\/pre-push, and names no slice\./);
       const gh = github({ files, body: githooks, pull: draft(), over });
       const unjudged = [];
@@ -1026,14 +1030,14 @@ describe('judging a pull request', () => {
     });
 
     test('a tested pull request GitHub cannot give fails closed', async () => {
-      await assert.rejects(judge(github({ files: [modified('.githooks/pre-push')], pull: draft() }), REPO, 1, OWNERS), /GitHub did not answer \/repos\/o\/r\/pulls\/2 \(HTTP 404: Not Found\)/);
+      await assert.rejects(judge(github({ files: [modified('.githooks/pre-push')], pull: draft() }), REPO, 1, OWNERS, []), /GitHub did not answer \/repos\/o\/r\/pulls\/2 \(HTTP 404: Not Found\)/);
     });
 
     test('a batch draft passes a file as any pull request it tests (#524)', async () => {
       const files = [modified('.githooks/pre-push')];
       const pull = draft('merge queue: checking #2 + #3 together on main (7514101)');
       const over = { ...tested(2, 'no slice'), ...tested(3, 'Slice: #10') };
-      assert.deepEqual(await judge(github({ files, body: githooks, pull, over }), REPO, 1, OWNERS), []);
+      assert.deepEqual(await judge(github({ files, body: githooks, pull, over }), REPO, 1, OWNERS, []), []);
     });
 
     test('knows Mergify as PR identity does: both import scripts/merge-queue.mjs (#524)', () => {
@@ -1048,30 +1052,30 @@ describe('judging a pull request', () => {
   test('package.json counts for its scripts alone', async () => {
     const pkg = (scripts) => JSON.stringify({ version: scripts ? '2' : '1', scripts: scripts ?? { check: 'pnpm test' } });
     const files = [modified('package.json')];
-    assert.deepEqual(await judge(github({ files, contents: { 'package.json@m': pkg(), 'package.json@h': pkg(undefined).replace('"1"', '"3"') } }), REPO, 1, OWNERS), []);
-    const [refusal] = await judge(github({ files, contents: { 'package.json@m': pkg(), 'package.json@h': pkg({ check: 'true' }) } }), REPO, 1, OWNERS);
+    assert.deepEqual(await judge(github({ files, contents: { 'package.json@m': pkg(), 'package.json@h': pkg(undefined).replace('"1"', '"3"') } }), REPO, 1, OWNERS, []), []);
+    const [refusal] = await judge(github({ files, contents: { 'package.json@m': pkg(), 'package.json@h': pkg({ check: 'true' }) } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /changes the scripts of package\.json, a guard file/);
     // Not JSON, or removed, changes them too.
-    assert.equal((await judge(github({ files, contents: { 'package.json@m': pkg(), 'package.json@h': '{' } }), REPO, 1, OWNERS)).length, 1);
-    assert.equal((await judge(github({ files: [{ ...files[0], status: 'removed' }], contents: { 'package.json@m': pkg() } }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files, contents: { 'package.json@m': pkg(), 'package.json@h': '{' } }), REPO, 1, OWNERS, [])).length, 1);
+    assert.equal((await judge(github({ files: [{ ...files[0], status: 'removed' }], contents: { 'package.json@m': pkg() } }), REPO, 1, OWNERS, [])).length, 1);
   });
 
   test('a file GitHub cannot give fails closed', async () => {
-    await assert.rejects(judge(github({ files: [modified('package.json')], contents: {}, over: { [`/repos/${REPO}/compare/b...h`]: { status: 500, json: { message: 'oops' } } } }), REPO, 1, OWNERS), /GitHub did not answer \/repos\/o\/r\/compare\/b\.\.\.h \(HTTP 500: oops\)/);
+    await assert.rejects(judge(github({ files: [modified('package.json')], contents: {}, over: { [`/repos/${REPO}/compare/b...h`]: { status: 500, json: { message: 'oops' } } } }), REPO, 1, OWNERS, []), /GitHub did not answer \/repos\/o\/r\/compare\/b\.\.\.h \(HTTP 500: oops\)/);
     const gh = github({ files: [modified('package.json')] });
     const get = gh.get;
     gh.get = async (path, options) => (path.includes('/contents/') ? { status: 403, text: '' } : get(path, options));
-    await assert.rejects(judge(gh, REPO, 1, OWNERS), /did not answer package\.json at h \(HTTP 403\)/);
-    await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1/files`]: { a: 1 } } }), REPO, 1, OWNERS), /did not answer a list/);
+    await assert.rejects(judge(gh, REPO, 1, OWNERS, []), /did not answer package\.json at h \(HTTP 403\)/);
+    await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1/files`]: { a: 1 } } }), REPO, 1, OWNERS, []), /did not answer a list/);
   });
 
   test('a renamed guard file counts under both names', async () => {
-    const refusals = await judge(github({ files: [{ filename: 'docs/x.sh', previous_filename: '.githooks/pre-push', status: 'renamed', patch: '' }] }), REPO, 1, OWNERS);
+    const refusals = await judge(github({ files: [{ filename: 'docs/x.sh', previous_filename: '.githooks/pre-push', status: 'renamed', patch: '' }] }), REPO, 1, OWNERS, []);
     assert.deepEqual(refusals.map((refusal) => refusal.file), ['.githooks/pre-push']);
   });
 
   test('test files: deleted, fewer tests, skips, renamed away or unreadable need naming', async () => {
-    const one = async (file, body = 'none') => judge(github({ files: [file], body }), REPO, 1, OWNERS);
+    const one = async (file, body = 'none') => judge(github({ files: [file], body }), REPO, 1, OWNERS, []);
     assert.match((await one({ filename: 'src/a.test.ts', status: 'removed' }))[0].message, /deletes a test file, src\/a\.test\.ts/);
     assert.match((await one(modified('src/a.test.ts', "@@ -1 +0,0 @@\n-test('a', () => {})")))[0].message, /fewer test\( or it\( calls than main/);
     assert.match((await one(modified('src/a.test.ts', "@@ -1 +1 @@\n-test('a', () => {})\n+test.only('a', () => {})")))[0].message, /adds \.skip, \.only or todo/);
@@ -1084,7 +1088,7 @@ describe('judging a pull request', () => {
   });
 
   test('a file list GitHub truncates fails closed', async () => {
-    const [refusal] = await judge(github({ files: [modified('README.md')], pull: { changed_files: 3001 } }), REPO, 1, OWNERS);
+    const [refusal] = await judge(github({ files: [modified('README.md')], pull: { changed_files: 3001 } }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /GitHub listed 1 of this pull request's 3001 changed files/);
   });
 
@@ -1092,16 +1096,16 @@ describe('judging a pull request', () => {
     const patch = `@@ -1 +1 @@\n-      - uses: actions/checkout@${SHA_A} # v7.0.0\n+      - uses: actions/checkout@${SHA_B} # v7.0.1`;
     const files = [modified('.github/workflows/release.yml', patch)];
     const contents = { '.github/workflows/release.yml@h': WORKFLOW([['a']]), '.github/workflows/release.yml@m': WORKFLOW([['a']]) };
-    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: { user: { login: 'dependabot[bot]' } } }), REPO, 1, OWNERS), []);
-    assert.equal((await judge(github({ files, contents, body: 'none' }), REPO, 1, OWNERS)).length, 1);
+    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: { user: { login: 'dependabot[bot]' } } }), REPO, 1, OWNERS, []), []);
+    assert.equal((await judge(github({ files, contents, body: 'none' }), REPO, 1, OWNERS, [])).length, 1);
     const more = [...files, modified('.githooks/pre-push')];
-    assert.equal((await judge(github({ files: more, contents, body: 'none', pull: { user: { login: 'dependabot[bot]' } } }), REPO, 1, OWNERS)).length, 2);
+    assert.equal((await judge(github({ files: more, contents, body: 'none', pull: { user: { login: 'dependabot[bot]' } } }), REPO, 1, OWNERS, [])).length, 2);
   });
 
   test("a guard path of the repository's own needs naming", async () => {
     const [refusal] = await judge(github({ files: [modified('scripts/guard.mjs')] }), REPO, 1, OWNERS, ['scripts/*.mjs']);
     assert.match(refusal.message, /changes a guard file, scripts\/guard\.mjs/);
-    assert.deepEqual(await judge(github({ files: [modified('scripts/guard.mjs')] }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files: [modified('scripts/guard.mjs')] }), REPO, 1, OWNERS, []), []);
   });
 
   test('onboard moving niyam to a newer release on main passes unnamed', async () => {
@@ -1117,32 +1121,32 @@ describe('judging a pull request', () => {
       [`/repos/${NIYAM}/git/tags/${TAG}`]: { object: { type: 'commit', sha: COMMIT } },
       [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status },
     });
-    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS), []);
-    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('identical') }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS, []), []);
+    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('identical') }), REPO, 1, OWNERS, []), []);
     // A lightweight tag names its commit itself.
-    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('behind', { object: { type: 'commit', sha: COMMIT } }) }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files, contents, body: 'none', pull, over: tagged('behind', { object: { type: 'commit', sha: COMMIT } }) }), REPO, 1, OWNERS, []), []);
     // A tag off main, one GitHub cannot find, or an annotated tag it cannot read, is no exemption.
-    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: tagged('diverged') }), REPO, 1, OWNERS)).length, 1);
-    assert.equal((await judge(github({ files, contents, body: 'none', pull }), REPO, 1, OWNERS)).length, 1);
-    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: { ...tagged('behind'), [`/repos/${NIYAM}/git/tags/${TAG}`]: { status: 404, json: {} } } }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: tagged('diverged') }), REPO, 1, OWNERS, [])).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull }), REPO, 1, OWNERS, [])).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: { ...tagged('behind'), [`/repos/${NIYAM}/git/tags/${TAG}`]: { status: 404, json: {} } } }), REPO, 1, OWNERS, [])).length, 1);
     // A tag of the onboarded repository's own is no exemption either: the release is niyam's.
     const own = Object.fromEntries(Object.entries(tagged('behind')).map(([path, route]) => [path.replace(NIYAM, REPO), route]));
-    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: own }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull, over: own }), REPO, 1, OWNERS, [])).length, 1);
     // Nor are sha256 swaps that move no version.
     const swap = [modified('.github/niyam/cloud-setup.sh', `@@ -1 +1 @@\n-x ${'1'.repeat(64)}\n+x ${'2'.repeat(64)}`)];
-    assert.equal((await judge(github({ files: swap, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files: swap, body: 'none', pull, over: tagged('behind') }), REPO, 1, OWNERS, [])).length, 1);
     // Nor is a title for another release than the lines move to.
-    assert.equal((await judge(github({ files, contents, body: 'none', pull: { title: 'chore(niyam): onboard at v0.6.18' } }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull: { title: 'chore(niyam): onboard at v0.6.18' } }), REPO, 1, OWNERS, [])).length, 1);
     // A title with no gitmoji, or with spaces after it, is onboard's; one that opens with other words is not.
     for (const title of ['chore(niyam): onboard at v0.6.17', '🔧  chore(niyam): onboard at v0.6.17']) {
-      assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: { title }, over: tagged('behind') }), REPO, 1, OWNERS), [], title);
+      assert.deepEqual(await judge(github({ files, contents, body: 'none', pull: { title }, over: tagged('behind') }), REPO, 1, OWNERS, []), [], title);
     }
-    assert.equal((await judge(github({ files, contents, body: 'none', pull: { title: 'see 🔧 chore(niyam): onboard at v0.6.17' }, over: tagged('behind') }), REPO, 1, OWNERS)).length, 1);
+    assert.equal((await judge(github({ files, contents, body: 'none', pull: { title: 'see 🔧 chore(niyam): onboard at v0.6.17' }, over: tagged('behind') }), REPO, 1, OWNERS, [])).length, 1);
     // Releases of any width.
     for (const version of ['10.0.0', '0.16.0']) {
       const wide = [modified('.github/workflows/niyam.yml', `@@ -1 +1 @@\n-    uses: veda-hq/niyam/.github/workflows/checks.yml@v0.6.16\n+    uses: veda-hq/niyam/.github/workflows/checks.yml@v${version}`)];
       const route = { [`/repos/${NIYAM}/git/ref/tags/v${version}`]: { object: { type: 'commit', sha: COMMIT } }, [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status: 'behind' } };
-      assert.deepEqual(await judge(github({ files: wide, contents, body: 'none', pull: { title: `🔧 chore(niyam): onboard at v${version}` }, over: route }), REPO, 1, OWNERS), [], version);
+      assert.deepEqual(await judge(github({ files: wide, contents, body: 'none', pull: { title: `🔧 chore(niyam): onboard at v${version}` }, over: route }), REPO, 1, OWNERS, []), [], version);
     }
   });
 
@@ -1264,7 +1268,7 @@ describe('judging a pull request', () => {
       body: '**Guards:** `.github/workflows/`',
       over: onMain('v0.8.0'),
     });
-    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
     assert.equal(gh.calls.filter((call) => call === `/repos/${NIYAM}/git/ref/tags/v0.8.0`).length, 1);
   });
 
@@ -1278,19 +1282,19 @@ describe('judging a pull request', () => {
   test('a workflow change when the ruleset cannot be read fails closed', async () => {
     const files = [modified('.github/workflows/ci.yml')];
     const contents = ciContents();
-    await assert.rejects(judge(github({ files, contents, over: { [`/repos/${REPO}/rules/branches/main`]: { status: 403, json: { message: 'Resource not accessible' } } } }), REPO, 1, OWNERS), /HTTP 403: Resource not accessible/);
-    await assert.rejects(judge(github({ files, contents, over: { [`/repos/${REPO}/rules/branches/main`]: { a: 1 } } }), REPO, 1, OWNERS), /rules as a list/);
+    await assert.rejects(judge(github({ files, contents, over: { [`/repos/${REPO}/rules/branches/main`]: { status: 403, json: { message: 'Resource not accessible' } } } }), REPO, 1, OWNERS, []), /HTTP 403: Resource not accessible/);
+    await assert.rejects(judge(github({ files, contents, over: { [`/repos/${REPO}/rules/branches/main`]: { a: 1 } } }), REPO, 1, OWNERS, []), /rules as a list/);
   });
 
   test('a removed workflow reports nothing', async () => {
-    assert.deepEqual(await judge(github({ files: [{ filename: '.github/workflows/ci.yml', status: 'removed' }] }), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(github({ files: [{ filename: '.github/workflows/ci.yml', status: 'removed' }] }), REPO, 1, OWNERS, []), []);
   });
 
   test('a workflow is a .yml or .yaml right in .github/workflows/, nowhere else', async () => {
     const job = WORKFLOW([['check', 'Typecheck, test, build']]);
     for (const path of ['docs/.github/workflows/ci.yml', '.github/workflows/ci.yml.txt']) {
       const gh = github({ files: [modified(path)], contents: { [`${path}@h`]: job }, body: '**Guards:** `.github/`' });
-      assert.deepEqual(await judge(gh, REPO, 1, OWNERS), [], path);
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), [], path);
     }
   });
 
@@ -1302,7 +1306,7 @@ describe('judging a pull request', () => {
       posted.push([path, body]);
       return post(path, body);
     };
-    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
     assert.deepEqual(posted, [
       [
         '/graphql',
@@ -1325,22 +1329,22 @@ describe('judging a pull request', () => {
       raw.push(options?.raw);
       return { status: 500, json: undefined, text: '' };
     };
-    await assert.rejects(judge(gh, REPO, 1, OWNERS), /^Error: GitHub did not answer \.github\/workflows\/ci\.yml at abcdef0 \(HTTP 500\)$/);
+    await assert.rejects(judge(gh, REPO, 1, OWNERS, []), /^Error: GitHub did not answer \.github\/workflows\/ci\.yml at abcdef0 \(HTTP 500\)$/);
     assert.deepEqual(raw, [true]);
   });
 
   test("a read GitHub refuses with no message fails closed, saying the status alone", async () => {
     for (const json of [null, {}]) {
-      await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1`]: { status: 500, json } } }), REPO, 1, OWNERS), /^Error: GitHub did not answer \/repos\/o\/r\/pulls\/1 \(HTTP 500\)$/);
+      await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1`]: { status: 500, json } } }), REPO, 1, OWNERS, []), /^Error: GitHub did not answer \/repos\/o\/r\/pulls\/1 \(HTTP 500\)$/);
     }
     // So does an answer that is no JSON.
-    await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1`]: { status: 200, json: undefined } } }), REPO, 1, OWNERS), /^Error: GitHub did not answer \/repos\/o\/r\/pulls\/1 \(HTTP 200\)$/);
+    await assert.rejects(judge(github({ over: { [`/repos/${REPO}/pulls/1`]: { status: 200, json: undefined } } }), REPO, 1, OWNERS, []), /^Error: GitHub did not answer \/repos\/o\/r\/pulls\/1 \(HTTP 200\)$/);
   });
 
   test('a list GitHub does not hold fails closed, unless it may be missing', async () => {
     // The slice's own comments are always there.
     await assert.rejects(
-      judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents(), over: { [`/repos/${REPO}/issues/10/comments`]: { status: 404, json: { message: 'Not Found' } } } }), REPO, 1, OWNERS),
+      judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents(), over: { [`/repos/${REPO}/issues/10/comments`]: { status: 404, json: { message: 'Not Found' } } } }), REPO, 1, OWNERS, []),
       /GitHub did not answer \/repos\/o\/r\/issues\/10\/comments \(HTTP 404: Not Found\)/,
     );
     // An Approvals issue GitHub cannot find answers nothing.
@@ -1351,13 +1355,13 @@ describe('judging a pull request', () => {
 
   test("an approval by no one GitHub names is no owner's", async () => {
     const over = { [`/repos/${REPO}/issues/9/timeline`]: [{ event: 'labeled', label: { name: 'approved' }, created_at: APPROVED }] };
-    const [refusal] = await judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents(), over }), REPO, 1, OWNERS);
+    const [refusal] = await judge(github({ files: [modified('.github/workflows/ci.yml')], contents: ciContents(), over }), REPO, 1, OWNERS, []);
     assert.match(refusal.message, /Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, is not approved by Owner/);
   });
 
   test('package.json whose text does not parse needs naming where there was none, even when it reads undefined', async () => {
     const files = [{ filename: 'package.json', status: 'added', patch: '@@ -0,0 +1 @@\n+undefined' }];
-    const [refusal, ...rest] = await judge(github({ files, contents: { 'package.json@h': 'undefined' }, body: '**Guards:** `.github/`' }), REPO, 1, OWNERS);
+    const [refusal, ...rest] = await judge(github({ files, contents: { 'package.json@h': 'undefined' }, body: '**Guards:** `.github/`' }), REPO, 1, OWNERS, []);
     assert.deepEqual(rest, []);
     assert.match(refusal.message, /changes the scripts of package\.json, a guard file, package\.json/);
   });
@@ -1383,11 +1387,11 @@ describe('reading every page', () => {
   test('reads past a full page, and stops at the most it reads', async () => {
     // The approval on the second page of 150 events still counts.
     const events = [...Array.from({ length: 149 }, () => ({ event: 'commented', created_at: '2025-12-01T00:00:00Z' })), { event: 'labeled', label: { name: 'approved' }, actor: { login: 'owner' }, created_at: APPROVED }];
-    assert.deepEqual(await judge(paging(github({ files, contents: ciContents() }), `/repos/${REPO}/issues/9/timeline`, events), REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(paging(github({ files, contents: ciContents() }), `/repos/${REPO}/issues/9/timeline`, events), REPO, 1, OWNERS, []), []);
     // 3,000 files are read in 30 pages, and no 31st.
     const many = Array.from({ length: 3000 }, (_, i) => modified(`src/a${i}.ts`));
     const gh = paging(github({ files: many }), `/repos/${REPO}/pulls/1/files`, many);
-    assert.deepEqual(await judge(gh, REPO, 1, OWNERS), []);
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
     assert.equal(gh.calls.filter((call) => call.startsWith(`/repos/${REPO}/pulls/1/files?`)).length, 30);
   });
 
@@ -1407,6 +1411,364 @@ describe('reading every page', () => {
     const gh = github({ files, contents: ciContents(), over });
     assert.deepEqual(await judge(gh, REPO, 1, OWNERS, [], 'main', undefined, undefined, ['AthyaBot']), []);
     assert.ok(gh.calls.includes(`/repos/${REPO}/issues/comments/5/reactions?content=%2B1&per_page=100&page=1`), gh.calls.join('\n'));
+  });
+});
+
+describe('judging, at its edges (#632)', () => {
+  const files = [modified('.github/workflows/ci.yml')];
+  /** The slice joined Work item #9 after its approval, at `joined`, so only an answer since settles it. */
+  const late = (joined = '2026-01-03T00:00:00Z') => ({ [`/repos/${REPO}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: joined }] });
+  const owner = (body, at, extra = {}) => ({ user: { login: 'Owner' }, body, created_at: at, updated_at: at, ...extra });
+  const settledBy = async (over, agents = []) => judge(github({ files, contents: ciContents(), over }), REPO, 1, OWNERS, [], 'main', undefined, undefined, agents);
+
+  test("package.json's scripts compare by text where they do not parse", async () => {
+    const pkg = [modified('package.json')];
+    const [refusal] = await judge(github({ files: pkg, contents: { 'package.json@m': 'not json', 'package.json@h': 'not json either' }, body: 'none' }), REPO, 1, OWNERS, []);
+    assert.match(refusal.message, /changes the scripts of package\.json, a guard file, package\.json/);
+    assert.deepEqual(await judge(github({ files: pkg, contents: { 'package.json@m': 'not json', 'package.json@h': 'not json' }, body: 'none' }), REPO, 1, OWNERS, []), []);
+  });
+
+  test("reads niyam's tag as a commit on niyam's main, and nothing GitHub gives that is not one", async () => {
+    const caller = 'name: niyam guard\non:\n  pull_request_target:\n    branches: [main]\njobs:\n  niyam-guard:\n    name: niyam-guard\n    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@v0.8.0\n';
+    const pin = (over) =>
+      judge(github({ files: [modified('.github/workflows/niyam-guard.yml')], contents: { '.github/workflows/niyam-guard.yml@h': caller }, body: '**Guards:** `.github/workflows/`', over }), REPO, 1, OWNERS, []);
+    const TAG = 'c'.repeat(40);
+    const COMMIT = 'd'.repeat(40);
+    const ref = `/repos/${NIYAM}/git/ref/tags/v0.8.0`;
+    const tag = `/repos/${NIYAM}/git/tags/${TAG}`;
+    const behind = { [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status: 'behind' } };
+    assert.deepEqual(await pin({ [ref]: { object: { type: 'tag', sha: TAG } }, [tag]: { object: { type: 'commit', sha: COMMIT } }, ...behind }), []);
+    for (const [why, over] of [
+      ['a ref GitHub refuses', { [ref]: { status: 404, json: { object: { type: 'commit', sha: COMMIT } } }, ...behind }],
+      ['a ref of no JSON', { [ref]: { status: 200, json: null }, ...behind }],
+      ['an annotated tag GitHub refuses', { [ref]: { object: { type: 'tag', sha: TAG } }, [tag]: { status: 404, json: { object: { type: 'commit', sha: COMMIT } } }, ...behind }],
+      ['an annotated tag of no JSON', { [ref]: { object: { type: 'tag', sha: TAG } }, [tag]: { status: 200, json: null }, ...behind }],
+      ['a commit of no sha', { [ref]: { object: { type: 'commit' } }, ...behind }],
+      ['a sha with more before it', { [ref]: { object: { type: 'commit', sha: `x${COMMIT}` } }, [`/repos/${NIYAM}/compare/main...x${COMMIT}`]: { status: 'behind' } }],
+      ['a sha with more after it', { [ref]: { object: { type: 'commit', sha: `${COMMIT}x` } }, [`/repos/${NIYAM}/compare/main...${COMMIT}x`]: { status: 'behind' } }],
+      ['a compare GitHub refuses', { [ref]: { object: { type: 'commit', sha: COMMIT } }, [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status: 404, json: { status: 'behind' } } }],
+      ['a compare of no JSON', { [ref]: { object: { type: 'commit', sha: COMMIT } }, [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status: 200, json: null } }],
+    ]) {
+      const refusals = await pin(over);
+      assert.ok(refusals.some((refusal) => refusal.message.includes("a tag that is not on veda-hq/niyam's main")), `${why}: ${JSON.stringify(refusals)}`);
+    }
+  });
+
+  test("another repository's settings name its Approvals issue only where its default branch is a name, and that do not parse name none", async () => {
+    const PLANS = 'other-org/plans';
+    const there = (repository, contents = {}) => {
+      const over = {
+        [`/repos/${REPO}/issues/10/parent`]: undefined,
+        [`/repos/${PLANS}`]: repository,
+        [`/repos/${PLANS}/issues/10/parent`]: { number: 9 },
+        [`/repos/${PLANS}/issues/9/timeline`]: [{ event: 'labeled', label: { name: 'approved' }, actor: { login: 'owner' }, created_at: APPROVED }],
+        [`/repos/${PLANS}/issues/10/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-01T00:00:00Z' }],
+        [`/repos/${PLANS}/issues/10/comments`]: [],
+      };
+      return github({ files, pull: { body: `Slice: ${PLANS}#10` }, contents: { ...ciContents(), ...contents }, over });
+    };
+    for (const repository of [{ default_branch: '' }, { default_branch: 7 }, {}]) {
+      const gh = there(repository);
+      assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), [], JSON.stringify(repository));
+      assert.ok(!gh.calls.some((call) => call.startsWith(`/repos/${PLANS}/contents/`)), JSON.stringify(gh.calls));
+    }
+    const unparsed = there({ default_branch: 'trunk' }, { '.github/niyam.json@trunk': '{' });
+    assert.deepEqual(await judge(unparsed, REPO, 1, OWNERS, []), []);
+    assert.ok(!unparsed.calls.some((call) => /\/issues\/\d+\/comments/.test(call) && !call.includes('/issues/10/')), 'no Approvals issue read');
+  });
+
+  test('names every owner in its refusals', async () => {
+    const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')] }), REPO, 1, ['Owner', 'Second'], []);
+    assert.match(refusal.message, /as it stood when Work item #9 got the approved label \(2026-01-02T00:00:00Z\), Owner or Second's latest answer/);
+    const [unapproved] = await judge(github({ files: [modified('.githooks/pre-push')], over: { [`/repos/${REPO}/issues/9/timeline`]: [] } }), REPO, 1, ['Owner', 'Second'], []);
+    assert.match(unapproved.message, /is not approved by Owner or Second, so slice #10's/);
+  });
+
+  test("a slice joins at the last time it was added, whatever order GitHub lists them in", async () => {
+    const timeline = [
+      { event: 'parent_issue_added', created_at: '2026-01-03T00:00:00Z' },
+      { event: 'parent_issue_added', created_at: '2026-01-01T00:00:00Z' },
+    ];
+    const [refusal] = await settledBy({ [`/repos/${REPO}/issues/10/timeline`]: timeline });
+    assert.match(refusal?.message ?? '', /joined Work item #9, https:\/\/github\.com\/o\/r\/issues\/9, after its approval/);
+  });
+
+  test("holds a caller's pin back to the newest release the default branch's copy pins, whatever order its jobs are in", async () => {
+    const job = (id, ref) => `  ${id}:\n    name: ${id}\n    uses: veda-hq/niyam/.github/workflows/shared-guard.yml@${ref}\n`;
+    const caller = (...refs) => `name: niyam guard\non:\n  pull_request_target:\n    branches: [main]\njobs:\n${refs.map((ref, i) => job(`niyam-guard${i ? `-${i}` : ''}`, ref)).join('')}`;
+    const gh = github({
+      files: [modified('.github/workflows/niyam-guard.yml')],
+      contents: { '.github/workflows/niyam-guard.yml@h': caller('v0.8.5'), '.github/workflows/niyam-guard.yml@main': caller('v0.9.0', 'v0.8.0') },
+      body: '**Guards:** `.github/workflows/`',
+      over: onMain('v0.8.5'),
+    });
+    const refusals = await judge(gh, REPO, 1, OWNERS, []);
+    assert.ok(refusals.some((refusal) => refusal.message.includes("at v0.8.5, older than v0.9.0, which main's copy pins")), JSON.stringify(refusals));
+  });
+
+  test('a stacked draft passes each file some pull request it tests passes, though none passes them all', async () => {
+    const draft = { title: 'merge queue: checking #2 on main (634865a), stacked on #3', body: 'x', user: { login: 'mergify[bot]', type: 'Bot' }, head: { sha: 'h', ref: 'mergify/merge-queue/1', repo: { full_name: REPO } } };
+    const over = {
+      [`/repos/${REPO}/pulls/2`]: { title: '✨ feat(x): y', body: 'Slice: #10', user: { login: 'AthyaBot', type: 'User' } },
+      [`/repos/${REPO}/pulls/3`]: { title: '✨ feat(x): z', body: 'Slice: #11', user: { login: 'AthyaBot', type: 'User' } },
+      [`/repos/${REPO}/issues/11/parent`]: { number: 9 },
+      [`/repos/${REPO}/issues/11/timeline`]: [{ event: 'parent_issue_added', created_at: '2026-01-01T00:00:00Z' }],
+      [`/repos/${REPO}/issues/11/comments`]: [],
+    };
+    const gh = github({ files: [modified('.githooks/pre-push'), modified('.husky/pre-commit')], pull: draft, over });
+    const post = gh.post;
+    // Slice #10 names the git hooks alone, slice #11 the husky ones alone.
+    const bodies = { 10: '**Guards:** `.githooks/`', 11: '**Guards:** `.husky/`' };
+    gh.post = async (path, body) => {
+      const answer = await post(path, body);
+      return { ...answer, json: { data: { repository: { issue: { ...answer.json.data.repository.issue, body: bodies[body.variables.number] } } } } };
+    };
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
+  });
+
+  test("takes the Work item's last approved label alone, past events of other labels or none", async () => {
+    const approved = { event: 'labeled', label: { name: 'approved' }, actor: { login: 'owner' }, created_at: APPROVED };
+    const later = '2026-01-02T12:00:00Z';
+    for (const after of [
+      { event: 'labeled', label: { name: 'bug' }, actor: { login: 'someone' }, created_at: later },
+      { event: 'unlabeled', label: { name: 'bug' }, actor: { login: 'someone' }, created_at: later },
+      { event: 'milestoned', label: { name: 'approved' }, actor: { login: 'someone' }, created_at: later },
+      { event: 'labeled', actor: { login: 'someone' }, created_at: later },
+    ]) {
+      assert.deepEqual(await settledBy({ [`/repos/${REPO}/issues/9/timeline`]: [approved, after] }), [], JSON.stringify(after));
+    }
+  });
+
+  test('a slice joins when it is added, not at its other events, and joining as it is approved is joining before', async () => {
+    const timeline = [
+      { event: 'parent_issue_added', created_at: '2026-01-01T00:00:00Z' },
+      { event: 'commented', created_at: '2026-01-05T00:00:00Z' },
+    ];
+    assert.deepEqual(await settledBy({ [`/repos/${REPO}/issues/10/timeline`]: timeline }), []);
+    assert.deepEqual(await settledBy(late(APPROVED)), []);
+  });
+
+  test("counts a Decision after the slice joined, opening its first line, spaces before it or not, and nothing else", async () => {
+    const joined = '2026-01-03T00:00:00Z';
+    const comments = (body, at) => ({ ...late(joined), [`/repos/${REPO}/issues/10/comments`]: [owner(body, at)] });
+    assert.deepEqual(await settledBy(comments('  Decision: approve', '2026-01-04T00:00:00Z')), []);
+    for (const [body, at] of [
+      ['Decision: approve', joined],
+      ['I see no Decision: yet', '2026-01-04T00:00:00Z'],
+      [null, '2026-01-04T00:00:00Z'],
+    ]) {
+      assert.match((await settledBy(comments(body, at)))[0]?.message ?? '', /has written no unedited Decision: settling it since/, String(body));
+    }
+    // On the Work item, only its comments count.
+    const event = { event: 'cross-referenced', body: 'Decision: approve #10', user: { login: 'Owner' }, created_at: '2026-01-04T00:00:00Z', updated_at: '2026-01-04T00:00:00Z' };
+    const timeline = [{ event: 'labeled', label: { name: 'approved' }, actor: { login: 'owner' }, created_at: APPROVED }, event];
+    assert.match((await settledBy({ ...late(joined), [`/repos/${REPO}/issues/9/timeline`]: timeline }))[0]?.message ?? '', /has written no unedited Decision/);
+  });
+
+  test('reads no Approvals issue where the settings name none', async () => {
+    const gh = github({ files, contents: ciContents(), over: late() });
+    await judge(gh, REPO, 1, OWNERS, []);
+    assert.ok(!gh.calls.some((call) => call.includes('/issues/undefined')), gh.calls.join('\n'));
+  });
+
+  test('settles a slice by the latest of two answers given at one moment, as it lists them', async () => {
+    const at = '2026-01-04T00:00:00Z';
+    const over = { ...late(), [`/repos/${REPO}/issues/10/comments`]: [owner('Decision: approve', at)], [`/repos/${REPO}/issues/7/comments`]: [owner('Decision: approve #10', at)] };
+    const [refusal] = await judge(github({ files: [modified('.githooks/pre-push')], over }), REPO, 1, OWNERS, [], 'main', undefined, 7);
+    // The batch answer is listed after the slice's own comments.
+    assert.match(refusal.message, /as it stood when Owner's batch answer on the Approvals issue, #7, settled slice #10 \(2026-01-04T00:00:00Z\)/);
+  });
+
+  test("reads an agent's proposals past comments of no user or no proposal, and their 👍 past reactions of no user", async () => {
+    const proposed = '2026-01-03T12:00:00Z';
+    const proposal = { id: 5, user: { login: 'AthyaBot' }, body: 'Proposal: add #10 (x) to work item #9.', created_at: proposed, updated_at: proposed };
+    const over = (reactions, extra = {}) => ({
+      ...late(),
+      [`/repos/${REPO}/issues/10/comments`]: [{ id: 3, user: null, body: 'x', created_at: proposed, updated_at: proposed }, { id: 4, user: { login: 'AthyaBot' }, body: 'no proposal', created_at: proposed, updated_at: proposed }, { ...proposal, ...extra }],
+      [`/repos/${REPO}/issues/comments/5/reactions`]: reactions,
+    });
+    const thumb = (at, user = { login: 'Owner' }) => ({ user, content: '+1', created_at: at });
+    // A 👍 at the proposal's own moment counts; one at the moment the slice joined, or of no user, does not.
+    assert.deepEqual(await settledBy(over([thumb(proposed)]), ['AthyaBot']), []);
+    for (const reactions of [[thumb('2026-01-03T00:00:00Z')], [thumb('2026-01-04T00:00:00Z', null)]]) {
+      assert.match((await settledBy(over(reactions), ['AthyaBot']))[0]?.message ?? '', /nor reacted 👍 to an agent's proposal for it/, JSON.stringify(reactions));
+    }
+    // On an edited proposal, a 👍 after the edit counts, and one at the edit's moment does not.
+    const edited = '2026-01-04T00:00:00Z';
+    assert.deepEqual(await settledBy(over([thumb('2026-01-05T00:00:00Z')], { updated_at: edited }), ['AthyaBot']), []);
+    assert.match((await settledBy(over([thumb(edited)], { updated_at: edited }), ['AthyaBot']))[0]?.message ?? '', /nor reacted 👍/);
+  });
+
+  test("asks the owner for a 👍 on the proposal the agent will post, where there is none yet, and for a Decision where no agent is named", async () => {
+    const [none] = await settledBy(late(), ['AthyaBot']);
+    assert.match(none.message, /have Owner react 👍 to a `Proposal:` for slice #10 that the agent posts on https:\/\/github\.com\/o\/r\/issues\/10, or write a `Decision:` there/);
+    const [no] = await judge(github({ files: [modified('.githooks/pre-push')], over: late() }), REPO, 1, OWNERS, []);
+    assert.match(no.message, /have Owner write a `Decision:` on slice #10, https:\/\/github\.com\/o\/r\/issues\/10\b/);
+    assert.ok(!no.message.includes('Proposal:'), no.message);
+  });
+
+  test("judges a Mergify draft's slice body through GitHub's GraphQL API, as the pull request it tests", async () => {
+    const draft = { title: 'merge queue: checking #2 on main (634865a)', body: 'x', user: { login: 'mergify[bot]', type: 'Bot' }, head: { sha: 'h', ref: 'mergify/merge-queue/1', repo: { full_name: REPO } } };
+    const over = { [`/repos/${REPO}/pulls/2`]: { title: '✨ feat(x): y', body: 'Slice: #10', user: { login: 'AthyaBot', type: 'User' } } };
+    assert.deepEqual(await judge(github({ files: [modified('.githooks/pre-push')], pull: draft, body: '**Guards:** `.githooks/`', over }), REPO, 1, OWNERS, []), []);
+  });
+
+  test("exempts Dependabot's sha moves only where every file is modified with a diff GitHub shows, and reads a pull request of no user", async () => {
+    const move = `@@ -1 +1 @@\n-      - uses: actions/checkout@${SHA_A} # v7.0.0\n+      - uses: actions/checkout@${SHA_B} # v7.0.1`;
+    const bot = { user: { login: 'dependabot[bot]' } };
+    assert.deepEqual(await judge(github({ files: [modified('.github/workflows/ci.yml', move)], contents: ciContents(), pull: bot, body: 'none' }), REPO, 1, OWNERS, []), []);
+    for (const [why, extra] of [
+      ['added', [{ filename: '.github/workflows/new.yml', status: 'added', patch: move }]],
+      ['with no diff shown', [{ filename: '.github/workflows/other.yml', status: 'modified' }]],
+    ]) {
+      const refusals = await judge(github({ files: [modified('.github/workflows/ci.yml', move), ...extra], contents: ciContents(), pull: bot, body: 'none' }), REPO, 1, OWNERS, []);
+      assert.ok(refusals.some((refusal) => refusal.file === '.github/workflows/ci.yml'), `${why}: ${JSON.stringify(refusals)}`);
+    }
+    assert.equal((await judge(github({ files: [modified('.githooks/pre-push')], pull: { user: null }, body: 'none' }), REPO, 1, OWNERS, [])).length, 1);
+  });
+
+  test('exempts onboard only where every file moves to its release or changes nothing else', async () => {
+    const mover = (path) => modified(path, '@@ -1 +1 @@\n-x 0.6.16\n+x 0.6.17');
+    const COMMIT = 'd'.repeat(40);
+    const over = { [`/repos/${NIYAM}/git/ref/tags/v0.6.17`]: { object: { type: 'commit', sha: COMMIT } }, [`/repos/${NIYAM}/compare/main...${COMMIT}`]: { status: 'behind' } };
+    const pull = { title: '🔧 chore(niyam): onboard at v0.6.17' };
+    const swap = modified('.github/niyam/cloud-setup.sh', `@@ -1 +1 @@\n-x ${'1'.repeat(64)}\n+x ${'2'.repeat(64)}`);
+    assert.deepEqual(await judge(github({ files: [mover('.github/niyam.json'), swap], body: 'none', pull, over }), REPO, 1, OWNERS, []), []);
+    const more = [mover('.github/niyam.json'), mover('.github/niyam/cloud-setup.sh'), modified('.githooks/pre-push')];
+    assert.ok((await judge(github({ files: more, body: 'none', pull, over }), REPO, 1, OWNERS, [])).length > 0);
+    const added = [mover('.github/niyam.json'), mover('.github/niyam/cloud-setup.sh'), { filename: '.githooks/new', status: 'added', patch: '@@ -0,0 +1 @@\n+x' }];
+    assert.ok((await judge(github({ files: added, body: 'none', pull, over }), REPO, 1, OWNERS, [])).length > 0);
+  });
+
+  test("reads the ruleset's required checks once, from its required-checks rules alone, whatever they hold", async () => {
+    const two = ['a', 'b'].map((name) => modified(`.github/workflows/${name}.yml`));
+    const contents = Object.fromEntries(['a', 'b'].flatMap((name) => [[`.github/workflows/${name}.yml@h`, WORKFLOW([[name]])], [`.github/workflows/${name}.yml@m`, WORKFLOW([[name]])]]));
+    const gh = github({ files: two, contents, body: '**Guards:** `.github/workflows/`' });
+    assert.deepEqual(await judge(gh, REPO, 1, OWNERS, []), []);
+    assert.equal(gh.calls.filter((call) => call.startsWith(`/repos/${REPO}/rules/branches/`)).length, 1);
+    const added = [{ filename: '.github/workflows/new.yml', status: 'added', patch: '@@ -0,0 +1 @@\n+x' }];
+    for (const rules of [
+      [{ type: 'pull_request', parameters: { required_status_checks: [{ context: 'Lint' }] } }],
+      [{ type: 'required_status_checks' }],
+      [{ type: 'required_status_checks', parameters: {} }],
+    ]) {
+      const one = github({ files: added, contents: { '.github/workflows/new.yml@h': WORKFLOW([['lint', 'Lint']]) }, body: '**Guards:** `.github/workflows/`', over: { [`/repos/${REPO}/rules/branches/main`]: rules } });
+      assert.deepEqual(await judge(one, REPO, 1, OWNERS, []), [], JSON.stringify(rules));
+    }
+  });
+
+  test("names a file by its new path alone where it has no old one, a folder of the repository's own included", async () => {
+    assert.deepEqual(await judge(github({ files: [modified('src/a.ts')] }), REPO, 1, OWNERS, ['lint/']), []);
+    assert.equal((await judge(github({ files: [modified('lint/a.ts')] }), REPO, 1, OWNERS, ['lint/'])).length, 1);
+  });
+
+  test('reads package.json at the head only where the pull request leaves it there', async () => {
+    for (const file of [{ filename: 'package.json', status: 'removed' }, { filename: 'other.json', previous_filename: 'package.json', status: 'renamed' }]) {
+      const gh = github({ files: [file], contents: { 'package.json@m': '{"scripts":{}}' }, body: '**Guards:** `package.json`' });
+      await judge(gh, REPO, 1, OWNERS, []);
+      assert.ok(!gh.calls.some((call) => call.includes('/contents/package.json?ref=h')), `${file.status}: ${gh.calls.join('\n')}`);
+    }
+  });
+
+  test('reads a workflow at the merge base only where it was one there, and at the default branch only where it pins the Guard', async () => {
+    const job = WORKFLOW([['check', 'Typecheck, test, build']]);
+    const added = github({ files: [{ filename: '.github/workflows/new.yml', status: 'added', patch: '@@ -0,0 +1 @@\n+x' }], contents: { '.github/workflows/new.yml@h': WORKFLOW([['other']]) }, body: '**Guards:** `.github/`' });
+    assert.deepEqual(await judge(added, REPO, 1, OWNERS, []), []);
+    assert.ok(!added.calls.some((call) => call.includes('ref=m') || call.includes('ref=main')), added.calls.join('\n'));
+    // Renamed from a file that was no workflow, every job it has is added.
+    const renamed = github({ files: [{ filename: '.github/workflows/ci.yml', previous_filename: 'docs/ci.yml', status: 'renamed', patch: '@@ -1 +1 @@\n-a\n+b' }], contents: { '.github/workflows/ci.yml@h': job, 'docs/ci.yml@m': job }, body: '**Guards:** `.github/`' });
+    const [refusal] = await judge(renamed, REPO, 1, OWNERS, []);
+    assert.match(refusal?.message ?? '', /adds the job "Typecheck, test, build"/);
+    // A workflow GitHub does not have at the head does not parse.
+    const [missing] = await judge(github({ files: [modified('.github/workflows/gone.yml')], body: '**Guards:** `.github/`' }), REPO, 1, OWNERS, []);
+    assert.match(missing?.message ?? '', /gone\.yml does not parse as a workflow/);
+  });
+
+  test("refuses where GitHub's GraphQL API gives no slice body, whatever it answers", async () => {
+    for (const answer of [{ status: 500, json: { data: { repository: { issue: { body: '**Guards:** `.github/`', createdAt: '2026-01-01T00:00:00Z', lastEditedAt: null, userContentEdits: { totalCount: 0, nodes: [] } } } } } }, { status: 200, json: null }, { status: 200, json: {} }, { status: 200, json: { data: {} } }]) {
+      const [refusal] = await judge(github({ files, contents: ciContents(), over: { '/graphql': answer } }), REPO, 1, OWNERS, []);
+      assert.match(refusal?.message ?? '', new RegExp(`GitHub's GraphQL API did not give slice #10's body revisions \\(HTTP ${answer.status}\\)`), JSON.stringify(answer));
+    }
+  });
+});
+
+describe('main, at its edges (#632)', () => {
+  const output = () => {
+    const lines = [];
+    return { lines, log: (line) => lines.push(['log', line]), error: (line) => lines.push(['error', line]) };
+  };
+  const env = { REPO, PR: '1', GH_TOKEN: 'x', GITHUB_EVENT_NAME: 'pull_request_target' };
+  const settings = { '.github/niyam.json@main': JSON.stringify({ owner: 'Owner' }) };
+
+  test('takes a repository name of any width, and nothing around it', async () => {
+    for (const repo of ['ab/cd', 'o.x/r-y_z']) {
+      const out = output();
+      const gh = github({ files: [modified('src/a.ts')], contents: settings });
+      const get = gh.get;
+      gh.get = (path, options) => get(path.replace(`/repos/${repo}`, `/repos/${REPO}`), options);
+      assert.equal(await main({ ...env, REPO: repo }, out, gh), 0, `${repo}: ${JSON.stringify(out.lines)}`);
+    }
+    for (const repo of ['x y/z', 'o/r x']) {
+      const out = output();
+      assert.equal(await main({ ...env, REPO: repo }, out, github()), 2, repo);
+    }
+  });
+
+  test('needs no token where it is given its GitHub', async () => {
+    const out = output();
+    assert.equal(await main({ ...env, GH_TOKEN: undefined }, out, github({ files: [modified('src/a.ts')], contents: settings })), 0, JSON.stringify(out.lines));
+  });
+
+  test("names the event it was run by, or that none was given", async () => {
+    for (const [event, said] of [
+      ['push', 'push'],
+      [undefined, 'not given'],
+    ]) {
+      const out = output();
+      assert.equal(await main({ ...env, GITHUB_EVENT_NAME: event }, out, github()), 1);
+      assert.deepEqual(out.lines, [
+        [
+          'error',
+          `::error::Guard runs only on pull_request_target, so that GitHub runs its caller from the default branch, never the pull request; this run's event is ${said}. Call it from a workflow run by pull_request_target alone, as niyam onboard writes it.`,
+        ],
+      ]);
+    }
+  });
+
+  test("asks GitHub's API at the address Actions gives, else GitHub's own, with the token", async (t) => {
+    for (const [url, api] of [
+      [undefined, 'https://api.github.com'],
+      ['', 'https://api.github.com'],
+      ['https://ghe.example/api/v3', 'https://ghe.example/api/v3'],
+    ]) {
+      const asked = [];
+      const fetched = t.mock.method(globalThis, 'fetch', async (address, init) => {
+        asked.push([address, init.headers.authorization]);
+        return { status: 404, text: async () => '{"message":"Not Found"}' };
+      });
+      const out = output();
+      assert.equal(await main({ ...env, GITHUB_API_URL: url }, out), 1);
+      assert.deepEqual(asked, [[`${api}/repos/${REPO}`, 'Bearer x']], String(url));
+      fetched.mock.restore();
+    }
+  });
+
+  test('says GitHub named no default branch where it named none, or an empty one', async () => {
+    for (const repository of [{}, { default_branch: '' }, { default_branch: 7 }]) {
+      const out = output();
+      assert.equal(await main(env, out, github({ contents: settings, over: { [`/repos/${REPO}`]: repository } })), 1);
+      assert.deepEqual(out.lines, [['error', '::error::Guard could not judge this pull request: GitHub named no default branch for o/r. Run Guard again once GitHub answers.']], JSON.stringify(repository));
+    }
+  });
+
+  test('entry exits with main’s code run as the file, and does nothing imported', async () => {
+    const url = new URL('./guard.mjs', import.meta.url).href;
+    const exits = [];
+    await entry(['node', fileURLToPath(url)], url, async () => 3, (code) => exits.push(code));
+    assert.deepEqual(exits, [3]);
+    const never = () => assert.fail('nothing runs on import');
+    await entry(['node', '/repo/scripts/other.mjs'], url, never, never);
+    await entry(['node'], url, never, never);
   });
 });
 
