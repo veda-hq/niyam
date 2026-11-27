@@ -489,11 +489,17 @@ export async function readChecks(sys: Sys, token: string, slug: string, head: st
   return { runs, statuses };
 }
 
-/** The newest run of each name and app: the one that decides, as GitHub takes it. Run ids grow with time. */
+/** A check's key by its app and name: `<app id>/<name>`, or `/<name>` with no app. */
+const keyOf = (app: number | null | undefined, name: string): string => `${app ?? ''}/${name}`;
+
+/**
+ * The newest run of each name and app, by its key: the one that decides, as GitHub takes it. Run ids grow with time.
+ * A run listed twice, as a page can shift while it is read, keeps its first listing.
+ */
 export function newestRuns(runs: readonly CheckRun[]): Map<string, CheckRun> {
   const newest = new Map<string, CheckRun>();
   for (const run of runs) {
-    const key = `${run.app ?? ''}/${run.name}`;
+    const key = keyOf(run.app, run.name);
     if ((newest.get(key)?.id ?? 0) < run.id) newest.set(key, run);
   }
   return newest;
@@ -523,8 +529,9 @@ export async function ciSignals(sys: Sys, token: string, slug: string, head: str
       const lines = log.status === 200 && log.text ? excerpt(log.text) : '';
       if (lines) body = lines;
     }
-    const replaced = newest.get(`${run.app ?? ''}/${run.name}`) as CheckRun;
-    const superseded = replaced.id !== run.id && replaced.status === 'completed' && PASSED.has(replaced.conclusion as string);
+    // This run failed, so a newest run of its key that passed is another one.
+    const replaced = newest.get(keyOf(run.app, run.name)) as CheckRun;
+    const superseded = replaced.status === 'completed' && PASSED.has(replaced.conclusion as string);
     signals.push({ source: 'ci-failure', check: run.name, file: null, line: null, body, failureType: failureType(body), ...(superseded ? { superseded: true as const } : {}) });
   }
   for (const status of checks.statuses) {
@@ -565,7 +572,7 @@ export async function readRules(sys: Sys, token: string, slug: string, base: str
     for (const check of checks as ({ context?: unknown; integration_id?: unknown } | null)[]) {
       if (typeof check?.context !== 'string' || !check.context) return { unread: `a required_status_checks rule on ${base} names a check with no name` };
       const app = isId(check.integration_id) ? check.integration_id : undefined;
-      required.set(`${app ?? ''}/${check.context}`, { context: check.context, ...(app === undefined ? {} : { app }) });
+      required.set(keyOf(app, check.context), { context: check.context, ...(app === undefined ? {} : { app }) });
     }
   }
   return { required: [...required.values()] };
@@ -614,18 +621,20 @@ export function judge(checks: Checks, rules: Rules, mergeable: string | null, mi
   const minimum = named.length ? 'ruleset' : minCheckRuns === undefined ? 'default' : 'settings';
   const newest = [...newestRuns(checks.runs).values()];
   const status = new Map(checks.statuses.map((one) => [one.context, one]));
-  const deciding: { name: string; state: State; conclusion: string }[] = named.length
+  const required: RequiredResult[] = [];
+  const deciding: { name: string; state: State }[] = named.length
     ? named.map(({ context, app }) => {
         const run = newest.filter((one) => one.name === context && (app === undefined || one.app === app)).sort((a, b) => b.id - a.id)[0];
         const commit = status.get(context);
         const state = run ? runState(run) : commit ? statusState(commit) : 'missing';
-        return { name: context, state, conclusion: state === 'running' ? 'pending' : run ? (run.conclusion as string) : commit ? commit.state : 'missing' };
+        required.push({ name: context, conclusion: state === 'running' ? 'pending' : run ? (run.conclusion as string) : commit ? commit.state : state });
+        return { name: context, state };
       })
-    : [...newest.map((run) => ({ name: run.name, state: runState(run), conclusion: '' })), ...checks.statuses.map((one) => ({ name: one.context, state: statusState(one), conclusion: '' }))];
-  const required = named.length ? deciding.map(({ name, conclusion }) => ({ name, conclusion })) : [];
-  const failing = deciding.filter((one) => one.state === 'fail').map((one) => one.name);
-  const missing = deciding.filter((one) => one.state === 'missing').map((one) => one.name);
-  const running = [...new Set([...checks.runs.filter((run) => run.status !== 'completed').map((run) => run.name), ...checks.statuses.filter((one) => one.state === 'pending').map((one) => one.context)])];
+    : [...newest.map((run) => ({ name: run.name, state: runState(run) })), ...checks.statuses.map((one) => ({ name: one.context, state: statusState(one) }))];
+  const withState = (state: State): string[] => deciding.filter((one) => one.state === state).map((one) => one.name);
+  const failing = withState('fail');
+  const missing = withState('missing');
+  const running = [...new Set([...checks.runs.filter((run) => runState(run) === 'running').map((run) => run.name), ...checks.statuses.filter((one) => statusState(one) === 'running').map((one) => one.context)])];
   const floor = named.length ? 0 : (minCheckRuns ?? 1);
   const counted = checks.runs.filter((run) => run.status === 'completed' && run.conclusion !== 'skipped' && (minimum !== 'default' || run.actions)).length;
   const verdict: Verdict =
@@ -637,18 +646,17 @@ export function judge(checks: Checks, rules: Rules, mergeable: string | null, mi
           ? 'failed'
           : running.length || mergeable === null || mergeable === 'unknown'
             ? 'pending'
-            : missing.length || counted < floor
+            : // Every deciding check has finished and none failed: one that did not pass is missing.
+              !deciding.every((one) => one.state === 'pass') || counted < floor
               ? 'short'
               : 'green';
-  return { verdict, required, minimum, ...('unread' in rules ? { reason: rules.unread } : {}), failing, running, missing, counted, floor };
+  return { verdict, required, minimum, ...only('reason', 'unread' in rules ? rules.unread : undefined), failing, running, missing, counted, floor };
 }
 
 /** The line standard error gets for a verdict that is not green, naming what failed, is missing or still runs. */
 export function verdictLine(pr: number, head: string, judged: Judged): string | undefined {
   const names = (list: readonly string[]): string => list.map((name) => `"${name}"`).join(', ');
   switch (judged.verdict) {
-    case 'green':
-      return undefined;
     case 'unjudged':
       return `⚠ CI on #${pr} is unjudged: the base branch's required checks cannot be read (${judged.reason as string}), so it is never read as green`;
     case 'conflicted':
@@ -664,6 +672,9 @@ export function verdictLine(pr: number, head: string, judged: Judged): string | 
       return judged.minimum === 'default'
         ? `⚠ CI on #${pr} is short: no GitHub Actions run that was not skipped is on ${head}, and the repository names no required checks`
         : `⚠ CI on #${pr} is short: ${judged.counted} of the ${judged.floor} check runs "minCheckRuns" asks for finished on ${head} without being skipped`;
+    default:
+      // Green needs no line.
+      return undefined;
   }
 }
 
@@ -784,7 +795,7 @@ export async function prSignals(sys: Sys, io: Output, args: readonly string[]): 
     verdict: judged.verdict,
     required: judged.required,
     minimum: judged.minimum,
-    ...(judged.reason === undefined ? {} : { reason: judged.reason }),
+    ...only('reason', judged.reason),
   };
   const line = verdictLine(pr, pull.head, judged);
   if (line) io.err(line);

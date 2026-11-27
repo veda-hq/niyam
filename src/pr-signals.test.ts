@@ -1167,6 +1167,7 @@ describe('judge', () => {
     assert.equal(verdictOf([cubic, runOf(3, 'test', 'success')], NONE, 'clean', 2), 'green');
     assert.equal(verdictOf([cubic], NONE, 'clean', 1), 'green');
     assert.equal(verdictOf([cubic, runOf(3, 'test', 'success')], NONE, 'clean', 3), 'short');
+    assert.equal(judge(checksOf([cubic, runOf(4, 'test', 'success', { status: 'in_progress' })]), NONE, 'clean', 2).counted, 1);
     assert.equal(judge(checksOf([runOf(1, 'ci', 'success')]), CI, 'clean', 5).minimum, 'ruleset');
     assert.equal(verdictOf([runOf(1, 'ci', 'success')], CI, 'clean', 5), 'green');
   });
@@ -1225,14 +1226,14 @@ describe('readChecks and newestRuns', () => {
     });
   });
 
-  it('keeps the run with the highest id of each name and app', () => {
-    const runs = [runOf(4, 'ci', 'success'), runOf(9, 'ci', 'failure'), runOf(6, 'ci', 'success'), runOf(2, 'ci', 'success', { app: 9 }), runOf(3, 'ci', 'success', { app: null })];
+  it('keeps the run with the highest id of each name and app, and the first listing of a run listed twice', () => {
+    const runs = [runOf(4, 'ci', 'success'), runOf(9, 'ci', 'failure'), runOf(6, 'ci', 'success'), runOf(9, 'ci', 'success'), runOf(2, 'ci', 'success', { app: 9 }), runOf(3, 'ci', 'success', { app: null })];
     assert.deepEqual(
-      [...newestRuns(runs)].map(([key, run]) => [key, run.id]),
+      [...newestRuns(runs)].map(([key, run]) => [key, run.id, run.conclusion]),
       [
-        [`${ACTIONS}/ci`, 9],
-        ['9/ci', 2],
-        ['/ci', 3],
+        [`${ACTIONS}/ci`, 9, 'failure'],
+        ['9/ci', 2, 'success'],
+        ['/ci', 3, 'success'],
       ],
     );
   });
@@ -1295,11 +1296,11 @@ describe('readRules', () => {
         { type: 'pull_request', parameters: { required_approving_review_count: 0 } },
         null,
         { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: ACTIONS }, { context: 'Cubic', integration_id: 0 }, { context: 'ci', integration_id: ACTIONS }] } },
-        { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }, { context: 'deploy', integration_id: '9' }] } },
+        { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }, { context: 'deploy', integration_id: '9' }, { context: 'ci', integration_id: 9 }] } },
       ],
     });
     assert.deepEqual(await readRules(sys, 't', 'example-org/example-app', 'main'), {
-      required: [{ context: 'ci', app: ACTIONS }, { context: 'Cubic' }, { context: 'ci' }, { context: 'deploy' }],
+      required: [{ context: 'ci', app: ACTIONS }, { context: 'Cubic' }, { context: 'ci' }, { context: 'deploy' }, { context: 'ci', app: 9 }],
     });
     assert.equal(sys.requests.at(-1)?.token, 't');
   });
