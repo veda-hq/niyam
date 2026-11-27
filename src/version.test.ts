@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
-import { isNewer, packageVersion, versionOf } from './version.ts';
+import { isNewer, majorOf, packageVersion, versionOf } from './version.ts';
+
+describe('majorOf', () => {
+  it('gives the major part of a release', () => {
+    assert.equal(majorOf('2.0.0'), 2);
+  });
+});
 
 describe('packageVersion', () => {
   it("reads this package's package.json", () => {
