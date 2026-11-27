@@ -109,6 +109,9 @@ type TimelineEvent =
   | ({ event: 'commented' } & Comment)
   | { event: 'other' };
 
+/** An addition to a work item, or a removal from it: the sub-issue is null where the token may not see which. */
+type SubIssueEvent = Extract<TimelineEvent, { sub_issue: unknown }>;
+
 interface Reaction {
   user: { login: string } | null;
   created_at: string;
@@ -384,25 +387,27 @@ async function readSlice(sys: Sys, token: string, here: string, ref: IssueRef, s
   ];
   // An addition after approval that names no issue may be this slice's. The slice is under the work item now, so it
   // was added again only after it left: the addition may be the slice's when the slice has no addition on record, or
-  // the work item records a removal that may be the slice's (naming it, or no issue) after the slice's first addition
-  // and by this one. Otherwise another issue was added, perhaps one that has left the work item since, so that no
-  // sub-issue's timeline records it (athya-hq/athya-rules#214). One that may be the slice's is put down to another
-  // sub-issue of the work item only when that one's own timeline records an addition at the same moment; any other
-  // counts as this slice's, so it owes the owner's say rather than passing.
-  // Times compare as instants (#639); one that does not parse may be anything, so it counts against the slice.
-  const first = Math.min(...mine.map((at) => instant(at) ?? Number.NEGATIVE_INFINITY));
-  const left = events.flatMap((event) =>
-    event.event === 'sub_issue_removed' && (!event.sub_issue || event.sub_issue.number === slice) ? [instant(event.created_at)] : [],
-  );
+  // the work item records a removal that may be the slice's (naming it, or no issue) after the slice's latest addition
+  // on record and by this one. Otherwise another issue was added, perhaps one that has left the work item since, so
+  // that no sub-issue's timeline records it (athya-hq/athya-rules#214). One that may be the slice's is put down to
+  // another sub-issue of the work item only when that one's own timeline records an addition at the same moment; any
+  // other counts as this slice's, so it owes the owner's say rather than passing.
+  // Times compare as instants (#639); one that does not parse may be any time, so it counts against the slice.
+  const own = mine.map((at) => instant(at));
+  const since = own.every((at) => at !== undefined) ? Math.max(...own) : Number.NEGATIVE_INFINITY;
+  const removals = events
+    .filter((event): event is SubIssueEvent => event.event === 'sub_issue_removed')
+    .filter((event) => !event.sub_issue || event.sub_issue.number === slice)
+    .map((event) => instant(event.created_at));
   const mayBeAgain = (at: string): boolean => {
     const added = instant(at);
-    return mine.length === 0 || added === undefined || left.some((removed) => removed === undefined || (removed > first && removed <= added));
+    return mine.length === 0 || added === undefined || removals.some((removed) => removed === undefined || (removed > since && removed <= added));
   };
   let hidden = events.flatMap((event) =>
     event.event === 'sub_issue_added' &&
     !event.sub_issue &&
     event.created_at > approvedAt &&
-    !mine.includes(event.created_at) &&
+    // At one of the slice's own times it is no later than the latest of them, so no removal can come between.
     mayBeAgain(event.created_at)
       ? [event.created_at]
       : [],
