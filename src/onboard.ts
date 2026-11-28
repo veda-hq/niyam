@@ -380,6 +380,15 @@ export const ARTIFACT_RULES = ['mcp__claude-artifacts__publish_version', 'mcp__c
 /** The rules that allow every tool of the artifacts server, ARTIFACT_RULES among them. */
 const ARTIFACT_SERVER_RULES = ['mcp__claude-artifacts', 'mcp__claude-artifacts__*'];
 
+/**
+ * The deny rule that keeps the artifacts server out of a session, and so
+ * denies every one of ARTIFACT_RULES: the Claude CLI does not add the server
+ * where the settings deny the built-in `Artifact` tool (its debug log says
+ * `artifact_tool_denied`, veda-hq/veda#677). Only the bare name was seen to,
+ * so `Artifact(…)`, `ArtifactData` and the like deny nothing here.
+ */
+const ARTIFACT_TOOL_DENY = 'Artifact';
+
 /** A group of `rules` a settings file needs: those its `permissions.allow` lacks, and those its `permissions.deny` overrides. */
 export interface RuleNeeds {
   /** Lacking and not denied, in their order: what onboard adds. */
@@ -415,22 +424,24 @@ function deniesTool(by: string, tool: string, bare: string): boolean {
  * Which of `rules` a settings file lacks, in their order: none lacks when
  * its `permissions.allow` allows the whole server, by one of `server`. Claude
  * Code applies deny before allow, so a rule that `permissions.deny` overrides
- * (`deniesTool`) is denied, not missing: an allow rule for it would do
- * nothing. A deny or allow that is not an array names nothing.
+ * (`deniesTool`, or exactly `whole`, which denies them all) is denied, not
+ * missing: an allow rule for it would do nothing. A deny or allow that is
+ * not an array names nothing.
  */
-function ruleNeeds(settings: unknown, rules: readonly string[], server: string[]): RuleNeeds {
+function ruleNeeds(settings: unknown, rules: readonly string[], server: string[], whole?: string): RuleNeeds {
   const permissions = (settings as { permissions?: { allow?: unknown; deny?: unknown } } | null)?.permissions;
   // [value] keeps it only when it is an array, and flat() unwraps it, so anything else lists nothing.
   const listed = (value: unknown): string[] => [value].filter(Array.isArray).flat().filter((rule): rule is string => typeof rule === 'string');
   const allow = listed(permissions?.allow);
   const deny = listed(permissions?.deny);
   const bare = server[0]!;
-  const deniedBy = deny.filter((by) => rules.some((rule) => deniesTool(by, rule, bare)));
-  const denied = rules.filter((rule) => deny.some((by) => deniesTool(by, rule, bare)));
+  const denies = (by: string, rule: string): boolean => by === whole || deniesTool(by, rule, bare);
+  const deniedBy = deny.filter((by) => rules.some((rule) => denies(by, rule)));
+  const denied = rules.filter((rule) => deny.some((by) => denies(by, rule)));
   if (allow.some((rule) => server.includes(rule))) return { missing: [], denied, leftOut: [], deniedBy, leftOutBy: [] };
   const lacking = rules.filter((rule) => !allow.includes(rule));
   const leftOut = lacking.filter((rule) => denied.includes(rule));
-  const leftOutBy = deniedBy.filter((by) => leftOut.some((rule) => deniesTool(by, rule, bare)));
+  const leftOutBy = deniedBy.filter((by) => leftOut.some((rule) => denies(by, rule)));
   return { missing: lacking.filter((rule) => !denied.includes(rule)), denied, leftOut, deniedBy, leftOutBy };
 }
 
@@ -439,9 +450,9 @@ export function autoFixRuleNeeds(settings: unknown): RuleNeeds {
   return ruleNeeds(settings, AUTO_FIX_RULES, PR_SERVER_RULES);
 }
 
-/** Which of ARTIFACT_RULES a settings file lacks, and which its deny rules override. */
+/** Which of ARTIFACT_RULES a settings file lacks, and which its deny rules override, a deny of `Artifact` among them. */
 export function artifactRuleNeeds(settings: unknown): RuleNeeds {
-  return ruleNeeds(settings, ARTIFACT_RULES, ARTIFACT_SERVER_RULES);
+  return ruleNeeds(settings, ARTIFACT_RULES, ARTIFACT_SERVER_RULES, ARTIFACT_TOOL_DENY);
 }
 
 /**
