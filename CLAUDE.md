@@ -2,6 +2,13 @@
 
 @node_modules/@veda-hq/sarathi/skills/working-rules/SKILL.md
 
+## Pages
+
+`.claude/settings.json` denies the built-in `Artifact` tool, so sessions here
+start without the claude-artifacts tools. Publish, read and answer the page
+an ask to the owner links with `pnpm exec sarathi page` (its usage is in
+`node_modules/@veda-hq/sarathi/README.md`, "Pages").
+
 ## Merging
 
 Right after `gh pr create`, turn on auto-merge for every pull request,

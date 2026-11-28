@@ -74,10 +74,11 @@
       "Bash(niyam review-thread *)",
       "mcp__ccd_pr__bind_pr",
       "mcp__ccd_pr__get_status",
-      "mcp__ccd_pr__set_monitor",
-      "mcp__claude-artifacts__publish_version",
-      "mcp__claude-artifacts__publish_files",
-      "mcp__claude-artifacts__edit_version"
+      "mcp__ccd_pr__set_monitor"
+    ],
+    "deny": [
+      "Artifact",
+      "mcp__claude-artifacts"
     ]
   }
 }
