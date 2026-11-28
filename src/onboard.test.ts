@@ -18,7 +18,7 @@ import { pathsFor, sessionScript } from './agent.ts';
 import { FEATURES } from './features.ts';
 import { BY_HAND_WIDTH, wrap } from './layout.ts';
 import { packageVersion } from './version.ts';
-import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_READ_ONLY_IF, READ_ONLY_IF, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, PRODUCT, autoFixRuleNeeds, boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, runsSarathiFor, sarathiRunner, workflow, workflowPins, workflowUpdate } from './onboard.ts';
+import { GUARD_COMMAND, HOOK_COMMAND, HOOKS_PATH, OLDER_GUARD_COMMANDS, OLDER_READ_ONLY_IF, READ_ONLY_IF, OLDER_HOOK_COMMANDS, OLDER_PRE_PUSH_HOOKS, PRE_PUSH_HOOK, ARTIFACT_RULES, AUTO_FIX_RULES, OLDER_REVIEW_THREAD_RULE, REVIEW_THREAD_RULE, SARATHI_HANDLERS, SARATHI_PATH, SETUP_FIRST, WORKFLOW_PATH, PRODUCT, artifactRuleNeeds, autoFixRuleNeeds,boardAppSteps, claudeSettings, jobsWithoutLibrary, onboard, onboardArgs, prePushHook, runsSarathiFor, sarathiRunner, workflow, workflowPins, workflowUpdate } from './onboard.ts';
 import { BASE_ENV } from './agent.ts';
 import {
   BASE_ENV_069,
@@ -858,7 +858,7 @@ describe('onboard', () => {
   it('adds no artifact rule the file denies, by server or by tool, and says so instead', () => {
     for (const server of ['mcp__claude-artifacts', 'mcp__claude-artifacts__*']) {
       const before = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['Artifact', server] } });
-      assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [], denied: [`artifact rules left out: .claude/settings.json denies ${server}`] }, server);
+      assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [], denied: [`artifact rules left out: .claude/settings.json denies Artifact, ${server}`] }, server);
     }
     const one = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['mcp__claude-artifacts__edit_version'] } }));
     assert.deepEqual(JSON.parse(one.text).permissions.allow, [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES, 'mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__publish_files']);
@@ -883,6 +883,33 @@ describe('onboard', () => {
       assert.deepEqual(JSON.parse(near.text).permissions.allow, ALLOW, JSON.stringify(deny));
       assert.equal(near.denied, undefined);
     }
+  });
+
+  it('adds no artifact rule where the file denies the built-in Artifact tool, which keeps the server out', () => {
+    const before = JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: ['Artifact'] } });
+    assert.deepEqual(claudeSettings(before), { text: before, changes: [], labels: [], denied: ['artifact rules left out: .claude/settings.json denies Artifact'] });
+    assert.deepEqual(artifactRuleNeeds({ permissions: { allow: ['mcp__claude-artifacts__publish_files'], deny: ['Bash(rm *)', 'Artifact'] } }), {
+      missing: [],
+      denied: [...ARTIFACT_RULES],
+      leftOut: ['mcp__claude-artifacts__publish_version', 'mcp__claude-artifacts__edit_version'],
+      deniedBy: ['Artifact'],
+      leftOutBy: ['Artifact'],
+    }, 'one rule allowed already: the other two left out');
+    assert.deepEqual(artifactRuleNeeds({ permissions: { allow: ['mcp__claude-artifacts'], deny: ['Artifact'] } }), {
+      missing: [],
+      denied: [...ARTIFACT_RULES],
+      leftOut: [],
+      deniedBy: ['Artifact'],
+      leftOutBy: [],
+    }, 'the whole server allowed: nothing lacks, and nothing is left out');
+    // A deny of Artifact with a specifier, or of another built-in, keeps the server, so it denies nothing here.
+    for (const near of ['Artifact(*)', 'ArtifactData', 'ArtifactComments', 'artifact', 'Artifacts']) {
+      const kept = claudeSettings(JSON.stringify({ ...CLAUDE, permissions: { allow: [REVIEW_THREAD_RULE, ...AUTO_FIX_RULES], deny: [near] } }));
+      assert.deepEqual(JSON.parse(kept.text).permissions.allow, ALLOW, near);
+      assert.equal(kept.denied, undefined, near);
+    }
+    // Artifact denies none of the Auto-fix rules.
+    assert.deepEqual(autoFixRuleNeeds({ permissions: { deny: ['Artifact'] } }), { missing: [...AUTO_FIX_RULES], denied: [], leftOut: [], deniedBy: [], leftOutBy: [] });
   });
 
   it('adds no Auto-fix rule the file denies, and says each group it leaves out', () => {

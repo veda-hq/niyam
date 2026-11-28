@@ -197,7 +197,11 @@ server), and `doctor` warns (`▲`) about each one an onboarded repo's file
 lacks. A repo that publishes its pages another way may deny the artifacts
 server on purpose. Where the file's `permissions.deny` matches one of the
 three, as for the Auto-fix rules above, `onboard` adds no rule for it and
-its plan says so, and `doctor` marks it denied on purpose (`✓`). A new page is private to its owner; a republish to a page already
+its plan says so, and `doctor` marks it denied on purpose (`✓`). A deny of
+the built-in `Artifact` tool matches all three: the Claude CLI then never
+adds the artifacts server to a session (`artifact_tool_denied`,
+veda-hq/veda#677), so `Artifact` alone is enough. Only the bare name
+counts, not `Artifact(…)` or `ArtifactData`. A new page is private to its owner; a republish to a page already
 shared changes what its readers see, with no prompt. A body the guard cannot read in full
 (a variable, a command substitution other than `cat`) is judged by what it
 spells out; where that asks the owner, or the body opens with the unknown

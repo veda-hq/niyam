@@ -245,11 +245,27 @@ describe('doctor', () => {
       assert.deepEqual(out.slice(-6), [
         '│',
         '◇  This repo',
-        `✓  .claude/settings.json denies ${server} on purpose, so agent sessions do not publish pages`,
+        `✓  .claude/settings.json denies Artifact, ${server} on purpose, so agent sessions do not publish pages`,
         CALLER_OK,
         '│',
         '└  All good',
       ]);
+    }
+    // The built-in Artifact tool alone, which keeps the server out of the session: on purpose, all good.
+    settings([...AUTO_FIX_RULES], ['Artifact']);
+    const builtIn = await check(sys);
+    assert.equal(builtIn.code, 0);
+    assert.deepEqual(marked(builtIn.out, '▲'), []);
+    assert.deepEqual(builtIn.out.filter((line) => line.includes(' denies ')), ['✓  .claude/settings.json denies Artifact on purpose, so agent sessions do not publish pages']);
+    assert.equal(builtIn.out.at(-1), '└  All good');
+    // Artifact with a specifier, or another built-in, denies nothing.
+    for (const near of ['Artifact(*)', 'ArtifactData']) {
+      settings([...AUTO_FIX_RULES], [near]);
+      const kept = (await check(sys)).out;
+      assert.deepEqual(marked(kept, '▲'), [
+        `▲  .claude/settings.json does not allow ${ARTIFACT_RULES.join(', ')}, so agent sessions cannot publish the page an ask to the owner links → niyam onboard again`,
+      ], near);
+      assert.deepEqual(kept.filter((line) => line.includes(' denies ')), [], near);
     }
     // One tool denied: the others still missing are to fix.
     settings([...AUTO_FIX_RULES], ['mcp__claude-artifacts__edit_version']);
